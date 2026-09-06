@@ -3,6 +3,7 @@ import type {
   AgentRegistration,
   AgentRun,
   CallAttempt,
+  CallOutcome,
   CallbackRequest,
   CheckpointResult,
   Escalation,
@@ -15,6 +16,17 @@ import type { ControlPlaneStore } from "./store.js";
 
 export interface Clock {
   now(): Date;
+}
+
+export interface ProviderWebhookInput {
+  eventId: string;
+  providerCallId: string;
+  outcome: CallOutcome;
+}
+
+export interface ProviderWebhookResult {
+  duplicate: boolean;
+  callAttempt: CallAttempt;
 }
 
 const systemClock: Clock = { now: () => new Date() };
@@ -109,29 +121,12 @@ export class ControlPlane {
 
     let attempt = this.requireCallAttempt(escalation.callAttemptId);
     if (attempt.status === "ambiguous") attempt = await this.recoverCallAttempt(attempt.id);
-    if (!attempt.providerCallId) return escalation;
+    if (!attempt.providerCallId) return this.requireEscalation(escalationId);
 
     const outcome = await this.calls.getOutcome(attempt.providerCallId);
-    if (!outcome) return escalation;
-    this.finishAttempt(attempt, outcome.status);
-
-    if (outcome.status === "failed" || outcome.status === "ambiguous") {
-      const failed = { ...escalation, status: "failed" as const, updatedAt: this.isoNow() };
-      this.store.escalations.set(failed.id, failed);
-      return failed;
-    }
-
-    const decision: OwnerDecision = {
-      id: randomUUID(),
-      escalationId,
-      answer: outcome.answer ?? "",
-      structured: outcome.structured,
-      createdAt: this.isoNow(),
-    };
-    this.store.decisions.set(decision.id, decision);
-    const resolved = { ...escalation, status: "resolved" as const, decisionId: decision.id, updatedAt: this.isoNow() };
-    this.store.escalations.set(resolved.id, resolved);
-    return resolved;
+    if (!outcome) return this.requireEscalation(escalationId);
+    this.applyTerminalOutcome(attempt, outcome);
+    return this.requireEscalation(escalationId);
   }
 
   async requestOwnerCallback(input: CallbackRequest): Promise<CallAttempt> {
@@ -167,11 +162,23 @@ export class ControlPlane {
 
     const outcome = await this.calls.getOutcome(attempt.providerCallId);
     if (!outcome) return attempt;
-    const finished = this.finishAttempt(attempt, outcome.status);
-    if (outcome.status === "completed") {
-      for (const text of outcome.instructions ?? []) this.enqueueInstruction(attempt.correlationId, text, "callback");
+    return this.applyTerminalOutcome(attempt, outcome);
+  }
+
+  ingestProviderWebhook(input: ProviderWebhookInput): ProviderWebhookResult {
+    if (!input.eventId.trim()) throw new Error("Provider webhook event id is required");
+    if (!input.providerCallId.trim()) throw new Error("Provider call id is required");
+
+    const attempt = [...this.store.callAttempts.values()].find((item) => item.providerCallId === input.providerCallId);
+    if (!attempt) throw new Error(`Unknown provider call: ${input.providerCallId}`);
+
+    if (this.store.processedWebhookEventIds.has(input.eventId)) {
+      return { duplicate: true, callAttempt: this.requireCallAttempt(attempt.id) };
     }
-    return finished;
+
+    const callAttempt = this.applyTerminalOutcome(attempt, input.outcome);
+    this.store.processedWebhookEventIds.add(input.eventId);
+    return { duplicate: false, callAttempt };
   }
 
   async recoverCallAttempt(callAttemptId: string): Promise<CallAttempt> {
@@ -241,6 +248,48 @@ export class ControlPlane {
   getDecision(escalationId: string): OwnerDecision | undefined {
     const escalation = this.requireEscalation(escalationId);
     return escalation.decisionId ? this.store.decisions.get(escalation.decisionId) : undefined;
+  }
+
+  private applyTerminalOutcome(attempt: CallAttempt, outcome: CallOutcome): CallAttempt {
+    if (attempt.status === "completed" || attempt.status === "failed") return attempt;
+    if (outcome.status === "ambiguous") {
+      return this.finishAttempt(attempt, "ambiguous");
+    }
+
+    const finished = this.finishAttempt(attempt, outcome.status);
+
+    if (attempt.purpose === "owner_decision") {
+      const escalation = this.requireEscalation(attempt.correlationId);
+      if (["resolved", "expired", "failed"].includes(escalation.status)) return finished;
+
+      if (outcome.status === "failed") {
+        const failed = { ...escalation, status: "failed" as const, updatedAt: this.isoNow() };
+        this.store.escalations.set(failed.id, failed);
+        return finished;
+      }
+
+      const decision: OwnerDecision = {
+        id: randomUUID(),
+        escalationId: escalation.id,
+        answer: outcome.answer ?? "",
+        structured: outcome.structured,
+        createdAt: this.isoNow(),
+      };
+      this.store.decisions.set(decision.id, decision);
+      const resolved = {
+        ...escalation,
+        status: "resolved" as const,
+        decisionId: decision.id,
+        updatedAt: this.isoNow(),
+      };
+      this.store.escalations.set(resolved.id, resolved);
+      return finished;
+    }
+
+    if (outcome.status === "completed") {
+      for (const text of outcome.instructions ?? []) this.enqueueInstruction(attempt.correlationId, text, "callback");
+    }
+    return finished;
   }
 
   private async startCall(
