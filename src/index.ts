@@ -7,4 +7,5 @@ export * from "./calle-webhook.js";
 export * from "./control-plane.js";
 export * from "./http-server.js";
 export * from "./client.js";
+export * from "./mcp-server.js";
 export * from "./server.js";
