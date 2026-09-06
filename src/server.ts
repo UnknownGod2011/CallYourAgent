@@ -4,6 +4,7 @@ import { CallPolicy, type CallPolicyConfig } from "./call-policy.js";
 import { CalleCallProvider } from "./calle-provider.js";
 import { createControlPlaneHttpServer } from "./http-server.js";
 import type { EscalationPriority } from "./domain.js";
+import { LifecycleManager, type LifecycleRecoveryConfig } from "./lifecycle.js";
 import { InMemoryControlPlaneStore } from "./store.js";
 import { SqliteControlPlaneStore } from "./sqlite-store.js";
 
@@ -34,12 +35,13 @@ export function buildRuntimeFromEnv(env: NodeJS.ProcessEnv = process.env) {
 
   const callPolicy = new CallPolicy(callPolicyConfigFromEnv(env));
   const controlPlane = new ControlPlane(store, provider, undefined, callPolicy);
+  const lifecycle = new LifecycleManager(controlPlane, store, undefined, lifecycleRecoveryConfigFromEnv(env));
   const server = createControlPlaneHttpServer(controlPlane, {
     apiToken,
     calleWebhookToken: env.CYA_CALLE_WEBHOOK_TOKEN,
   });
 
-  return { server, controlPlane, provider, store };
+  return { server, controlPlane, lifecycle, provider, store };
 }
 
 export function callPolicyConfigFromEnv(env: NodeJS.ProcessEnv): CallPolicyConfig {
@@ -68,6 +70,26 @@ export function callPolicyConfigFromEnv(env: NodeJS.ProcessEnv): CallPolicyConfi
   return config;
 }
 
+export function lifecycleRecoveryConfigFromEnv(env: NodeJS.ProcessEnv): LifecycleRecoveryConfig {
+  const config: LifecycleRecoveryConfig = {};
+  if (env.CYA_MAX_AUTOMATIC_RECOVERY_ATTEMPTS) {
+    config.maxAutomaticRecoveryAttempts = nonNegativeInteger(env.CYA_MAX_AUTOMATIC_RECOVERY_ATTEMPTS, "CYA_MAX_AUTOMATIC_RECOVERY_ATTEMPTS");
+  }
+  if (env.CYA_RECOVERY_BASE_BACKOFF_MS) {
+    config.baseBackoffMs = positiveInteger(env.CYA_RECOVERY_BASE_BACKOFF_MS, "CYA_RECOVERY_BASE_BACKOFF_MS");
+  }
+  if (env.CYA_RECOVERY_MAX_BACKOFF_MS) {
+    config.maxBackoffMs = positiveInteger(env.CYA_RECOVERY_MAX_BACKOFF_MS, "CYA_RECOVERY_MAX_BACKOFF_MS");
+  }
+  return config;
+}
+
+export function lifecycleSweepIntervalMsFromEnv(env: NodeJS.ProcessEnv): number {
+  return env.CYA_LIFECYCLE_SWEEP_INTERVAL_MS
+    ? positiveInteger(env.CYA_LIFECYCLE_SWEEP_INTERVAL_MS, "CYA_LIFECYCLE_SWEEP_INTERVAL_MS")
+    : 5_000;
+}
+
 function required(value: string | undefined, name: string): string {
   if (!value?.trim()) throw new Error(`${name} is required`);
   return value;
@@ -76,6 +98,12 @@ function required(value: string | undefined, name: string): string {
 function nonNegativeInteger(value: string, name: string): number {
   const parsed = Number(value);
   if (!Number.isInteger(parsed) || parsed < 0) throw new Error(`${name} must be a non-negative integer`);
+  return parsed;
+}
+
+function positiveInteger(value: string, name: string): number {
+  const parsed = Number(value);
+  if (!Number.isInteger(parsed) || parsed < 1) throw new Error(`${name} must be a positive integer`);
   return parsed;
 }
 
@@ -93,6 +121,13 @@ function priority(value: string, name: string): EscalationPriority {
 if (import.meta.url === `file://${process.argv[1]}`) {
   const port = Number(process.env.PORT ?? "8787");
   if (!Number.isInteger(port) || port < 1 || port > 65535) throw new Error("PORT must be a valid TCP port");
-  const { server } = buildRuntimeFromEnv();
+  const { server, lifecycle } = buildRuntimeFromEnv();
+  const intervalMs = lifecycleSweepIntervalMsFromEnv(process.env);
+  const sweepTimer = setInterval(() => {
+    void lifecycle.sweep().then((result) => {
+      if (result.errors.length > 0) console.error("CallYourAgent lifecycle sweep errors", result.errors);
+    }).catch((error) => console.error("CallYourAgent lifecycle sweep failed", error));
+  }, intervalMs);
+  sweepTimer.unref();
   server.listen(port, () => console.log(`CallYourAgent listening on :${port}`));
 }
