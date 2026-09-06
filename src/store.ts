@@ -1,6 +1,7 @@
 import type {
   AgentRegistration,
   AgentRun,
+  AuditEvent,
   CallAttempt,
   Escalation,
   OwnerDecision,
@@ -14,6 +15,7 @@ export interface ControlPlaneStore {
   decisions: Map<string, OwnerDecision>;
   instructions: Map<string, OwnerInstruction>;
   callAttempts: Map<string, CallAttempt>;
+  auditEvents: Map<string, AuditEvent>;
   escalationByIdempotencyKey: Map<string, string>;
   callbackByIdempotencyKey: Map<string, string>;
   processedWebhookEventIds: Set<string>;
@@ -32,6 +34,7 @@ export class InMemoryControlPlaneStore implements ControlPlaneStore {
   decisions = new Map<string, OwnerDecision>();
   instructions = new Map<string, OwnerInstruction>();
   callAttempts = new Map<string, CallAttempt>();
+  auditEvents = new Map<string, AuditEvent>();
   escalationByIdempotencyKey = new Map<string, string>();
   callbackByIdempotencyKey = new Map<string, string>();
   processedWebhookEventIds = new Set<string>();
