@@ -14,7 +14,40 @@ An integration needs only to be able to:
 
 A richer platform may expose these through MCP tools/hooks. A custom agent can use HTTP/SDK calls directly.
 
-## Target tool semantics
+## TypeScript HTTP client
+
+`src/client.ts` is the canonical typed client for platform adapters and custom workers. It owns bearer authentication, URL/path encoding, JSON parsing, and typed HTTP errors; it intentionally contains no agent-specific business logic.
+
+```ts
+const cya = new CallYourAgentClient({
+  baseUrl: process.env.CYA_BASE_URL!,
+  apiToken: process.env.CYA_API_TOKEN!,
+});
+
+const agent = await cya.registerAgent({ name: "worker", platform: "custom", ownerId: "owner-1" });
+const run = await cya.startRun({ agentId: agent.id, summary: "Starting work" });
+await cya.reportStatus(run.id, { summary: "Implementing feature A", currentScope: "feature-a" });
+
+const escalation = await cya.requestOwnerDecision({
+  runId: run.id,
+  scopeId: "feature-a-choice",
+  question: "Should I choose approach A or B?",
+  blocking: true,
+  idempotencyKey: "feature-a-choice-v1",
+});
+
+// Other independent scopes may continue.
+const checkpoint = await cya.checkpoint(run.id);
+```
+
+## MCP adapter
+
+`src/mcp-server.ts` is a thin stdio MCP adapter over `CallYourAgentClient`, which itself delegates to the authenticated HTTP control plane. The MCP process therefore never receives `CALLE_API_KEY`; it only needs:
+
+- `CYA_BASE_URL` — URL of the running CallYourAgent control plane;
+- `CYA_API_TOKEN` — the same trusted agent API token used by the HTTP client.
+
+The current MCP tools are:
 
 - `register_agent`
 - `start_run`
@@ -23,24 +56,55 @@ A richer platform may expose these through MCP tools/hooks. A custom agent can u
 - `get_escalation_status`
 - `checkpoint`
 - `request_owner_callback`
+- `reconcile_escalation`
+- `reconcile_callback`
 
-These names are adapter-level API names; all adapters must delegate to the same control-plane behavior.
+Build and run the stdio adapter:
+
+```bash
+npm install
+npm run build
+export CYA_BASE_URL=http://127.0.0.1:8787
+export CYA_API_TOKEN='replace-with-agent-token'
+npm run start:mcp
+```
+
+Stdout is reserved for the MCP protocol. Do not add `console.log` output to the stdio process; diagnostics belong on stderr.
+
+The adapter uses the official MCP TypeScript v2 server package. That SDK supports the current 2026-07-28 stateless protocol and legacy host negotiation, so CallYourAgent does not hand-roll MCP lifecycle compatibility.
 
 ## Claude / Claude Code
 
-Primary first external target: expose the control-plane operations as MCP tools and document a Claude Code workflow that calls `checkpoint` between meaningful work units. Hooks may improve ergonomics where supported, but correctness must not depend on an undocumented ability to interrupt generation.
+Claude Code is the first external host target because it can launch a local stdio MCP server directly. After the HTTP control plane is running and the project has been built, export `CYA_BASE_URL` and `CYA_API_TOKEN` in the shell that launches Claude Code, then register the adapter from the repository root:
+
+```bash
+claude mcp add callyouragent -- node dist/src/mcp-server.js
+```
+
+Inside Claude Code, `/mcp` should show the `callyouragent` server and its tools.
+
+The intended workflow is checkpoint-based rather than fake mid-generation interruption:
+
+1. register/start a run;
+2. `report_status` between meaningful work units;
+3. call `request_owner_decision` only for genuinely important human judgment;
+4. continue unrelated scopes when the escalation is non-blocking or branch-scoped;
+5. call `checkpoint` between work units and incorporate queued owner instructions before continuing that scope;
+6. when the owner independently requests a callback, CALL-E captures steering as queued instructions, which the same checkpoint loop consumes.
+
+This proves the product semantics without requiring Claude Code to support undocumented mid-token interruption.
 
 ## Codex
 
-Use the same checkpoint model. Codex integration should be an adapter that lets the running workflow publish status, raise an escalation, and consume queued instructions between work units. Do not implement a Codex-only state machine.
+Use the same checkpoint model and the same MCP or typed HTTP client boundary. Codex integration should let a running workflow publish status, raise an escalation, and consume queued instructions between work units. Do not implement a Codex-only state machine.
 
 ## ChatGPT / ChatGPT Work / scheduled workflows
 
-Expose the same server API/MCP surface where the current ChatGPT product and workspace entitlements allow it. Because tool/write availability can vary by product/workspace, the core must remain independently usable through HTTP and must not assume a first-party ChatGPT automation can always accept arbitrary external callbacks mid-run.
+Expose the same server API/MCP surface where the current ChatGPT product and workspace entitlements allow it. Because tool/write availability can vary by product/workspace, the core remains independently usable through HTTP and does not assume a first-party ChatGPT automation can accept arbitrary external callbacks mid-run.
 
 ## Generic agents
 
-The TypeScript SDK should eventually make the normal loop approximately:
+The normal loop is:
 
 ```ts
 const run = await cya.startRun(...);
@@ -51,7 +115,7 @@ const escalation = await cya.requestOwnerDecision(...);
 
 const checkpoint = await cya.checkpoint(run.id);
 for (const instruction of checkpoint.queuedInstructions) {
-  // incorporate at a safe work boundary
+  // Incorporate at a safe work boundary.
 }
 ```
 
