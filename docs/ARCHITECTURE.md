@@ -29,7 +29,7 @@ The control plane owns truth. CALL-E only transports a voice interaction.
 1. Agent reports current run state.
 2. Agent creates an escalation with a `runId`, `scopeId`, `blocking` flag, and stable idempotency key.
 3. The control plane persists the escalation before attempting a phone side effect.
-4. A call attempt is created through `CallProvider`.
+4. A call attempt is persisted with the exact task, metadata, provider name, and stable idempotency key before the provider request is sent.
 5. The agent continues unrelated work. A checkpoint reports only unresolved *blocking* scope ids.
 6. CALL-E/fake-provider terminal evidence is reconciled into a structured owner decision.
 7. The affected scope can resume once its escalation is resolved.
@@ -40,18 +40,23 @@ A non-blocking escalation never appears in `unresolvedBlockingScopes`.
 
 1. Owner requests a callback for a running agent.
 2. The control plane snapshots the agent's current summary/scope into the phone task.
-3. The phone provider calls the owner.
-4. Owner questions or steering are extracted into structured instructions.
-5. Instructions are persisted as `queued`.
-6. The running agent polls/pulls at a safe checkpoint and then marks them consumed.
+3. The exact callback request is persisted before the phone provider is invoked.
+4. The phone provider calls the owner.
+5. Owner questions or steering are extracted into structured instructions.
+6. Instructions are persisted as `queued`.
+7. The running agent polls/pulls at a safe checkpoint and then marks them consumed.
 
 This is deliberately not described as interrupting an in-flight model generation.
 
 ## Idempotency and ambiguous side effects
 
-Every phone side effect has a stable control-plane idempotency key. The real CALL-E adapter must forward a derived stable value using CALL-E's `Idempotency-Key` header. Provider timeouts after request transmission are treated as ambiguous rather than blindly retried under a new key.
+Every phone side effect has a stable control-plane idempotency key. The real CALL-E adapter forwards that stable value using CALL-E's `Idempotency-Key` header.
 
-The fake provider implements the same deduplication behavior, allowing tests to verify duplicate retries do not create duplicate calls.
+A provider timeout or transport exception after request transmission is not treated as a known failure. The attempt becomes `ambiguous`, while retaining the exact original task, metadata, purpose, and idempotency key. Reconciliation may then replay the same logical create request with the same idempotency key. This is important: recovery never invents a new key merely because the local process did not receive the first response.
+
+The escalation/callback remains linked to that ambiguous attempt, so a process restart with durable storage can resume recovery instead of orphaning the side effect.
+
+The fake provider implements the same provider-side deduplication behavior, allowing tests to verify duplicate retries do not create duplicate calls.
 
 ## Persistence evolution
 
@@ -62,6 +67,8 @@ The fake provider implements the same deduplication behavior, allowing tests to 
 - provider call ids,
 - webhook event ids,
 - instruction consumption.
+
+Persisted `CallAttempt` rows must include the exact replayable provider request fields used by recovery; storing only a provider id is insufficient when the original create response may never have reached the control plane.
 
 ## CALL-E mapping
 
@@ -79,7 +86,7 @@ The production adapter should use the current asynchronous Calls API:
 ## Next architectural layers
 
 1. Durable SQL store with transactional uniqueness.
-2. Real CALL-E provider behind the existing port.
+2. Webhook ingestion and event-id deduplication sharing the same terminal transition logic as polling.
 3. HTTP service exposing the same control-plane methods.
 4. MCP server implemented as a thin adapter over the HTTP/core methods.
 5. TypeScript client SDK.
