@@ -51,6 +51,20 @@ Runtime settings are:
 - `CYA_RECOVERY_BASE_BACKOFF_MS` (default 5000)
 - `CYA_RECOVERY_MAX_BACKOFF_MS` (default 60000)
 
+## Stale accepted-call timeout
+
+Ambiguous create recovery and an accepted-but-never-terminal call are different failure modes. If a call already has a provider call id and stays locally `queued` or `in_progress` longer than the configured maximum age, the lifecycle manager marks the durable `CallAttempt` as `stalled` and records `stalledAt` plus a privacy-safe `call_attempt_stalled` audit event.
+
+A stalled attempt is a fail-closed review state:
+
+- the lifecycle worker stops automatically polling it every sweep;
+- it does **not** create a replacement provider call or new idempotency key;
+- an owner-decision escalation remains `calling`, so a blocking scope stays blocked while unrelated scopes can continue;
+- a late provider webhook can still resolve the original attempt through the normal shared terminal transition;
+- an explicit reconciliation can safely poll the already-known provider call id and resolve it if terminal evidence later exists.
+
+The timeout is configured by `CYA_MAX_IN_PROGRESS_CALL_AGE_MS` and defaults to 600000 ms (10 minutes). This timeout is based on the attempt's latest accepted/recovered `updatedAt`, so successful ambiguous-create recovery receives a fresh in-progress window.
+
 ## Owner-requested callbacks
 
 The decision policy gate intentionally applies only to autonomous **agent -> owner** decision calls. An owner-requested callback is an explicit human action and is not suppressed by decision priority or quiet hours. Callback-specific abuse/rate limits belong at the authenticated API boundary and are a separate hardening concern.
@@ -65,10 +79,12 @@ The decision policy gate intentionally applies only to autonomous **agent -> own
 - Backoff state and automatic-recovery exhaustion live on the durable `CallAttempt` and therefore survive SQLite restart.
 - Exhausted ambiguity stays ambiguous rather than pretending the provider definitely failed.
 - Ordinary reconciliation cannot bypass an exhausted recovery budget.
+- Accepted calls that exceed the in-progress timeout become `stalled` without any replacement phone side effect.
+- A late terminal webhook or explicit poll can still resolve the original stalled provider call.
 - Background reconciliation does not consume owner instructions; agents still consume them only at safe checkpoints.
 
 ## Next policy work
 
 - Add API-level callback rate limiting and credential scopes.
-- Add stale in-progress call timeout policy separate from ambiguous create recovery.
 - Design an explicit operator-only manual recovery override, with separate authorization and audit, only if real deployments require it.
+- Consider provider-specific expected-call-duration tuning after live CALL-E verification instead of weakening the generic fail-closed timeout semantics.
