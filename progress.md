@@ -2,93 +2,88 @@
 
 ## Current status
 
-Architecture-first TypeScript control-plane implementation is now in place. The repository has moved beyond product notes into executable domain code plus deterministic fake-provider tests.
+Architecture-first TypeScript control-plane implementation is in place, with deterministic fake-provider behavior and a first production CALL-E provider adapter. The repository now has executable core domain code, transport abstraction, production HTTP mapping, and contract-focused tests.
 
-### Inspected this run
+## Inspected this run
 
-- Full repository tree before changes: `AGENTS.md`, `README.md`, `progress.md` only.
+- Full recursive repository tree before changes.
 - `AGENTS.md` in full.
 - `progress.md` in full.
 - `README.md` in full.
-- Recent commit history: three initialization/documentation commits; no prior implementation commits.
-- Repository issues endpoint: no issues or pull requests were present.
-- Current CALL-E developer documentation for the asynchronous Calls API, including `POST /v1/calls`, `GET /v1/calls/{call_id}`, structured result schemas, metadata, `Idempotency-Key`, and terminal webhook behavior.
+- `docs/ARCHITECTURE.md` in full.
+- `docs/INTEGRATIONS.md` in full.
+- Core source files including `domain.ts`, `store.ts`, `call-provider.ts`, `control-plane.ts`, and public exports.
+- Existing control-plane tests and package scripts.
+- Recent commit history on `main`.
+- Open issues endpoint: none present.
+- Current CALL-E Developer API documentation as of 2026-09-06 for `POST /v1/calls`, explicit `recipients[].phones`, `Idempotency-Key`, `result_schema`, metadata, optional `webhook_url`, call lifecycle states, and `GET /v1/calls/{call_id}` terminal reconciliation.
 
-### Implemented this run
+## Previously implemented
 
-- Added a strict Node/TypeScript project scaffold (`package.json`, `tsconfig.json`, `.gitignore`).
-- Added typed domain contracts for:
-  - agents,
-  - active agent runs,
-  - owner-decision escalations,
-  - structured owner decisions,
-  - owner instructions,
-  - callback requests,
-  - provider call attempts,
-  - safe checkpoints.
-- Added `ControlPlaneStore` abstraction and deterministic `InMemoryControlPlaneStore` implementation.
-- Added `CallProvider` port so CALL-E is transport rather than source of truth.
-- Added deterministic `FakeCallProvider` with provider-side idempotency behavior.
-- Implemented `ControlPlane` operations for:
-  - registering an agent,
-  - starting a run,
-  - heartbeat/status updates,
-  - blocking and non-blocking owner-decision requests,
-  - phone call orchestration,
-  - decision reconciliation,
-  - owner-requested callbacks,
-  - callback reconciliation into durable owner instructions,
-  - safe checkpoint inspection/consumption,
-  - branch/scope-specific blocking state,
-  - duplicate escalation/callback prevention.
-- Added public exports in `src/index.ts`.
-- Added end-to-end deterministic tests covering:
-  - non-blocking escalation not blocking unrelated work,
-  - blocking escalation exposing only the affected scope,
-  - escalation idempotency preventing duplicate calls,
-  - callback result becoming queued owner instructions,
-  - safe-checkpoint instruction consumption,
-  - callback idempotency preventing duplicate calls.
-- Added `docs/ARCHITECTURE.md` describing state ownership, both voice directions, scope-level blocking, persistence evolution, idempotency, and current CALL-E API mapping.
-- Added `docs/INTEGRATIONS.md` defining stable adapter semantics for Claude/Claude Code, Codex, ChatGPT/Work, and generic agents without claiming mid-generation interruption.
+- Typed agent/run/escalation/decision/instruction/call-attempt domain model.
+- `ControlPlaneStore` abstraction and deterministic `InMemoryControlPlaneStore`.
+- `CallProvider` port and deterministic `FakeCallProvider` with provider-side idempotency behavior.
+- `ControlPlane` operations for registration, run start/status, blocking and non-blocking escalations, owner callbacks, durable owner instructions, checkpoint consumption, branch/scope blocking, decision reconciliation, and duplicate request prevention.
+- End-to-end fake-provider tests covering non-blocking continuation, branch-specific blocking, decision resolution, callback steering, checkpoint consumption, and idempotency.
+- Architecture and integration-boundary documentation.
 
-### Architecture decisions made
+## Implemented this run
 
-1. The control plane, not CALL-E, owns durable state.
-2. Every escalation is scoped to a `runId` + `scopeId`; `blocking=false` never freezes the run.
-3. Blocking escalations report only their unresolved scope, allowing the agent to keep executing other branches.
-4. Owner callback instructions are durable queued state and are consumed only at explicit safe checkpoints.
-5. Phone side effects are hidden behind `CallProvider` and use stable idempotency keys.
-6. Ambiguous provider failures are represented explicitly and must not trigger blind duplicate calls under new keys.
-7. MCP/Claude/Codex/ChatGPT integrations will remain thin adapters over the same core semantics.
-8. The real CALL-E adapter should map directly to the documented asynchronous Calls API using metadata, structured schemas, idempotency headers, GET reconciliation, and webhook event deduplication.
+- Added `src/calle-provider.ts` implementing a production `CalleCallProvider` behind the existing `CallProvider` port.
+- Production provider configuration now requires server-side `apiKey` and owner phone, with optional base URL, webhook URL, and injectable fetch implementation for deterministic tests.
+- `CalleCallProvider.start()` now maps control-plane call requests to CALL-E `POST /v1/calls` with:
+  - `Authorization: Bearer ...`,
+  - stable `Idempotency-Key`,
+  - explicit owner recipient via `recipients: [{ phones: [...] }]`,
+  - caller-owned correlation metadata,
+  - optional terminal webhook URL,
+  - strict purpose-specific task-level JSON schemas.
+- Owner-decision calls request a strict structured `{ answer: string }` result.
+- Owner-callback calls request a strict structured `{ instructions: string[] }` result so steering can flow directly into the durable instruction queue.
+- `CalleCallProvider.getOutcome()` now maps queued/in-progress calls to no terminal outcome, completed calls to `CallOutcome`, and failed/canceled calls to terminal failure without pretending success.
+- Added defensive response validation so malformed provider payloads fail explicitly rather than silently corrupting control-plane state.
+- Added `tests/calle-provider.test.ts` covering request mapping, idempotency header propagation, recipient/metadata/schema mapping, completed decision extraction, callback instruction extraction, active-call behavior, and failure mapping.
+- Exported `CalleCallProvider` from the public package API.
+- Added `.env.example` containing only variable names/placeholders for `CALLE_API_KEY`, `CALLE_OWNER_PHONE`, optional `CALLE_BASE_URL`, and optional `CALLE_WEBHOOK_URL`, with a server-only warning.
 
-### Verification performed
+## Architecture decisions
 
-- Re-fetched the recursive GitHub tree after implementation and confirmed all new source, test, docs, and configuration files are present on `main`.
-- Reviewed the generated control-plane source through GitHub after commit.
-- Attempted a clean clone + `npm install` + `npm run check` in the execution container. This could not start because that container cannot resolve `github.com` (`Could not resolve host: github.com`). This is an execution-environment network limitation, not a repository test failure.
-- Because the clean checkout could not be materialized, TypeScript compilation and Node tests are **not yet claimed as executed successfully**. The repository now contains the scripts/tests necessary for the next environment with network/package access to run them immediately.
+1. The control plane remains the source of truth; CALL-E remains a replaceable phone transport.
+2. Owner phone configuration currently belongs to the trusted production provider instance. Multi-owner routing should later move to persisted owner/contact policy rather than exposing phone data to agents.
+3. Provider result schemas are purpose-specific and intentionally small. Domain-specific richer decision schemas can be introduced later without coupling the agent adapters to CALL-E.
+4. `Idempotency-Key` is forwarded unchanged from the control-plane-derived stable key, matching CALL-E's documented safe replay behavior.
+5. Polling reconciliation is now implemented at the provider boundary. Webhook ingestion/deduplication is still a separate missing backend concern.
+6. No live CALL-E success is claimed until an authorized `CALLE_API_KEY` and owner phone are supplied and a real call is observed.
 
-### CALL-E integration status
+## Verification performed
 
-- Fake provider: implemented at the control-plane boundary.
-- Production provider: not yet implemented.
-- Live CALL-E call: not attempted; no credential was used or required in this run.
-- Current production mapping is documented against CALL-E's developer API, but live behavior must not be claimed until verified with `CALLE_API_KEY`.
+- Contract behavior was checked against the current CALL-E Developer API documentation on 2026-09-06. The documented API accepts asynchronous `POST /v1/calls`, explicit `recipients[].phones`, stable `Idempotency-Key`, caller metadata, strict `result_schema`, optional `webhook_url`, and exposes terminal state through `GET /v1/calls/{call_id}`.
+- Added deterministic provider tests using an injected fetch implementation; these do not require live credentials or consume CALL-E credits.
+- Re-attempted a clean clone followed by dependency installation and `npm run check` in the execution container. The checkout could not begin because the container still cannot resolve `github.com` (`Could not resolve host: github.com`). Therefore TypeScript compilation/tests are still **not claimed as executed successfully** in this environment.
+- GitHub API repository reads/writes succeeded, so committed source state was verified through GitHub itself.
 
-### Current blockers
+## CALL-E integration status
 
-No product-design blocker.
+- Fake provider: implemented.
+- Production CALL-E provider: implemented at HTTP adapter level against the current Calls API.
+- Polling terminal reconciliation: implemented.
+- Strict structured result extraction: implemented for decisions and callback instructions.
+- Webhook receiver + event-id deduplication: not yet implemented.
+- Recovery of a locally persisted `ambiguous` create-call attempt after process/network uncertainty: not yet strong enough; this remains a correctness priority before production use.
+- Live CALL-E call: not attempted because no credential/authorized phone was supplied in this run.
 
-Current run-only verification limitation: the local execution container had no DNS access to GitHub, preventing clean checkout/dependency installation and therefore preventing an actual `tsc`/test run here. GitHub writes themselves succeeded.
+## Current blockers
 
-### Highest-value next actions
+No product-design blocker and no blocker to continued repository development.
 
-1. Fetch/review the entire updated repository and run TypeScript build/tests in an environment that can install dependencies; fix any compile/runtime failures first.
-2. Strengthen call-attempt recovery semantics for ambiguous create-call failures so reconciliation can never accidentally duplicate a real call.
-3. Implement the production CALL-E provider behind `CallProvider` using server-only `CALLE_API_KEY`, `Idempotency-Key`, metadata, strict `result_schema`, GET reconciliation, and webhook deduplication.
-4. Add a durable SQL-backed store with unique constraints/transactions matching the in-memory contract.
-5. Add a small HTTP service exposing the core operations.
-6. Add MCP tools as a thin adapter over the same service/core.
-7. Build the first real Claude/Claude Code integration and exercise the complete fake-provider flow from an external agent.
+Environment-only verification limitation: the execution container cannot resolve `github.com`, preventing clean checkout/dependency installation and therefore preventing an actual local `tsc`/Node test run here.
+
+## Highest-value next actions
+
+1. Strengthen ambiguous create-call recovery: persist enough call request data to safely replay the same CALL-E idempotency key after timeout/process restart instead of leaving an unrecoverable ambiguous attempt.
+2. Add webhook ingestion semantics with event-id deduplication and terminal-call reconciliation that shares the same core transition logic as polling.
+3. Add a durable SQL-backed store with transactional unique constraints for escalation/callback idempotency, provider call ids, webhook event ids, and instruction consumption.
+4. Add a minimal HTTP service over the control-plane methods and configuration bootstrap that chooses fake vs CALL-E provider from environment.
+5. Add MCP tools as a thin adapter over the HTTP/core layer.
+6. Build the first real Claude/Claude Code integration and exercise the complete fake-provider flow externally.
+7. As soon as an environment with package/network access is available, run `npm run check` and fix any TypeScript/runtime issues before expanding scope.
