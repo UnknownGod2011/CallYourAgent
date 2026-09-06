@@ -2,6 +2,7 @@ import { DatabaseSync } from "node:sqlite";
 import type {
   AgentRegistration,
   AgentRun,
+  AuditEvent,
   CallAttempt,
   Escalation,
   OwnerDecision,
@@ -9,7 +10,7 @@ import type {
 } from "./domain.js";
 import type { ControlPlaneStore } from "./store.js";
 
-type JsonEntity = AgentRegistration | AgentRun | Escalation | OwnerDecision | OwnerInstruction | CallAttempt | string;
+type JsonEntity = AgentRegistration | AgentRun | Escalation | OwnerDecision | OwnerInstruction | CallAttempt | AuditEvent | string;
 
 class SqliteBackedMap<T extends JsonEntity> extends Map<string, T> {
   constructor(
@@ -83,6 +84,7 @@ export class SqliteControlPlaneStore implements ControlPlaneStore {
   readonly decisions: SqliteBackedMap<OwnerDecision>;
   readonly instructions: SqliteBackedMap<OwnerInstruction>;
   readonly callAttempts: SqliteBackedMap<CallAttempt>;
+  readonly auditEvents: SqliteBackedMap<AuditEvent>;
   readonly escalationByIdempotencyKey: SqliteBackedMap<string>;
   readonly callbackByIdempotencyKey: SqliteBackedMap<string>;
   readonly processedWebhookEventIds: SqliteBackedSet;
@@ -98,6 +100,7 @@ export class SqliteControlPlaneStore implements ControlPlaneStore {
     this.decisions = new SqliteBackedMap(db, "decisions");
     this.instructions = new SqliteBackedMap(db, "instructions");
     this.callAttempts = new SqliteBackedMap(db, "call_attempts");
+    this.auditEvents = new SqliteBackedMap(db, "audit_events");
     this.escalationByIdempotencyKey = new SqliteBackedMap(db, "escalation_idempotency");
     this.callbackByIdempotencyKey = new SqliteBackedMap(db, "callback_idempotency");
     this.processedWebhookEventIds = new SqliteBackedSet(db, "webhook_events");
@@ -108,6 +111,7 @@ export class SqliteControlPlaneStore implements ControlPlaneStore {
       this.decisions,
       this.instructions,
       this.callAttempts,
+      this.auditEvents,
       this.escalationByIdempotencyKey,
       this.callbackByIdempotencyKey,
       this.processedWebhookEventIds,
@@ -150,6 +154,7 @@ export class SqliteControlPlaneStore implements ControlPlaneStore {
       CREATE TABLE IF NOT EXISTS decisions (key TEXT PRIMARY KEY, data TEXT NOT NULL);
       CREATE TABLE IF NOT EXISTS instructions (key TEXT PRIMARY KEY, data TEXT NOT NULL);
       CREATE TABLE IF NOT EXISTS call_attempts (key TEXT PRIMARY KEY, data TEXT NOT NULL);
+      CREATE TABLE IF NOT EXISTS audit_events (key TEXT PRIMARY KEY, data TEXT NOT NULL);
       CREATE TABLE IF NOT EXISTS escalation_idempotency (key TEXT PRIMARY KEY, data TEXT NOT NULL);
       CREATE TABLE IF NOT EXISTS callback_idempotency (key TEXT PRIMARY KEY, data TEXT NOT NULL);
       CREATE TABLE IF NOT EXISTS webhook_events (key TEXT PRIMARY KEY);
@@ -163,6 +168,10 @@ export class SqliteControlPlaneStore implements ControlPlaneStore {
         ON instructions(json_extract(data, '$.runId'), json_extract(data, '$.status'));
       CREATE INDEX IF NOT EXISTS ix_escalation_run_status
         ON escalations(json_extract(data, '$.runId'), json_extract(data, '$.status'));
+      CREATE INDEX IF NOT EXISTS ix_audit_event_run_created
+        ON audit_events(json_extract(data, '$.runId'), json_extract(data, '$.createdAt'));
+      CREATE INDEX IF NOT EXISTS ix_audit_event_agent_created
+        ON audit_events(json_extract(data, '$.agentId'), json_extract(data, '$.createdAt'));
     `);
   }
 }
