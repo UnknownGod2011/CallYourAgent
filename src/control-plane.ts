@@ -2,6 +2,8 @@ import { randomUUID } from "node:crypto";
 import type {
   AgentRegistration,
   AgentRun,
+  AuditActor,
+  AuditEvent,
   CallAttempt,
   CallOutcome,
   CallbackRequest,
@@ -43,6 +45,10 @@ export class ControlPlane {
   registerAgent(input: Omit<AgentRegistration, "id" | "createdAt">): AgentRegistration {
     const agent: AgentRegistration = { ...input, id: randomUUID(), createdAt: this.isoNow() };
     this.store.agents.set(agent.id, agent);
+    this.audit("agent_registered", "control_plane", "Agent registered", { agentId: agent.id }, {
+      platform: agent.platform,
+      ownerId: agent.ownerId,
+    });
     return agent;
   }
 
@@ -59,6 +65,9 @@ export class ControlPlane {
       updatedAt: now,
     };
     this.store.runs.set(run.id, run);
+    this.audit("run_started", "agent", "Agent run started", { runId: run.id, agentId }, {
+      currentScope: run.currentScope,
+    });
     return run;
   }
 
@@ -67,6 +76,10 @@ export class ControlPlane {
     if (run.status !== "running") throw new Error(`Run ${runId} is not running`);
     const next = { ...run, ...update, updatedAt: this.isoNow() };
     this.store.runs.set(runId, next);
+    this.audit("run_status_reported", "agent", "Agent reported progress", { runId, agentId: run.agentId }, {
+      currentScope: next.currentScope,
+      summaryChanged: update.summary !== undefined,
+    });
     return next;
   }
 
@@ -92,6 +105,15 @@ export class ControlPlane {
     };
     this.store.escalations.set(escalation.id, escalation);
     this.store.escalationByIdempotencyKey.set(input.idempotencyKey, escalation.id);
+    this.audit("escalation_created", "agent", "Owner decision requested", {
+      runId: escalation.runId,
+      escalationId: escalation.id,
+    }, {
+      scopeId: escalation.scopeId,
+      blocking: escalation.blocking,
+      priority: escalation.priority,
+      expiresAt: escalation.expiresAt,
+    });
 
     return this.startEscalationCallIfAllowed(escalation);
   }
@@ -102,6 +124,10 @@ export class ControlPlane {
     if (escalation.expiresAt && new Date(escalation.expiresAt) <= this.clock.now()) {
       const expired = { ...escalation, status: "expired" as const, updatedAt: this.isoNow() };
       this.store.escalations.set(expired.id, expired);
+      this.audit("escalation_expired", "control_plane", "Escalation expired before resolution", {
+        runId: expired.runId,
+        escalationId: expired.id,
+      }, { scopeId: expired.scopeId });
       return expired;
     }
     if (!escalation.callAttemptId) return this.startEscalationCallIfAllowed(escalation);
@@ -137,6 +163,11 @@ export class ControlPlane {
       { runId: input.runId },
     );
     this.store.callbackByIdempotencyKey.set(input.idempotencyKey, attempt.id);
+    this.audit("owner_callback_requested", "owner", "Owner requested a callback to the running agent", {
+      runId: input.runId,
+      agentId: run.agentId,
+      callAttemptId: attempt.id,
+    }, { currentScope: run.currentScope });
     return attempt;
   }
 
@@ -166,6 +197,10 @@ export class ControlPlane {
 
       const callAttempt = this.applyTerminalOutcome(attempt, input.outcome);
       this.store.processedWebhookEventIds.add(input.eventId);
+      this.audit("provider_webhook_reconciled", "provider", "Provider webhook reconciled", {
+        runId: this.runIdForAttempt(attempt),
+        callAttemptId: attempt.id,
+      }, { eventId: input.eventId, providerCallId: input.providerCallId, outcome: input.outcome.status });
       return { duplicate: false, callAttempt };
     });
   }
@@ -189,6 +224,10 @@ export class ControlPlane {
         updatedAt: this.isoNow(),
       };
       this.store.callAttempts.set(recovered.id, recovered);
+      this.audit("call_attempt_started", "control_plane", "Ambiguous call attempt safely recovered", {
+        runId: this.runIdForAttempt(recovered),
+        callAttemptId: recovered.id,
+      }, { purpose: recovered.purpose, provider: recovered.provider, recovered: true });
       return recovered;
     } catch (error) {
       const stillAmbiguous: CallAttempt = {
@@ -198,6 +237,10 @@ export class ControlPlane {
         updatedAt: this.isoNow(),
       };
       this.store.callAttempts.set(stillAmbiguous.id, stillAmbiguous);
+      this.audit("call_attempt_ambiguous", "control_plane", "Call recovery remains ambiguous", {
+        runId: this.runIdForAttempt(stillAmbiguous),
+        callAttemptId: stillAmbiguous.id,
+      }, { purpose: stillAmbiguous.purpose, provider: stillAmbiguous.provider });
       return stillAmbiguous;
     }
   }
@@ -215,13 +258,18 @@ export class ControlPlane {
       const now = this.isoNow();
       for (const instruction of queuedInstructions) {
         this.store.instructions.set(instruction.id, { ...instruction, status: "consumed", consumedAt: now });
+        this.audit("owner_instruction_consumed", "agent", "Owner instruction consumed at a safe checkpoint", {
+          runId,
+          agentId: run.agentId,
+          instructionId: instruction.id,
+        }, { source: instruction.source });
       }
     }
     return { run, queuedInstructions, unresolvedBlockingScopes };
   }
 
   enqueueInstruction(runId: string, text: string, source: OwnerInstruction["source"] = "api"): OwnerInstruction {
-    this.requireRun(runId);
+    const run = this.requireRun(runId);
     const instruction: OwnerInstruction = {
       id: randomUUID(),
       runId,
@@ -231,6 +279,11 @@ export class ControlPlane {
       createdAt: this.isoNow(),
     };
     this.store.instructions.set(instruction.id, instruction);
+    this.audit("owner_instruction_queued", source === "callback" ? "owner" : "control_plane", "Owner instruction queued for next safe checkpoint", {
+      runId,
+      agentId: run.agentId,
+      instructionId: instruction.id,
+    }, { source });
     return instruction;
   }
 
@@ -251,6 +304,15 @@ export class ControlPlane {
     return escalation.decisionId ? this.store.decisions.get(escalation.decisionId) : undefined;
   }
 
+  listAuditEvents(runId: string, limit = 100): AuditEvent[] {
+    this.requireRun(runId);
+    if (!Number.isInteger(limit) || limit < 1 || limit > 500) throw new Error("Audit event limit must be an integer from 1 to 500");
+    return [...this.store.auditEvents.values()]
+      .filter((event) => event.runId === runId)
+      .sort((left, right) => left.createdAt.localeCompare(right.createdAt) || left.id.localeCompare(right.id))
+      .slice(-limit);
+  }
+
   private async startEscalationCallIfAllowed(escalation: Escalation): Promise<Escalation> {
     if (escalation.callAttemptId || escalation.status !== "pending") return escalation;
     const run = this.requireRunningRun(escalation.runId);
@@ -264,7 +326,25 @@ export class ControlPlane {
       runs: this.store.runs,
       agents: this.store.agents,
     });
-    if (!decision.allowed) return escalation;
+    if (!decision.allowed) {
+      if (decision.reason && escalation.deferredReason !== decision.reason) {
+        const deferred = { ...escalation, deferredReason: decision.reason, updatedAt: this.isoNow() };
+        this.store.escalations.set(deferred.id, deferred);
+        this.audit("call_policy_deferred", "control_plane", "Owner call deferred by policy", {
+          runId: escalation.runId,
+          escalationId: escalation.id,
+        }, { reason: decision.reason, scopeId: escalation.scopeId, priority: escalation.priority });
+        return deferred;
+      }
+      return escalation;
+    }
+
+    if (escalation.deferredReason) {
+      this.audit("call_policy_released", "control_plane", "Deferred owner call became eligible", {
+        runId: escalation.runId,
+        escalationId: escalation.id,
+      }, { previousReason: escalation.deferredReason, scopeId: escalation.scopeId });
+    }
 
     const attempt = await this.startCall(
       "owner_decision",
@@ -278,6 +358,7 @@ export class ControlPlane {
       ...escalation,
       status: "calling",
       callAttemptId: attempt.id,
+      deferredReason: undefined,
       updatedAt: this.isoNow(),
     };
     this.store.escalations.set(next.id, next);
@@ -317,6 +398,11 @@ export class ControlPlane {
         updatedAt: this.isoNow(),
       };
       this.store.escalations.set(resolved.id, resolved);
+      this.audit("owner_decision_recorded", "owner", "Owner decision recorded and blocked scope released", {
+        runId: escalation.runId,
+        escalationId: escalation.id,
+        callAttemptId: attempt.id,
+      }, { scopeId: escalation.scopeId, blocking: escalation.blocking, structured: Boolean(outcome.structured) });
       return finished;
     }
 
@@ -346,6 +432,10 @@ export class ControlPlane {
       updatedAt: now,
     };
     this.store.callAttempts.set(attempt.id, attempt);
+    this.audit("call_attempt_created", "control_plane", "Phone call attempt persisted before provider side effect", {
+      runId: this.runIdForAttempt(attempt),
+      callAttemptId: attempt.id,
+    }, { purpose, provider: attempt.provider });
 
     try {
       const started = await this.calls.start({ idempotencyKey, purpose, task, metadata });
@@ -356,6 +446,10 @@ export class ControlPlane {
         updatedAt: this.isoNow(),
       };
       this.store.callAttempts.set(next.id, next);
+      this.audit("call_attempt_started", "provider", "Phone provider accepted call attempt", {
+        runId: this.runIdForAttempt(next),
+        callAttemptId: next.id,
+      }, { purpose, provider: next.provider, status: next.status });
       return next;
     } catch (error) {
       const ambiguous: CallAttempt = {
@@ -365,6 +459,10 @@ export class ControlPlane {
         updatedAt: this.isoNow(),
       };
       this.store.callAttempts.set(ambiguous.id, ambiguous);
+      this.audit("call_attempt_ambiguous", "control_plane", "Phone call outcome is ambiguous and will be safely reconciled", {
+        runId: this.runIdForAttempt(ambiguous),
+        callAttemptId: ambiguous.id,
+      }, { purpose, provider: ambiguous.provider });
       return ambiguous;
     }
   }
@@ -372,7 +470,37 @@ export class ControlPlane {
   private finishAttempt(attempt: CallAttempt, status: "completed" | "failed" | "ambiguous"): CallAttempt {
     const next = { ...attempt, status, updatedAt: this.isoNow() };
     this.store.callAttempts.set(next.id, next);
+    const type = status === "completed" ? "call_attempt_completed" : status === "failed" ? "call_attempt_failed" : "call_attempt_ambiguous";
+    this.audit(type, status === "ambiguous" ? "control_plane" : "provider", `Phone call attempt ${status}`, {
+      runId: this.runIdForAttempt(next),
+      callAttemptId: next.id,
+    }, { purpose: next.purpose, provider: next.provider });
     return next;
+  }
+
+  private audit(
+    type: AuditEvent["type"],
+    actor: AuditActor,
+    summary: string,
+    refs: Pick<AuditEvent, "runId" | "agentId" | "escalationId" | "callAttemptId" | "instructionId"> = {},
+    details?: Record<string, unknown>,
+  ): AuditEvent {
+    const event: AuditEvent = {
+      id: randomUUID(),
+      type,
+      actor,
+      summary,
+      ...refs,
+      details,
+      createdAt: this.isoNow(),
+    };
+    this.store.auditEvents.set(event.id, event);
+    return event;
+  }
+
+  private runIdForAttempt(attempt: CallAttempt): string | undefined {
+    if (attempt.purpose === "owner_callback") return attempt.correlationId;
+    return this.store.escalations.get(attempt.correlationId)?.runId ?? attempt.request.metadata.runId;
   }
 
   private requireAgent(id: string): AgentRegistration {
