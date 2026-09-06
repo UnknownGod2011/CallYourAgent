@@ -309,7 +309,7 @@ export class ControlPlane {
     if (!Number.isInteger(limit) || limit < 1 || limit > 500) throw new Error("Audit event limit must be an integer from 1 to 500");
     return [...this.store.auditEvents.values()]
       .filter((event) => event.runId === runId)
-      .sort((left, right) => left.createdAt.localeCompare(right.createdAt) || left.id.localeCompare(right.id))
+      .sort((left, right) => left.sequence - right.sequence)
       .slice(-limit);
   }
 
@@ -485,8 +485,11 @@ export class ControlPlane {
     refs: Pick<AuditEvent, "runId" | "agentId" | "escalationId" | "callAttemptId" | "instructionId"> = {},
     details?: Record<string, unknown>,
   ): AuditEvent {
+    let sequence = 1;
+    for (const existing of this.store.auditEvents.values()) sequence = Math.max(sequence, existing.sequence + 1);
     const event: AuditEvent = {
       id: randomUUID(),
+      sequence,
       type,
       actor,
       summary,
