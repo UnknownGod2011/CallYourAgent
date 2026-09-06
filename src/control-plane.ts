@@ -208,6 +208,7 @@ export class ControlPlane {
   async recoverCallAttempt(callAttemptId: string): Promise<CallAttempt> {
     const attempt = this.requireCallAttempt(callAttemptId);
     if (attempt.status !== "ambiguous") return attempt;
+    if (attempt.automaticRecoveryExhaustedAt) return attempt;
 
     try {
       const started = await this.calls.start({
