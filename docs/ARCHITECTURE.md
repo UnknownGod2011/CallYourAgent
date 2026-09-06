@@ -50,9 +50,9 @@ This is deliberately not described as interrupting an in-flight model generation
 
 ## HTTP control-plane boundary
 
-`src/http-server.ts` exposes the same domain operations over a small JSON API. Agent-facing routes require `Authorization: Bearer <CYA_API_TOKEN>`; `/health` is intentionally unauthenticated. The API currently exposes agent registration, run start/read/heartbeat, escalation creation/read/reconciliation, checkpoints, owner callback creation/read/reconciliation, and CALL-E webhook ingress.
+`src/http-server.ts` exposes the same domain operations over a small JSON API. Agent-facing routes require `Authorization: Bearer <CYA_API_TOKEN>`; `/health` is intentionally unauthenticated. The API currently exposes agent registration, run start/read/heartbeat, escalation creation/read/reconciliation, checkpoints, owner callback creation/read/reconciliation, a run audit timeline, and CALL-E webhook ingress.
 
-The HTTP adapter does not own business state. It validates transport-level input and delegates directly to `ControlPlane`, preserving one set of semantics for future MCP and SDK adapters.
+The HTTP adapter does not own business state. It validates transport-level input and delegates directly to `ControlPlane`, preserving one set of semantics for MCP and SDK adapters.
 
 Request bodies are size-bounded and responses use `Cache-Control: no-store` because status/decision payloads can contain sensitive agent context.
 
@@ -101,28 +101,41 @@ Polling and webhooks are delivery mechanisms for the same terminal provider outc
 - a poll completing before a delayed webhook also remains safe because already-terminal attempts are no-ops;
 - duplicate webhook delivery is explicitly deduplicated by provider event id.
 
-`ingestProviderWebhook` executes lookup, terminal transition, and provider-event recording inside the store's synchronous transaction boundary. The durable SQLite implementation therefore commits or rolls back the webhook event and all associated domain mutations together. If a mutation throws, both the SQL transaction and the in-memory mirrors are restored to the pre-event state.
+`ingestProviderWebhook` executes lookup, terminal transition, provider-event recording, and audit recording inside the store's synchronous transaction boundary. The durable SQLite implementation therefore commits or rolls back the webhook event, audit event, and associated domain mutations together. If a mutation throws, both the SQL transaction and the in-memory mirrors are restored to the pre-event state.
 
 CALL-E's current Calls API documents terminal webhook payloads with a top-level event `id` and the terminal CallTask under `data`; the call task id is `data.id`. `parseCalleTerminalWebhook` validates this boundary and converts only terminal `completed`, `failed`, or `canceled` payloads into the provider-agnostic `CallOutcome` consumed by the control plane.
 
 ## Durable persistence
 
-`InMemoryControlPlaneStore` remains the fastest deterministic test implementation. `SqliteControlPlaneStore` is now the default durable architecture for a single control-plane deployment and deliberately preserves the same synchronous `Map`/`Set` contract used by the tested domain layer.
+`InMemoryControlPlaneStore` remains the fastest deterministic test implementation. `SqliteControlPlaneStore` is the default durable architecture for a single control-plane deployment and deliberately preserves the same synchronous `Map`/`Set` contract used by the tested domain layer.
 
 The SQLite store:
 
-- persists agents, runs, escalations, decisions, instructions, replayable call attempts, idempotency mappings, and processed webhook event ids;
+- persists agents, runs, escalations, decisions, instructions, replayable call attempts, audit events, idempotency mappings, and processed webhook event ids;
 - uses WAL mode and an explicit synchronous transaction API;
 - reloads in-memory mirrors from SQL after a rollback so memory cannot diverge from committed state;
 - enforces unique escalation idempotency keys;
 - enforces unique non-null provider call ids;
 - uses primary keys for callback/escalation idempotency maps and webhook event ids;
 - indexes run/status fields used by instruction and escalation lookup;
-- survives process-style close/reopen with queued state and replayable call-attempt state intact.
+- indexes audit events by run/agent metadata;
+- survives process-style close/reopen with queued state, replayable call-attempt state, and audit history intact.
 
 The implementation uses Node's built-in `node:sqlite` `DatabaseSync`, so the repository currently requires Node 24+. This avoids a native third-party database dependency for the hackathon/reference deployment while keeping SQL semantics and transaction boundaries explicit. A future multi-instance deployment can replace the store with Postgres without changing the `ControlPlane` domain semantics, but that adapter must preserve the same uniqueness and atomicity guarantees.
 
 Persisted `CallAttempt` rows include the exact replayable provider request fields used by recovery; storing only a provider id is insufficient when the original create response may never have reached the control plane.
+
+## Durable audit timeline
+
+Every meaningful control-plane transition can now produce a first-class `AuditEvent`. The timeline covers run status reporting, escalation creation, policy deferral/release, expiration, call-attempt creation/start/ambiguous/terminal transitions, owner decisions, callbacks, queued/consumed instructions, and provider webhook reconciliation.
+
+Audit events are deliberately **metadata-only**. They do not copy full escalation context, owner decision answers, callback transcripts, or owner instruction text. The domain records event type, actor, references, safe operational metadata, and a human-readable summary so an operator or demo UI can explain what happened without creating a second sensitive transcript store.
+
+Ordering is explicit rather than timestamp-only. Each event receives a durable monotonic `sequence`, because multiple transitions can occur within the same millisecond and random UUID tie-breaking is not a valid causal ordering. SQLite restart tests verify that order survives close/reopen.
+
+Policy deferral state is also persisted on the escalation. Repeated reconciliation while the same policy condition remains active does not spam duplicate `call_policy_deferred` events. When the condition clears, `call_policy_released` records why a previously pending call can now start.
+
+The authenticated HTTP API exposes `GET /v1/runs/:runId/audit?limit=...`; the TypeScript client exposes `getAuditTimeline`; the MCP adapter exposes read-only `get_audit_timeline`. These all read the same control-plane event store rather than deriving a separate log from adapter traffic.
 
 ## CALL-E mapping
 
@@ -143,9 +156,9 @@ The repository has GitHub Actions CI on `main` and pull requests using Node 24. 
 
 ## Next architectural layers
 
-1. MCP server implemented as a thin adapter over the same control-plane semantics.
-2. TypeScript client SDK.
-3. Claude Code integration as the first end-to-end external agent adapter.
-4. Codex / ChatGPT adapters only where current platform capabilities support the required tool/checkpoint semantics.
-5. Quiet hours, call budgets, retries/expiry, and auditable policy enforcement before broad UI work.
-6. Production deployment hardening: TLS/reverse proxy, secret management, rate limiting, and optional Postgres for multi-instance scale.
+1. Bounded retry/backoff and lifecycle sweeps for ambiguous/deferred/expired work.
+2. API credential scopes and rate limiting before broader exposure.
+3. Graceful shutdown and production deployment hardening.
+4. Real Claude Code host acceptance of the already-tested stdio MCP adapter.
+5. A small demo/status UI over the HTTP audit/status APIs, without introducing another business-state layer.
+6. Codex / ChatGPT adapters only where current platform capabilities support the required tool/checkpoint semantics.
