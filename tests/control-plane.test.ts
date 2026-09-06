@@ -120,3 +120,52 @@ test("callback idempotency prevents duplicate phone side effects", async () => {
   assert.equal(first.id, retry.id);
   assert.equal(store.callAttempts.size, 1);
 });
+
+test("terminal decision webhook resolves through the same transition path and deduplicates event delivery", async () => {
+  const { store, control, run } = setup();
+  const escalation = await control.requestOwnerDecision({
+    runId: run.id,
+    scopeId: "release",
+    question: "Ship now?",
+    blocking: true,
+    idempotencyKey: "webhook-decision",
+  });
+  const attempt = store.callAttempts.get(escalation.callAttemptId!)!;
+
+  const first = control.ingestProviderWebhook({
+    eventId: "evt_decision_1",
+    providerCallId: attempt.providerCallId!,
+    outcome: { status: "completed", answer: "Ship it", structured: { choice: "ship" } },
+  });
+  const second = control.ingestProviderWebhook({
+    eventId: "evt_decision_1",
+    providerCallId: attempt.providerCallId!,
+    outcome: { status: "completed", answer: "Ship it", structured: { choice: "ship" } },
+  });
+
+  assert.equal(first.duplicate, false);
+  assert.equal(second.duplicate, true);
+  assert.equal(control.getDecision(escalation.id)?.answer, "Ship it");
+  assert.equal(store.decisions.size, 1);
+  assert.deepEqual(control.checkpoint(run.id).unresolvedBlockingScopes, []);
+});
+
+test("webhook completion followed by polling cannot enqueue callback instructions twice", async () => {
+  const { store, provider, control, run } = setup();
+  const callback = await control.requestOwnerCallback({ runId: run.id, idempotencyKey: "webhook-callback" });
+  const outcome = {
+    status: "completed" as const,
+    instructions: ["Focus on persistence next"],
+  };
+
+  control.ingestProviderWebhook({
+    eventId: "evt_callback_1",
+    providerCallId: callback.providerCallId!,
+    outcome,
+  });
+  provider.complete(callback.providerCallId!, outcome);
+  await control.reconcileCallback(callback.id);
+
+  assert.deepEqual(control.checkpoint(run.id).queuedInstructions.map((item) => item.text), ["Focus on persistence next"]);
+  assert.equal(store.instructions.size, 1);
+});
