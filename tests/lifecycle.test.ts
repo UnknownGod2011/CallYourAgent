@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { FakeCallProvider, type StartCallInput } from "../src/call-provider.js";
+import { FakeCallProvider, type StartCallInput, type StartCallResult } from "../src/call-provider.js";
 import { CallPolicy } from "../src/call-policy.js";
 import { ControlPlane, type Clock } from "../src/control-plane.js";
 import { LifecycleManager } from "../src/lifecycle.js";
@@ -49,7 +49,7 @@ test("lifecycle sweep reconciles completed decision and callback without an agen
 test("automatic ambiguous recovery is bounded, backoff-aware, fail-closed, and reuses the same idempotency key", async () => {
   class AlwaysAmbiguousProvider extends FakeCallProvider {
     readonly seenKeys: string[] = [];
-    override async start(input: StartCallInput) {
+    override async start(input: StartCallInput): Promise<StartCallResult> {
       this.seenKeys.push(input.idempotencyKey);
       throw new Error("connection lost after send");
     }
