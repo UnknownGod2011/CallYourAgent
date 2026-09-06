@@ -12,7 +12,7 @@ An integration needs only to be able to:
 4. inspect whether its current scope is blocked;
 5. pull queued owner instructions at safe checkpoints.
 
-A richer platform may expose these through MCP tools/hooks. A custom agent can use HTTP/SDK calls directly.
+A richer platform may expose these through MCP tools/hooks. A custom agent can use HTTP/SDK calls directly. Audit-timeline access is optional and observational; it is useful for operators, demos, and agent self-inspection but is not required for the core decision/callback loop.
 
 ## TypeScript HTTP client
 
@@ -38,6 +38,7 @@ const escalation = await cya.requestOwnerDecision({
 
 // Other independent scopes may continue.
 const checkpoint = await cya.checkpoint(run.id);
+const timeline = await cya.getAuditTimeline(run.id);
 ```
 
 ## MCP adapter
@@ -52,12 +53,15 @@ The current MCP tools are:
 - `register_agent`
 - `start_run`
 - `report_status`
+- `get_audit_timeline`
 - `request_owner_decision`
 - `get_escalation_status`
 - `checkpoint`
 - `request_owner_callback`
 - `reconcile_escalation`
 - `reconcile_callback`
+
+`get_audit_timeline` is read-only. It exposes operational events and safe metadata, not full call transcripts, escalation context, owner decision answers, or owner instruction text.
 
 Build and run the stdio adapter:
 
@@ -90,13 +94,14 @@ The intended workflow is checkpoint-based rather than fake mid-generation interr
 3. call `request_owner_decision` only for genuinely important human judgment;
 4. continue unrelated scopes when the escalation is non-blocking or branch-scoped;
 5. call `checkpoint` between work units and incorporate queued owner instructions before continuing that scope;
-6. when the owner independently requests a callback, CALL-E captures steering as queued instructions, which the same checkpoint loop consumes.
+6. when the owner independently requests a callback, CALL-E captures steering as queued instructions, which the same checkpoint loop consumes;
+7. optionally inspect `get_audit_timeline` to explain prior deferrals/call transitions without changing agent state.
 
 This proves the product semantics without requiring Claude Code to support undocumented mid-token interruption.
 
 ## Codex
 
-Use the same checkpoint model and the same MCP or typed HTTP client boundary. Codex integration should let a running workflow publish status, raise an escalation, and consume queued instructions between work units. Do not implement a Codex-only state machine.
+Use the same checkpoint model and the same MCP or typed HTTP client boundary. Codex integration should let a running workflow publish status, raise an escalation, consume queued instructions between work units, and optionally read the audit timeline. Do not implement a Codex-only state machine.
 
 ## ChatGPT / ChatGPT Work / scheduled workflows
 
@@ -121,4 +126,4 @@ for (const instruction of checkpoint.queuedInstructions) {
 
 ## Phone-provider boundary
 
-No agent integration receives `CALLE_API_KEY`. Only the trusted CallYourAgent backend talks to CALL-E. This lets provider behavior, retries, webhook reconciliation, call policy, quiet hours, and budgets evolve without changing every agent adapter.
+No agent integration receives `CALLE_API_KEY`. Only the trusted CallYourAgent backend talks to CALL-E. This lets provider behavior, retries, webhook reconciliation, call policy, quiet hours, budgets, and auditability evolve without changing every agent adapter.
