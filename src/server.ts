@@ -81,6 +81,9 @@ export function lifecycleRecoveryConfigFromEnv(env: NodeJS.ProcessEnv): Lifecycl
   if (env.CYA_RECOVERY_MAX_BACKOFF_MS) {
     config.maxBackoffMs = positiveInteger(env.CYA_RECOVERY_MAX_BACKOFF_MS, "CYA_RECOVERY_MAX_BACKOFF_MS");
   }
+  if (env.CYA_MAX_IN_PROGRESS_CALL_AGE_MS) {
+    config.maxInProgressCallAgeMs = positiveInteger(env.CYA_MAX_IN_PROGRESS_CALL_AGE_MS, "CYA_MAX_IN_PROGRESS_CALL_AGE_MS");
+  }
   return config;
 }
 

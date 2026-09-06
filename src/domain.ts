@@ -18,6 +18,7 @@ export type AuditEventType =
   | "call_attempt_created"
   | "call_attempt_started"
   | "call_attempt_ambiguous"
+  | "call_attempt_stalled"
   | "call_attempt_completed"
   | "call_attempt_failed"
   | "call_recovery_scheduled"
@@ -110,13 +111,14 @@ export interface CallAttempt {
   correlationId: Id;
   provider: string;
   providerCallId?: string;
-  status: "queued" | "in_progress" | "completed" | "failed" | "ambiguous";
+  status: "queued" | "in_progress" | "completed" | "failed" | "ambiguous" | "stalled";
   idempotencyKey: string;
   request: PersistedCallRequest;
   lastError?: string;
   automaticRecoveryAttempts?: number;
   nextAutomaticRecoveryAt?: IsoDate;
   automaticRecoveryExhaustedAt?: IsoDate;
+  stalledAt?: IsoDate;
   createdAt: IsoDate;
   updatedAt: IsoDate;
 }

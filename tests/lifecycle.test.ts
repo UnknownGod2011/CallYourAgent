@@ -180,3 +180,88 @@ test("lifecycle sweep expires a policy-deferred escalation without creating a ph
   assert.equal(control.getEscalation(escalation.id).status, "expired");
   assert.equal(store.callAttempts.size, 0);
 });
+
+test("stale accepted decision calls enter a durable stalled review state without creating a replacement call", async () => {
+  class CountingProvider extends FakeCallProvider {
+    readonly seenKeys: string[] = [];
+    override async start(input: StartCallInput): Promise<StartCallResult> {
+      this.seenKeys.push(input.idempotencyKey);
+      return super.start(input);
+    }
+  }
+
+  const clock = new MutableClock(new Date("2026-09-07T00:00:00.000Z"));
+  const store = new InMemoryControlPlaneStore();
+  const provider = new CountingProvider();
+  const control = new ControlPlane(store, provider, clock);
+  const agent = control.registerAgent({ name: "stale-agent", platform: "test", ownerId: "owner-1" });
+  const run = control.startRun(agent.id, "Working");
+  const lifecycle = new LifecycleManager(control, store, clock, { maxInProgressCallAgeMs: 5_000 });
+
+  const escalation = await control.requestOwnerDecision({
+    runId: run.id,
+    scopeId: "release",
+    question: "Ship now?",
+    blocking: true,
+    idempotencyKey: "stale-decision",
+  });
+  const attemptId = escalation.callAttemptId!;
+  assert.equal(provider.seenKeys.length, 1);
+
+  clock.advance(5_001);
+  const sweep = await lifecycle.sweep();
+  const stalled = control.getCallAttempt(attemptId);
+
+  assert.equal(sweep.staleCallsMarked, 1);
+  assert.equal(stalled.status, "stalled");
+  assert.equal(stalled.stalledAt, "2026-09-07T00:00:05.001Z");
+  assert.equal(provider.seenKeys.length, 1);
+  assert.deepEqual(control.checkpoint(run.id).unresolvedBlockingScopes, ["release"]);
+  assert.ok(control.listAuditEvents(run.id).some((event) => event.type === "call_attempt_stalled"));
+
+  clock.advance(60_000);
+  const laterSweep = await lifecycle.sweep();
+  assert.equal(laterSweep.staleCallsMarked, 0);
+  assert.equal(provider.seenKeys.length, 1);
+  assert.equal(control.getCallAttempt(attemptId).status, "stalled");
+});
+
+test("a stalled call can still resolve from the original provider call without re-creation", async () => {
+  class CountingProvider extends FakeCallProvider {
+    readonly seenKeys: string[] = [];
+    override async start(input: StartCallInput): Promise<StartCallResult> {
+      this.seenKeys.push(input.idempotencyKey);
+      return super.start(input);
+    }
+  }
+
+  const clock = new MutableClock(new Date("2026-09-07T00:00:00.000Z"));
+  const store = new InMemoryControlPlaneStore();
+  const provider = new CountingProvider();
+  const control = new ControlPlane(store, provider, clock);
+  const agent = control.registerAgent({ name: "late-outcome-agent", platform: "test", ownerId: "owner-1" });
+  const run = control.startRun(agent.id, "Working");
+  const lifecycle = new LifecycleManager(control, store, clock, { maxInProgressCallAgeMs: 1_000 });
+
+  const escalation = await control.requestOwnerDecision({
+    runId: run.id,
+    scopeId: "deploy",
+    question: "Proceed?",
+    blocking: true,
+    idempotencyKey: "late-terminal",
+  });
+  const attempt = control.getCallAttempt(escalation.callAttemptId!);
+
+  clock.advance(1_001);
+  await lifecycle.sweep();
+  assert.equal(control.getCallAttempt(attempt.id).status, "stalled");
+
+  provider.complete(attempt.providerCallId!, { status: "completed", answer: "Proceed" });
+  await control.reconcileEscalation(escalation.id);
+
+  assert.equal(provider.seenKeys.length, 1);
+  assert.equal(control.getCallAttempt(attempt.id).status, "completed");
+  assert.equal(control.getEscalation(escalation.id).status, "resolved");
+  assert.equal(control.getDecision(escalation.id)?.answer, "Proceed");
+  assert.deepEqual(control.checkpoint(run.id).unresolvedBlockingScopes, []);
+});

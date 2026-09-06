@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import type { AuditEvent, CallAttempt, Escalation } from "./domain.js";
+import type { AuditEvent, CallAttempt } from "./domain.js";
 import type { ControlPlane, Clock } from "./control-plane.js";
 import type { ControlPlaneStore } from "./store.js";
 
@@ -7,6 +7,7 @@ export interface LifecycleRecoveryConfig {
   maxAutomaticRecoveryAttempts?: number;
   baseBackoffMs?: number;
   maxBackoffMs?: number;
+  maxInProgressCallAgeMs?: number;
 }
 
 export interface LifecycleSweepResult {
@@ -15,6 +16,7 @@ export interface LifecycleSweepResult {
   recoveriesAttempted: number;
   recoveriesDeferred: number;
   recoveriesExhausted: number;
+  staleCallsMarked: number;
   errors: Array<{ kind: "escalation" | "callback"; id: string; message: string }>;
 }
 
@@ -24,6 +26,7 @@ export class LifecycleManager {
   private readonly maxAutomaticRecoveryAttempts: number;
   private readonly baseBackoffMs: number;
   private readonly maxBackoffMs: number;
+  private readonly maxInProgressCallAgeMs: number;
 
   constructor(
     private readonly control: ControlPlane,
@@ -34,6 +37,7 @@ export class LifecycleManager {
     this.maxAutomaticRecoveryAttempts = nonNegativeInteger(config.maxAutomaticRecoveryAttempts ?? 3, "maxAutomaticRecoveryAttempts");
     this.baseBackoffMs = positiveInteger(config.baseBackoffMs ?? 5_000, "baseBackoffMs");
     this.maxBackoffMs = positiveInteger(config.maxBackoffMs ?? 60_000, "maxBackoffMs");
+    this.maxInProgressCallAgeMs = positiveInteger(config.maxInProgressCallAgeMs ?? 10 * 60_000, "maxInProgressCallAgeMs");
     if (this.maxBackoffMs < this.baseBackoffMs) throw new Error("maxBackoffMs must be >= baseBackoffMs");
   }
 
@@ -44,6 +48,7 @@ export class LifecycleManager {
       recoveriesAttempted: 0,
       recoveriesDeferred: 0,
       recoveriesExhausted: 0,
+      staleCallsMarked: 0,
       errors: [],
     };
 
@@ -57,6 +62,8 @@ export class LifecycleManager {
         const escalation = this.control.getEscalation(escalationId);
         if (escalation.callAttemptId) {
           const attempt = this.control.getCallAttempt(escalation.callAttemptId);
+          if (attempt.status === "stalled") continue;
+          if (this.markStalledIfOverdue(attempt, result)) continue;
           if (attempt.status === "ambiguous") {
             const recovery = await this.recoverAmbiguous(attempt, result);
             if (!recovery.readyForReconcile) continue;
@@ -76,6 +83,8 @@ export class LifecycleManager {
       result.callbacksVisited += 1;
       try {
         const attempt = this.control.getCallAttempt(callAttemptId);
+        if (attempt.status === "stalled") continue;
+        if (this.markStalledIfOverdue(attempt, result)) continue;
         if (attempt.status === "ambiguous") {
           const recovery = await this.recoverAmbiguous(attempt, result);
           if (!recovery.readyForReconcile) continue;
@@ -87,6 +96,31 @@ export class LifecycleManager {
     }
 
     return result;
+  }
+
+  private markStalledIfOverdue(attempt: CallAttempt, result: LifecycleSweepResult): boolean {
+    if (attempt.status !== "queued" && attempt.status !== "in_progress") return false;
+    const now = this.clock.now();
+    const ageMs = now.getTime() - new Date(attempt.updatedAt).getTime();
+    if (ageMs < this.maxInProgressCallAgeMs) return false;
+
+    const stalledAt = now.toISOString();
+    const stalled: CallAttempt = {
+      ...attempt,
+      status: "stalled",
+      stalledAt,
+      updatedAt: stalledAt,
+    };
+    this.store.callAttempts.set(stalled.id, stalled);
+    this.auditLifecycle("call_attempt_stalled", stalled, "Phone call exceeded its in-progress timeout; automatic polling paused for review", {
+      priorStatus: attempt.status,
+      ageMs,
+      maxInProgressCallAgeMs: this.maxInProgressCallAgeMs,
+      providerCallIdPresent: Boolean(attempt.providerCallId),
+      failClosed: true,
+    });
+    result.staleCallsMarked += 1;
+    return true;
   }
 
   private async recoverAmbiguous(
@@ -141,7 +175,7 @@ export class LifecycleManager {
       automaticRecoveryExhaustedAt: undefined,
     };
     this.store.callAttempts.set(scheduled.id, scheduled);
-    this.auditRecovery("call_recovery_scheduled", scheduled, "Ambiguous phone-call recovery scheduled with bounded backoff", {
+    this.auditLifecycle("call_recovery_scheduled", scheduled, "Ambiguous phone-call recovery scheduled with bounded backoff", {
       attemptNumber,
       nextAutomaticRecoveryAt,
       delayMs,
@@ -159,14 +193,14 @@ export class LifecycleManager {
       updatedAt: exhaustedAt,
     };
     this.store.callAttempts.set(exhausted.id, exhausted);
-    this.auditRecovery("call_recovery_exhausted", exhausted, "Automatic phone-call recovery exhausted; manual review required", {
+    this.auditLifecycle("call_recovery_exhausted", exhausted, "Automatic phone-call recovery exhausted; manual review required", {
       automaticRecoveryAttempts: exhausted.automaticRecoveryAttempts ?? 0,
       failClosed: true,
     });
   }
 
-  private auditRecovery(
-    type: "call_recovery_scheduled" | "call_recovery_exhausted",
+  private auditLifecycle(
+    type: "call_recovery_scheduled" | "call_recovery_exhausted" | "call_attempt_stalled",
     attempt: CallAttempt,
     summary: string,
     details: Record<string, unknown>,
