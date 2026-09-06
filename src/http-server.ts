@@ -56,6 +56,13 @@ export function createControlPlaneHttpServer(controlPlane: ControlPlane, options
         ));
       }
 
+      const auditMatch = url.pathname.match(/^\/v1\/runs\/([^/]+)\/audit$/);
+      if (req.method === "GET" && auditMatch) {
+        const rawLimit = url.searchParams.get("limit");
+        const limit = rawLimit === null ? 100 : Number(rawLimit);
+        return json(res, 200, { events: controlPlane.listAuditEvents(decodeURIComponent(auditMatch[1]!), limit) });
+      }
+
       const runMatch = url.pathname.match(/^\/v1\/runs\/([^/]+)$/);
       if (req.method === "GET" && runMatch) return json(res, 200, controlPlane.getRun(decodeURIComponent(runMatch[1]!)));
 
