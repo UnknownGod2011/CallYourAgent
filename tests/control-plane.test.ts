@@ -1,12 +1,11 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { FakeCallProvider } from "../src/call-provider.js";
+import { FakeCallProvider, type StartCallInput } from "../src/call-provider.js";
 import { ControlPlane } from "../src/control-plane.js";
 import { InMemoryControlPlaneStore } from "../src/store.js";
 
-function setup() {
+function setup(provider: FakeCallProvider = new FakeCallProvider()) {
   const store = new InMemoryControlPlaneStore();
-  const provider = new FakeCallProvider();
   const control = new ControlPlane(store, provider);
   const agent = control.registerAgent({ name: "demo-agent", platform: "test", ownerId: "owner-1" });
   const run = control.startRun(agent.id, "Building the application", "backend");
@@ -50,6 +49,46 @@ test("blocking escalation blocks only its scope and idempotent retries do not cr
   assert.equal(first.id, retry.id);
   assert.equal(store.callAttempts.size, 1);
   assert.deepEqual(control.checkpoint(run.id).unresolvedBlockingScopes, ["production-deploy"]);
+});
+
+test("ambiguous create is linked durably and recoverable with the exact same idempotency key", async () => {
+  class FlakyProvider extends FakeCallProvider {
+    readonly seenKeys: string[] = [];
+    private failFirst = true;
+
+    override async start(input: StartCallInput) {
+      this.seenKeys.push(input.idempotencyKey);
+      if (this.failFirst) {
+        this.failFirst = false;
+        throw new Error("socket closed after request transmission");
+      }
+      return super.start(input);
+    }
+  }
+
+  const provider = new FlakyProvider();
+  const { store, control, run } = setup(provider);
+  const escalation = await control.requestOwnerDecision({
+    runId: run.id,
+    scopeId: "deploy",
+    question: "Proceed with production deploy?",
+    blocking: true,
+    idempotencyKey: "recoverable-decision",
+  });
+
+  const ambiguous = store.callAttempts.get(escalation.callAttemptId!)!;
+  assert.equal(ambiguous.status, "ambiguous");
+  assert.equal(ambiguous.providerCallId, undefined);
+  assert.match(ambiguous.lastError ?? "", /socket closed/);
+  assert.deepEqual(control.checkpoint(run.id).unresolvedBlockingScopes, ["deploy"]);
+
+  await control.reconcileEscalation(escalation.id);
+  const recovered = store.callAttempts.get(escalation.callAttemptId!)!;
+
+  assert.equal(recovered.status, "queued");
+  assert.ok(recovered.providerCallId);
+  assert.equal(recovered.lastError, undefined);
+  assert.deepEqual(provider.seenKeys, ["decision:recoverable-decision", "decision:recoverable-decision"]);
 });
 
 test("owner-requested callback receives current status and queues instructions for safe checkpoint consumption", async () => {
