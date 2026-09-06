@@ -169,16 +169,18 @@ export class ControlPlane {
     if (!input.eventId.trim()) throw new Error("Provider webhook event id is required");
     if (!input.providerCallId.trim()) throw new Error("Provider call id is required");
 
-    const attempt = [...this.store.callAttempts.values()].find((item) => item.providerCallId === input.providerCallId);
-    if (!attempt) throw new Error(`Unknown provider call: ${input.providerCallId}`);
+    return this.store.transaction(() => {
+      const attempt = [...this.store.callAttempts.values()].find((item) => item.providerCallId === input.providerCallId);
+      if (!attempt) throw new Error(`Unknown provider call: ${input.providerCallId}`);
 
-    if (this.store.processedWebhookEventIds.has(input.eventId)) {
-      return { duplicate: true, callAttempt: this.requireCallAttempt(attempt.id) };
-    }
+      if (this.store.processedWebhookEventIds.has(input.eventId)) {
+        return { duplicate: true, callAttempt: this.requireCallAttempt(attempt.id) };
+      }
 
-    const callAttempt = this.applyTerminalOutcome(attempt, input.outcome);
-    this.store.processedWebhookEventIds.add(input.eventId);
-    return { duplicate: false, callAttempt };
+      const callAttempt = this.applyTerminalOutcome(attempt, input.outcome);
+      this.store.processedWebhookEventIds.add(input.eventId);
+      return { duplicate: false, callAttempt };
+    });
   }
 
   async recoverCallAttempt(callAttemptId: string): Promise<CallAttempt> {
