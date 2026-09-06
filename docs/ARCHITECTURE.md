@@ -58,6 +58,22 @@ The escalation/callback remains linked to that ambiguous attempt, so a process r
 
 The fake provider implements the same provider-side deduplication behavior, allowing tests to verify duplicate retries do not create duplicate calls.
 
+## Polling and webhook convergence
+
+Polling and webhooks are delivery mechanisms for the same terminal provider outcome; they must never implement separate business transitions.
+
+`ControlPlane.applyTerminalOutcome` is the single internal transition path for both polling reconciliation and terminal webhook ingestion. This gives the domain these guarantees:
+
+- an owner decision is created at most once for an escalation;
+- callback instructions are queued at most once for a call attempt;
+- a webhook arriving before a later poll does not cause duplicate state;
+- a poll completing before a delayed webhook also remains safe because already-terminal attempts are no-ops;
+- duplicate webhook delivery is explicitly deduplicated by provider event id.
+
+The store tracks processed webhook event ids. A durable SQL implementation must make event-id insertion and terminal domain transition transactional so a crash cannot apply the outcome without recording the event or record the event without applying the outcome.
+
+CALL-E's current Calls API documents terminal webhook payloads with a top-level event `id` and the terminal CallTask under `data`; the call task id is `data.id`. `parseCalleTerminalWebhook` validates this boundary and converts only terminal `completed`, `failed`, or `canceled` payloads into the provider-agnostic `CallOutcome` consumed by the control plane. HTTP signature/authentication verification belongs in the future HTTP ingress adapter before this parser is called.
+
 ## Persistence evolution
 
 `InMemoryControlPlaneStore` is the first deterministic implementation of the store contract. It exists to validate domain behavior before selecting a database. A durable implementation should preserve the same semantics and add transactions/unique constraints for:
@@ -72,7 +88,7 @@ Persisted `CallAttempt` rows must include the exact replayable provider request 
 
 ## CALL-E mapping
 
-The production adapter should use the current asynchronous Calls API:
+The production adapter uses the current asynchronous Calls API:
 
 - `POST /v1/calls` to create a call;
 - `Idempotency-Key` for safe retries;
@@ -85,10 +101,10 @@ The production adapter should use the current asynchronous Calls API:
 
 ## Next architectural layers
 
-1. Durable SQL store with transactional uniqueness.
-2. Webhook ingestion and event-id deduplication sharing the same terminal transition logic as polling.
-3. HTTP service exposing the same control-plane methods.
-4. MCP server implemented as a thin adapter over the HTTP/core methods.
-5. TypeScript client SDK.
-6. Claude Code integration as the first end-to-end external agent adapter.
-7. Codex / ChatGPT adapters only where current platform capabilities support the required tool/checkpoint semantics.
+1. Durable SQL store with transactional uniqueness, including webhook-event/application atomicity.
+2. Minimal HTTP service exposing control-plane operations plus authenticated CALL-E webhook ingress.
+3. MCP server implemented as a thin adapter over the HTTP/core methods.
+4. TypeScript client SDK.
+5. Claude Code integration as the first end-to-end external agent adapter.
+6. Codex / ChatGPT adapters only where current platform capabilities support the required tool/checkpoint semantics.
+7. Quiet hours, call budgets, retries/expiry, and auditable policy enforcement before broad UI work.
