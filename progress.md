@@ -2,11 +2,11 @@
 
 ## Current status
 
-CallYourAgent now has a durable Node 24 TypeScript control plane, SQLite persistence, deterministic fake and production CALL-E provider adapters, ambiguous-call recovery, polling/webhook convergence, an authenticated HTTP runtime, a typed TypeScript HTTP client, and a working stdio MCP adapter built on the official MCP TypeScript v2 SDK.
+CallYourAgent is a durable Node 24 TypeScript control plane for two-way voice coordination between autonomous AI agents and their owners. It has SQLite persistence, deterministic fake and production CALL-E provider adapters, ambiguous-call recovery, polling/webhook convergence, authenticated HTTP APIs, a typed TypeScript client, a stdio MCP adapter, and a CI-proven Claude-style work loop.
 
-The core product semantics remain unchanged: an agent may call its owner for an important decision without unnecessarily freezing unrelated work; the owner may independently request a callback to hear current agent state and steer the run; human answers/instructions become durable structured state consumed at safe checkpoints rather than being injected into an in-flight model generation.
+The core product semantics remain unchanged: an agent can escalate an important decision by phone without unnecessarily freezing unrelated work; the owner can independently request a callback to hear current agent state and steer the run; human answers/instructions become durable structured state consumed at safe checkpoints rather than being injected into an in-flight model generation.
 
-A protocol-level Claude-style work-loop fixture now proves the complete core story through MCP: a branch-scoped decision blocks only that scope, another scope continues and reports progress, the owner decision later resolves the blocked scope, an owner-requested callback captures steering instructions, and those instructions remain queued until the agent deliberately consumes them at a safe checkpoint.
+Agent -> owner decision calls now also pass through an explicit production call-policy gate before any external phone side effect is created.
 
 ## Inspected this run
 
@@ -14,123 +14,151 @@ Before changing code, inspected:
 
 - full recursive repository tree on `main`;
 - `AGENTS.md` in full;
-- `progress.md` in full;
+- this `progress.md` in full;
 - `README.md` in full;
 - `docs/ARCHITECTURE.md` in full;
 - `docs/INTEGRATIONS.md` in full;
 - recent commits on `main`;
 - open GitHub issues endpoint: none;
-- current MCP integration test;
-- fake call-provider behavior;
-- domain outcome/instruction types;
-- HTTP routes used by MCP/client adapters;
-- MCP tool schemas and reconciliation contracts;
-- checkpoint implementation semantics;
-- package scripts and GitHub Actions CI path.
+- current domain types;
+- `ControlPlane` decision/callback/reconciliation/checkpoint behavior;
+- store contract;
+- fake provider behavior;
+- runtime environment bootstrap;
+- package/CI architecture through the existing repository tree and prior verified workflow state.
 
-## Previously implemented
+## Existing implemented foundation
 
 - Typed agent/run/escalation/decision/instruction/call-attempt domain model.
 - `ControlPlaneStore` abstraction and deterministic in-memory store.
-- Durable Node `node:sqlite` store with transactional webhook reconciliation and SQL uniqueness guarantees.
+- Durable `node:sqlite` store with transactional webhook reconciliation and SQL uniqueness guarantees.
 - `CallProvider` abstraction plus deterministic fake provider.
 - Production CALL-E Calls API adapter with server-side auth, idempotency keys, structured results, polling, and webhook URL support.
 - Persisted ambiguous create-call recovery using the exact same provider idempotency key.
 - Shared terminal transition path for polling and webhooks.
-- CALL-E terminal webhook parser and provider-event deduplication.
-- Authenticated HTTP control-plane API and environment-selectable fake/live provider + memory/SQLite store bootstrap.
-- Application-owned CALL-E webhook capability token plus provider event-id consistency validation.
-- End-to-end domain tests for non-blocking continuation, scoped blocking, callback steering, checkpoint consumption, idempotency, persistence, rollback, webhook races, and HTTP ingress.
-- GitHub Actions Node 24 CI running `npm run check`.
+- CALL-E terminal webhook parser and durable provider-event deduplication.
+- Authenticated HTTP control-plane API with environment-selectable fake/live provider and memory/SQLite storage.
+- Application-owned webhook capability token plus provider event-id consistency validation.
 - Typed `CallYourAgentClient` over the authenticated HTTP API.
 - Official MCP v2 stdio adapter exposing registration, run/status, escalation, checkpoint, callback, and reconciliation tools.
 - Protocol-level MCP client -> MCP server -> HTTP server -> ControlPlane -> FakeCallProvider integration test.
-- Claude Code stdio MCP launch/configuration documentation.
+- Full Claude-style MCP work-loop test proving scoped blocking, unrelated work continuation, later owner decision, owner-requested callback steering, durable queueing, and safe checkpoint consumption.
+- GitHub Actions Node 24 CI running the full TypeScript check/build/test path.
 
 ## Implemented this run
 
-### Full Claude-style MCP work-loop fixture
+### Explicit decision-call policy layer
 
-Added `tests/mcp-work-loop.test.ts` to exercise the product the way a long-running Claude-style agent should actually use it rather than testing isolated tools.
+Added `src/call-policy.ts` as a provider-independent policy gate for autonomous agent -> owner decision calls.
 
-The fixture drives the official MCP client through the real CallYourAgent MCP adapter, authenticated HTTP server, control plane, and deterministic fake phone provider. It proves this sequence:
+Current controls:
 
-1. register a Claude-style agent and start a run with parallel work;
-2. raise a **blocking** owner decision scoped only to `checkout-provider`;
-3. verify the checkpoint exposes only that unresolved blocking scope;
-4. switch to an independent `documentation` scope and successfully report completed unrelated work while the phone decision is still pending;
-5. complete the fake owner-decision call with structured output and reconcile it through the MCP tool;
-6. verify the escalation becomes `resolved`, the decision is readable, and no blocking scopes remain;
-7. resume the previously blocked checkout work and publish current state;
-8. request an owner-initiated callback through MCP;
-9. complete the callback with two steering instructions;
-10. reconcile the callback and verify both instructions appear durably as `queued` at a non-consuming checkpoint;
-11. consume them deliberately at a safe checkpoint;
-12. verify a later checkpoint has an empty instruction queue and no unresolved blocking scope.
+- minimum escalation priority;
+- quiet hours using an IANA timezone;
+- configurable priority threshold for quiet-hour bypass (`critical` by default);
+- maximum decision calls per run;
+- maximum decision calls per owner during the previous 24 hours.
 
-This is now the strongest automated proof in the repository of the core product differentiator: voice escalation does not freeze the whole agent, and human steering is asynchronous/durable rather than fake mid-generation interruption.
+Budget accounting deliberately counts attempts that may have produced a real external side effect. Ambiguous attempts therefore count because the provider might have accepted the request even when the local response was lost.
 
-### CI-discovered fixture correction
+### Deferred escalation semantics
 
-The first version of the new fixture made an incorrect assertion that the *returned snapshot* from `checkpoint(consume=true)` should already contain `status: "consumed"` values. The current control-plane contract gathers the queued instructions, marks their persisted records consumed, and returns the delivered snapshot from that checkpoint.
+`requestOwnerDecision` now persists the escalation first and evaluates call policy before starting CALL-E/fake-provider work.
 
-GitHub Actions correctly failed that assertion. The fixture was corrected to test the durable semantic that matters: the consuming checkpoint returns the instructions delivered to the agent, and the following checkpoint returns no queued instructions. No production behavior was weakened or bypassed to make CI green.
+If policy denies the call:
 
-## Architecture decisions confirmed this run
+- escalation remains `pending`;
+- no `CallAttempt` is created;
+- no provider request is sent;
+- a blocking escalation continues to block only its own scope;
+- unrelated scopes remain free to continue.
 
-1. The integration story remains checkpoint-based and does not require undocumented host interruption.
-2. A blocking escalation is branch/scope-local: the fixture explicitly changes the run's active scope and continues unrelated work while the decision call is pending.
-3. Reconciliation remains explicit and safe for environments where webhook delivery is unavailable or delayed.
-4. Owner callback instructions are durable queue items, not ephemeral prompt text.
-5. `checkpoint(consume=true)` is treated as delivery/acknowledgement of the queued snapshot; durable consumption is observable on subsequent checkpoints.
-6. MCP remains a thin transport adapter over the same HTTP/control-plane state machine used by generic clients.
+`reconcileEscalation` now reevaluates policy when a pending escalation has no call attempt. This means quiet hours can defer rather than discard an escalation. Once policy allows the call, reconciliation starts the normal idempotent call path.
+
+Expiry is evaluated before deferred policy reevaluation. A deferred escalation whose `expiresAt` passes becomes `expired` without ever creating a phone side effect.
+
+### Runtime configuration
+
+`src/server.ts` now builds the policy from server-side environment variables:
+
+- `CYA_MIN_DECISION_PRIORITY`
+- `CYA_MAX_DECISION_CALLS_PER_RUN`
+- `CYA_MAX_DECISION_CALLS_PER_OWNER_24H`
+- `CYA_QUIET_HOURS_START`
+- `CYA_QUIET_HOURS_END`
+- `CYA_QUIET_HOURS_TIME_ZONE`
+- `CYA_QUIET_HOURS_BYPASS_PRIORITY`
+
+Quiet-hour start/end/timezone must be configured together and are validated at startup. Invalid priorities, hour ranges, counts, or timezones fail fast rather than surfacing only when a live call is attempted.
+
+`.env.example` now shows a production-oriented policy configuration, and the call-policy types are exported through `src/index.ts`.
+
+### Policy documentation
+
+Added `docs/CALL_POLICY.md` documenting deferred-call semantics, budgets, quiet-hour behavior, owner-requested callback treatment, and the safety invariants around provider side effects.
+
+Owner-requested callbacks intentionally do not use the autonomous decision priority/quiet-hours gate: the owner explicitly requested that interaction. API-level callback abuse/rate limiting remains separate future hardening.
+
+## Tests added this run
+
+Added `tests/call-policy.test.ts` covering:
+
+1. a high-priority blocking decision is deferred during Asia/Kolkata quiet hours with no call attempt, remains visible as a blocked scope, then starts on reconciliation after quiet hours;
+2. a critical decision bypasses quiet hours when the configured bypass threshold is critical;
+3. a minimum-priority gate keeps a low-value non-blocking decision pending without creating a phone call;
+4. a per-run decision-call budget allows the first call and leaves the next escalation pending with only one provider attempt created;
+5. a quiet-hour-deferred escalation can expire without ever creating a call and stops blocking after expiry.
 
 ## Verification performed
 
-- Initial new work-loop commit `cb580b93889a810c3144668a87f97ca177d7ab07` ran GitHub Actions CI run `34050263469`.
-- TypeScript typechecking and build succeeded in that run; 23 existing tests passed and the new test failed only on the incorrect consumed-snapshot assertion.
-- Read the complete failing GitHub Actions job log and corrected the fixture based on actual checkpoint semantics.
-- Corrected commit `03a4f3c649535609a76ce888e2c835a5679c7dd4` ran GitHub Actions CI run `34050318813`.
-- That CI job completed successfully: checkout, Node 24 setup, dependency installation, and the full `Typecheck and test` step all passed.
-- No live CALL-E call was attempted because this run has no authorized CALL-E credential/destination phone/public deployment.
-- No actual Claude Code process was launched in this automation environment; the integration path is protocol-tested and documented, but host-level Claude Code acceptance still requires a real Claude Code installation/session.
+- GitHub Actions CI run `34053768808` for the runtime policy configuration commit completed successfully.
+- GitHub Actions CI run `34053790452` for the policy integration tests completed successfully. This includes checkout, Node 24 setup, dependency installation, TypeScript typechecking/build, and the complete Node test suite.
+- Subsequent documentation/export commits were pushed after the successful code-bearing policy test run; their CI runs contain the same already-passing code plus documentation/export changes and should remain the final verification target before the next implementation increment.
+- No live CALL-E call was attempted because this run has no authorized CALL-E credential/destination phone/public HTTPS deployment.
+- No real Claude Code host process was launched; host-level Claude acceptance remains an external runtime prerequisite, while protocol-level MCP behavior is CI-tested.
+
+## Architecture decisions confirmed this run
+
+1. Call policy belongs inside the control plane immediately before external side effects, not inside MCP, HTTP, Claude, or CALL-E adapters.
+2. Policy denial is not equivalent to provider failure. A denied call remains a durable pending escalation that may later become eligible.
+3. Quiet hours defer important decisions rather than losing them.
+4. A pending blocking escalation continues to block only its branch/scope, preserving the core non-blocking product differentiator.
+5. Critical quiet-hour bypass must be explicit/configurable rather than hard-coded as an undocumented exception.
+6. Agent-driven decision calls and explicit owner-requested callbacks have different interruption semantics and therefore different policy treatment.
+7. Ambiguous provider attempts count toward budgets because safety must assume a side effect may already exist.
 
 ## CALL-E integration status
 
-- Fake provider: implemented and tested.
+- Fake provider: implemented and CI-tested.
 - Production CALL-E HTTP provider: implemented.
 - Server-only API key handling: implemented.
-- Stable provider idempotency key propagation: implemented.
+- Stable provider idempotency propagation: implemented.
 - Polling terminal reconciliation: implemented.
-- Purpose-specific structured decision/callback results: implemented.
+- Structured decision/callback results: implemented.
 - Ambiguous create-call persistence and same-key recovery: implemented.
 - Terminal webhook parser: implemented.
 - Webhook event-id deduplication + shared terminal reconciliation: implemented.
 - Durable webhook transaction boundary: implemented.
 - Durable SQLite state across restart: implemented and tested.
-- HTTP webhook receiver: implemented.
-- Provider event-id integrity validation: implemented.
-- Application-owned webhook secret capability token: implemented.
-- Environment-selectable live/fake provider: implemented.
-- Typed HTTP agent SDK: implemented and integration-tested.
-- MCP agent adapter: implemented and protocol-integration-tested.
-- Full MCP work-loop proving decision + unrelated work + callback steering + safe consumption: implemented and CI-tested.
-- Claude Code launch/config path: documented; actual host attachment still requires a Claude Code environment.
-- Live CALL-E call: not attempted because no credential/authorized phone/public HTTPS URL is available to this run.
+- HTTP webhook receiver + application-owned secret URL: implemented.
+- Typed HTTP agent SDK: implemented and tested.
+- MCP adapter + complete asynchronous work-loop fixture: implemented and CI-tested.
+- Autonomous decision call policy: priority gates, quiet hours, per-run and per-owner budgets implemented and CI-tested.
+- Live CALL-E call: not attempted because credentials/authorized phone/public HTTPS deployment are not available to this automation run.
 
 ## Current blockers
 
 No blocker to continued repository development.
 
-Live CALL-E verification requires a valid `CALLE_API_KEY`, an authorized owner destination phone number, and a publicly reachable HTTPS deployment URL. Actual Claude Code host acceptance requires a Claude Code installation/session capable of registering the local stdio process. These are external/runtime prerequisites and do not block further policy, lifecycle, audit, deployment, or generic integration development.
+Live CALL-E verification requires a valid `CALLE_API_KEY`, an authorized owner destination phone number, and a publicly reachable HTTPS deployment URL. Actual Claude Code host acceptance requires a Claude Code installation/session capable of registering the local stdio process. These external prerequisites do not block audit, lifecycle, retry, security, deployment, or UI development.
 
 ## Highest-value next actions
 
-1. Implement explicit call policy before broad UI work: quiet hours, per-run/per-owner call budgets, escalation priority gates, retry bounds, and expiry sweep behavior.
-2. Add a durable audit-event timeline covering run status, escalation/call transitions, owner decisions, callbacks, queued instructions, and checkpoint consumption. This will support both the hackathon demo and production debugging.
-3. Add graceful shutdown and production deployment documentation; validate SQLite file persistence assumptions for the chosen hosting target.
-4. Add API rate limiting and credential scoping before exposing the control plane beyond a trusted single-owner deployment.
-5. Generate and commit a lockfile once dependency choices stabilize, then use `npm ci` in CI.
-6. Exercise the documented `claude mcp add` path in a real Claude Code installation and record exact host-level results.
-7. After the Claude path is host-proven, add thin Codex/OpenAI integration guidance only for capabilities that are actually supported at that time.
-8. Once policy/audit hardening is sound, build a small demo/status UI over the same APIs rather than creating another state machine.
+1. Add a durable audit-event timeline covering run status changes, policy decisions/defer reasons, escalation/call transitions, owner decisions, callbacks, queued instructions, webhook reconciliation, and checkpoint consumption. This is now especially valuable because operators/demo viewers should be able to see *why* an escalation remained pending during policy deferral.
+2. Add bounded recovery-attempt counters, retry scheduling/backoff, and terminal handling for repeatedly ambiguous provider calls. Current same-idempotency recovery is safe but not yet lifecycle-bounded.
+3. Add a periodic lifecycle sweep for deferred/expired escalations so policy reevaluation and expiration do not depend solely on agent-driven reconcile calls.
+4. Add API rate limiting and credential scopes, especially for owner-requested callbacks, before exposing the control plane beyond a trusted single-owner deployment.
+5. Add graceful shutdown and production deployment documentation; validate SQLite persistence assumptions for the chosen hosting target.
+6. Generate and commit a lockfile once dependency choices stabilize, then use `npm ci` in CI.
+7. Exercise the documented `claude mcp add` path in a real Claude Code installation and record exact host-level results.
+8. After policy/audit/lifecycle hardening, build a small demo/status UI over the same APIs rather than creating another state machine.
