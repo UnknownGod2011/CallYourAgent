@@ -2,124 +2,92 @@
 
 ## Current status
 
-CallYourAgent is a durable Node 24 TypeScript control plane for two-way voice coordination between autonomous AI agents and their owners. The product has SQLite persistence, deterministic fake and production CALL-E providers, same-idempotency ambiguous-call recovery, polling/webhook convergence, authenticated HTTP APIs, a typed TypeScript client, stdio MCP, CI-proven Claude-style branch/checkpoint behavior, autonomous decision-call policy, a durable privacy-aware audit timeline, and now a CI-verified background lifecycle manager with bounded automatic ambiguous-call recovery.
+CallYourAgent is a durable Node 24 TypeScript control plane for two-way voice coordination between autonomous AI agents and their owners. The product currently has SQLite persistence, deterministic fake and production CALL-E providers, persisted replayable call attempts, same-idempotency ambiguous-call recovery, polling/webhook convergence, authenticated HTTP APIs, a typed TypeScript client, stdio MCP, CI-proven Claude-style branch/checkpoint behavior, decision-call policy, durable privacy-aware audit history, and a background lifecycle manager with bounded ambiguous-call recovery.
 
-The core semantics remain unchanged: an agent may call its owner for genuinely important judgment without freezing unrelated scopes; the owner may independently request a callback to hear current status and steer the run; human answers/instructions become durable structured state consumed only at safe checkpoints.
+The core semantics remain unchanged: an agent may call its owner for genuinely important human judgment without freezing unrelated scopes; the owner may independently request a callback to hear current status and steer the run; human answers/instructions become durable structured state consumed only at safe checkpoints.
 
 ## Exact repo state inspected this run
 
-Before changing code, inspected the full recursive `main` tree at `542115962be51bd81fc5d1363948673b940b1049`, recent commits, repository metadata/permissions, and open issues (none). Read `AGENTS.md`, this file, `README.md`, `docs/ARCHITECTURE.md`, `docs/INTEGRATIONS.md`, and `docs/CALL_POLICY.md` in full. Inspected the current `ControlPlane`, domain model, SQLite store, runtime bootstrap, control-plane tests, CI workflow/tree, and the existing audit/policy architecture. No open issue or PR required coordination.
+Before making changes, inspected the complete recursive `main` tree at `8e00960f7d8eba474edf906a33460c92f1ba89be`, repository metadata/permissions, recent commits, and issues (none). Read `AGENTS.md`, this file, `README.md`, `docs/ARCHITECTURE.md`, `docs/INTEGRATIONS.md`, and `docs/CALL_POLICY.md` in full. Inspected `src/control-plane.ts`, `src/lifecycle.ts`, and `tests/lifecycle.test.ts` specifically because the previous run identified manual reconciliation bypass of exhausted automatic recovery as the highest-value safety gap. No open issue or PR required coordination.
 
 ## Existing foundation preserved
 
-- Agent registration, runs, heartbeat/status, branch-scoped blocking, decisions, callbacks, durable instruction queues, and safe checkpoint consumption.
-- `ControlPlaneStore` with in-memory and durable `node:sqlite` implementations, WAL, uniqueness constraints, and webhook transaction rollback/reload behavior.
-- Fake CALL-E provider plus production CALL-E Calls API adapter with server-only credentials, structured results, provider idempotency, polling, and terminal webhooks.
-- Persist-before-side-effect call attempts and recovery using the exact original provider idempotency key.
-- Shared polling/webhook terminal state transition and provider event deduplication.
-- Authenticated HTTP control plane, typed TypeScript client, official MCP stdio adapter, and Claude-style end-to-end MCP work-loop tests.
-- Decision-call priority gate, quiet hours, critical bypass, per-run/per-owner budgets, expiry, and durable policy-deferral reasons.
-- Privacy-aware durable audit timeline with explicit monotonic ordering across SQLite restarts.
+- Agent registration, run state, heartbeats/status, branch-scoped blocking, owner decisions, owner callbacks, durable instruction queues, and safe checkpoint consumption.
+- In-memory and durable `node:sqlite` stores with WAL, explicit transactions, uniqueness constraints, rollback/reload behavior, and persisted audit ordering.
+- Fake CALL-E provider and production CALL-E Calls API adapter with server-only credentials, structured results, provider idempotency, polling, and terminal webhook support.
+- Persist-before-side-effect call attempts with exact task/metadata/idempotency data needed for safe replay after ambiguous provider outcomes.
+- Shared polling/webhook terminal transition and provider event deduplication.
+- Authenticated HTTP control plane, typed TypeScript client, MCP stdio adapter, and Claude-style end-to-end MCP work-loop tests.
+- Decision priority gates, quiet hours, critical bypass, per-run/per-owner call budgets, escalation expiry, and durable policy-deferral reasons.
+- Privacy-aware audit timeline with durable monotonic event ordering.
+- Periodic lifecycle sweeps with exponential backoff and bounded automatic recovery attempts.
 
 ## Changes made this run
 
-### Autonomous lifecycle manager
+### Core fail-closed recovery exhaustion guard
 
-Added `src/lifecycle.ts` with `LifecycleManager`. A sweep now progresses unresolved work independently of an agent explicitly invoking reconcile endpoints:
+Moved the exhaustion invariant into the core recovery primitive itself. `ControlPlane.recoverCallAttempt` now immediately returns an ambiguous attempt unchanged when `automaticRecoveryExhaustedAt` is present.
 
-- revisits `pending`/`calling` decision escalations, so policy-deferred work can later become eligible or expire;
-- polls active decision calls for terminal outcomes;
-- polls active owner-requested callbacks and queues resulting steering through the existing safe-checkpoint path;
-- handles each item independently so one provider/reconciliation error does not prevent unrelated lifecycle work from progressing;
-- returns a typed sweep summary with visit/recovery/error counts.
+This closes the previous loophole where the background `LifecycleManager` correctly stopped retrying, but an ordinary explicit `reconcileEscalation`, `reconcileCallback`, or direct `recoverCallAttempt` call could cause another provider create request. Since reconciliation is reachable through integration surfaces, that behavior was too easy to trigger accidentally.
 
-The production CLI runtime wires a periodic lifecycle sweep around the same `ControlPlane`; the background loop does not create a second state machine and does not consume queued owner instructions.
+The new invariant is intentionally fail-closed: once automatic recovery has exhausted, ordinary reconciliation cannot create any new provider-side call request. The attempt remains `ambiguous`, preserving the truth that the original request may already have reached CALL-E. If a future deployment needs an operator override, it should be introduced as an explicit separately authorized and audited operation instead of overloading normal reconciliation.
 
-### Bounded automatic ambiguous-call recovery
+### Regression coverage
 
-`CallAttempt` now has durable optional recovery lifecycle fields:
+Added a lifecycle/control-plane regression test that:
 
-- `automaticRecoveryAttempts`
-- `nextAutomaticRecoveryAt`
-- `automaticRecoveryExhaustedAt`
+1. creates a blocking owner-decision call through a provider that always throws after observing the idempotency key;
+2. configures a one-attempt automatic recovery budget;
+3. runs the lifecycle manager until the attempt is marked exhausted;
+4. records the exact provider request count;
+5. calls `reconcileEscalation` explicitly;
+6. calls `recoverCallAttempt` explicitly;
+7. verifies neither path creates another provider request;
+8. verifies the attempt remains `ambiguous` and the affected scope remains blocked.
 
-Automatic recovery replays the exact persisted call task/metadata through the existing `ControlPlane.recoverCallAttempt`, which retains the original provider idempotency key. Failed replays use exponential backoff capped by configuration.
+### Documentation
 
-When the automatic recovery budget is exhausted, the attempt remains `ambiguous` and receives `automaticRecoveryExhaustedAt`. It is intentionally **not** marked `failed`, because an ambiguous original request may have reached the provider. This is a fail-closed manual-review state that stops automatic retries rather than risking a duplicate real-world call.
-
-Manual/explicit reconcile remains an intentional override path today; the bounded guarantee applies to autonomous background recovery. Moving the guard into the core primitive is a later hardening step if untrusted clients receive reconcile permission.
-
-### Auditability
-
-Added audit types:
-
-- `call_recovery_scheduled`
-- `call_recovery_exhausted`
-
-These events contain operational recovery metadata only and do not duplicate call tasks, answers, callback transcripts, or owner instruction text.
-
-### Runtime configuration
-
-`src/server.ts` now parses lifecycle recovery configuration and exposes `lifecycle` from `buildRuntimeFromEnv`. The normal server entrypoint runs the sweeper periodically (default 5 seconds) and reports item-level errors to stderr without terminating unrelated reconciliation.
-
-Supported variables are documented in `docs/CALL_POLICY.md`:
-
-- `CYA_LIFECYCLE_SWEEP_INTERVAL_MS`
-- `CYA_MAX_AUTOMATIC_RECOVERY_ATTEMPTS`
-- `CYA_RECOVERY_BASE_BACKOFF_MS`
-- `CYA_RECOVERY_MAX_BACKOFF_MS`
-
-An attempted `.env.example` blob update was blocked by the execution safety layer while handling credential-shaped placeholders, so the example file is unchanged in this run; runtime support and documentation are present.
-
-### Tests added
-
-Added `tests/lifecycle.test.ts` covering:
-
-1. a lifecycle sweep independently reconciles a completed owner decision and owner callback, including durable queued steering, without agent-driven reconcile calls;
-2. ambiguous provider-create recovery is bounded, backoff-aware, fail-closed, and reuses the exact same idempotency key for every automatic replay;
-3. once exhausted, later sweeps do not automatically create another provider request and the affected blocking scope remains blocked for manual review;
-4. a policy-deferred escalation expires through the lifecycle sweep without ever creating a phone attempt.
+Updated `docs/CALL_POLICY.md` to document that recovery exhaustion is now enforced by the core control plane rather than only by the lifecycle manager. The previous language describing normal explicit reconciliation as a manual override was removed. Any future override is now specified as a separate operator-only design concern.
 
 ## Architecture decisions made this run
 
-1. Background lifecycle processing is an orchestrator over the existing `ControlPlane`, not a separate business-state implementation.
-2. Ambiguous provider outcomes must fail closed. Exhausting retries means “manual review required,” not “provider definitely failed.”
-3. Automatic retry metadata belongs on durable `CallAttempt` records so restart does not reset retry budgets/backoff.
-4. Background reconciliation never consumes owner instructions; consumption remains an agent safe-checkpoint action.
-5. One failing lifecycle item must not stop unrelated branches/callbacks from reconciling.
-6. Explicit manual reconciliation remains an override for now; autonomous recovery is bounded.
+1. Retry exhaustion is a domain safety invariant, not merely a background-worker behavior.
+2. Ordinary agent/API reconciliation must not be capable of bypassing a provider-side-effect safety ceiling.
+3. Exhausted ambiguous attempts remain ambiguous; they must not be relabeled failed without provider evidence.
+4. A manual recovery override, if ever needed, should be an explicit privileged operation with separate authorization and audit semantics.
+5. No change was made to branch-scoped blocking or checkpoint consumption semantics.
 
 ## Verification performed
 
-- The local execution container still cannot resolve `github.com`, so direct local clone/test execution remains unavailable.
-- First code-bearing CI run `34059840042` on commit `68b351cd2196b38dffda8bef426c55aea0285cb2` reached the Node 24 typecheck/test step but failed because the intentionally-throwing test provider override inferred `Promise<void>` instead of the provider contract's `Promise<StartCallResult>`.
-- Production lifecycle code was not weakened. The test fixture was corrected with an explicit `Promise<StartCallResult>` override signature in commit `2e462d25bf262d528dca774734bda231b11f175f`.
-- Final CI run `34059882548` completed successfully: checkout, Node 24 setup, dependency installation, `npm run check`, TypeScript typecheck/build path, and the complete test suite all passed.
-- No live CALL-E call was attempted because this run has no authorized CALL-E credential, owner destination phone, or public HTTPS deployment.
+- Direct local clone/test execution remains unavailable in the automation container because DNS resolution for `github.com` still fails.
+- GitHub Actions CI run `34062730152` for code-bearing commit `36ae018d1ec795400fa7b88c7dc54dbe5d27829a` completed successfully.
+- That CI run executed the repository's normal Node 24 workflow, including dependency installation and `npm run check`, which covers TypeScript checking/build and the complete Node test suite.
+- The new regression test passed as part of that successful CI run.
+- No live CALL-E call was attempted. This run had no authorized CALL-E credential, owner destination phone, or public HTTPS deployment, and therefore makes no claim of live provider success.
 
 ## CALL-E integration status
 
-- Fake provider: implemented and CI-tested; lifecycle tests now verify autonomous reconciliation paths too.
-- Production CALL-E adapter: implemented with server-only API key, structured results, polling, webhook URL, and provider idempotency.
+- Fake provider: implemented and CI-tested end-to-end.
+- Production CALL-E adapter: implemented with server-only API key, structured results, polling, webhook URL construction, and provider idempotency.
 - Same-key ambiguous recovery: implemented.
-- Automatic recovery bounds/backoff: implemented and CI-tested by the lifecycle manager this run.
+- Automatic recovery bounds/backoff: implemented and CI-tested.
+- Core enforcement of recovery exhaustion: implemented and CI-tested this run.
 - Webhook dedupe + durable transaction: implemented.
-- HTTP + TypeScript SDK + MCP path: implemented.
-- Live CALL-E call: still not attempted; credentials/authorized phone/public HTTPS deployment are not available to this run.
+- HTTP + TypeScript SDK + MCP integration path: implemented.
+- Live CALL-E call: not attempted; external credentials/authorized phone/public HTTPS deployment are still absent.
 
 ## Current blockers
 
-No blocker to continued repository development.
+There is no blocker to continued repository development.
 
-Live CALL-E verification still requires a valid CALL-E credential, authorized owner phone number, and public HTTPS deployment. Host-level Claude Code acceptance requires an actual Claude Code installation/session. The automation execution container cannot currently clone GitHub by DNS, but the GitHub connector and Actions CI remain available for direct repository work and verification.
+Live CALL-E verification still requires a valid CALL-E credential, an authorized owner phone number, and a public HTTPS deployment. Host-level Claude Code acceptance still requires an actual Claude Code installation/session. The execution container still cannot clone GitHub because of DNS resolution, but direct GitHub repository access and GitHub Actions CI remain available and were used successfully.
 
 ## Highest-value next actions
 
-1. Move recovery-exhaustion enforcement into core reconciliation or scoped API permissions so untrusted callers cannot bypass automatic retry limits.
-2. Add stale in-progress call timeout policy distinct from ambiguous-create recovery.
-3. Add credential scopes and callback/reconcile rate limits before exposing the API beyond a trusted single-owner environment.
-4. Add graceful shutdown that stops background lifecycle work and cleanly closes SQLite/server resources.
-5. Add production deployment guidance for a host with persistent disk and stable public HTTPS webhook ingress.
-6. Generate a lockfile and switch CI to `npm ci` once dependency choices stabilize.
-7. Exercise the documented Claude Code MCP registration path in a real host and record exact results.
-8. After reliability/security hardening, build a small status/demo UI on the existing run/audit APIs.
+1. Add stale in-progress call timeout policy distinct from ambiguous-create recovery so calls stuck forever in provider `queued`/`calling` state become explicit reviewable state without unsafe re-creation.
+2. Add credential scopes and API-level rate limits, especially for owner callbacks and reconciliation endpoints, before exposing the service beyond a trusted single-owner environment.
+3. Add graceful shutdown that stops lifecycle sweeps and cleanly closes HTTP/SQLite resources.
+4. Add production deployment guidance for persistent disk and stable public HTTPS webhook ingress.
+5. Generate a lockfile and switch CI to `npm ci` once dependency choices stabilize.
+6. Exercise the documented Claude Code MCP registration path in a real host and record exact acceptance results.
+7. After reliability/security hardening, build a small status/demo UI over existing run/audit APIs rather than creating another business-state layer.
