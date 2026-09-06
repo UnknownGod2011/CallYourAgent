@@ -48,6 +48,37 @@ A non-blocking escalation never appears in `unresolvedBlockingScopes`.
 
 This is deliberately not described as interrupting an in-flight model generation.
 
+## HTTP control-plane boundary
+
+`src/http-server.ts` exposes the same domain operations over a small JSON API. Agent-facing routes require `Authorization: Bearer <CYA_API_TOKEN>`; `/health` is intentionally unauthenticated. The API currently exposes agent registration, run start/read/heartbeat, escalation creation/read/reconciliation, checkpoints, owner callback creation/read/reconciliation, and CALL-E webhook ingress.
+
+The HTTP adapter does not own business state. It validates transport-level input and delegates directly to `ControlPlane`, preserving one set of semantics for future MCP and SDK adapters.
+
+Request bodies are size-bounded and responses use `Cache-Control: no-store` because status/decision payloads can contain sensitive agent context.
+
+## CALL-E webhook ingress security
+
+Current CALL-E terminal webhook delivery is unsigned: there is no current provider webhook secret/signature contract. CALL-E does provide the required `CALL-E-Event-Id` header, and current SDK guidance says receivers should verify that it matches the body event `id` and deduplicate by that id.
+
+CallYourAgent therefore uses two checks before domain mutation:
+
+1. an application-owned high-entropy `CYA_CALLE_WEBHOOK_TOKEN`, embedded in the configured webhook URL and compared using constant-time equality;
+2. `CALL-E-Event-Id` must exactly match the parsed body event id.
+
+This is deliberately documented as an application-layer secret URL, **not** as a CALL-E signature. If CALL-E adds signed webhooks later, signature verification should replace or augment this boundary without changing `ControlPlane.ingestProviderWebhook`.
+
+## Runtime bootstrap
+
+`src/server.ts` builds a deployable runtime from environment variables:
+
+- `CYA_CALL_PROVIDER=fake|calle` selects deterministic development calls or live CALL-E;
+- `CYA_STORE=memory|sqlite` selects test/dev memory state or durable SQLite;
+- `CYA_SQLITE_PATH` controls the durable DB path;
+- `CYA_API_TOKEN` authenticates agent-facing HTTP routes;
+- live CALL-E mode additionally requires `CALLE_API_KEY`, `CYA_OWNER_PHONE`, `CYA_PUBLIC_BASE_URL`, and `CYA_CALLE_WEBHOOK_TOKEN`.
+
+When live mode is selected, the configured CALL-E webhook URL is constructed by the backend itself so the user does not need to hand-wire a separate callback URL format.
+
 ## Idempotency and ambiguous side effects
 
 Every phone side effect has a stable control-plane idempotency key. The real CALL-E adapter forwards that stable value using CALL-E's `Idempotency-Key` header.
@@ -72,7 +103,7 @@ Polling and webhooks are delivery mechanisms for the same terminal provider outc
 
 `ingestProviderWebhook` executes lookup, terminal transition, and provider-event recording inside the store's synchronous transaction boundary. The durable SQLite implementation therefore commits or rolls back the webhook event and all associated domain mutations together. If a mutation throws, both the SQL transaction and the in-memory mirrors are restored to the pre-event state.
 
-CALL-E's current Calls API documents terminal webhook payloads with a top-level event `id` and the terminal CallTask under `data`; the call task id is `data.id`. `parseCalleTerminalWebhook` validates this boundary and converts only terminal `completed`, `failed`, or `canceled` payloads into the provider-agnostic `CallOutcome` consumed by the control plane. HTTP signature/authentication verification belongs in the future HTTP ingress adapter before this parser is called.
+CALL-E's current Calls API documents terminal webhook payloads with a top-level event `id` and the terminal CallTask under `data`; the call task id is `data.id`. `parseCalleTerminalWebhook` validates this boundary and converts only terminal `completed`, `failed`, or `canceled` payloads into the provider-agnostic `CallOutcome` consumed by the control plane.
 
 ## Durable persistence
 
@@ -112,10 +143,9 @@ The repository has GitHub Actions CI on `main` and pull requests using Node 24. 
 
 ## Next architectural layers
 
-1. Minimal HTTP service exposing control-plane operations plus authenticated CALL-E webhook ingress.
-2. Environment/bootstrap selection between fake and CALL-E providers and in-memory vs durable SQLite storage.
-3. MCP server implemented as a thin adapter over the HTTP/core methods.
-4. TypeScript client SDK.
-5. Claude Code integration as the first end-to-end external agent adapter.
-6. Codex / ChatGPT adapters only where current platform capabilities support the required tool/checkpoint semantics.
-7. Quiet hours, call budgets, retries/expiry, and auditable policy enforcement before broad UI work.
+1. MCP server implemented as a thin adapter over the same control-plane semantics.
+2. TypeScript client SDK.
+3. Claude Code integration as the first end-to-end external agent adapter.
+4. Codex / ChatGPT adapters only where current platform capabilities support the required tool/checkpoint semantics.
+5. Quiet hours, call budgets, retries/expiry, and auditable policy enforcement before broad UI work.
+6. Production deployment hardening: TLS/reverse proxy, secret management, rate limiting, and optional Postgres for multi-instance scale.
