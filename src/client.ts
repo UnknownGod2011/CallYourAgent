@@ -1,6 +1,7 @@
 import type {
   AgentRegistration,
   AgentRun,
+  AuditEvent,
   CallAttempt,
   CheckpointResult,
   Escalation,
@@ -90,6 +91,14 @@ export class CallYourAgentClient {
 
   async getRun(runId: string): Promise<AgentRun> {
     return this.request("GET", `/v1/runs/${encodeURIComponent(runId)}`);
+  }
+
+  async getAuditTimeline(runId: string, limit = 100): Promise<AuditEvent[]> {
+    const result = await this.request<{ events: AuditEvent[] }>(
+      "GET",
+      `/v1/runs/${encodeURIComponent(runId)}/audit?limit=${encodeURIComponent(String(limit))}`,
+    );
+    return result.events;
   }
 
   async reportStatus(runId: string, input: HeartbeatInput): Promise<AgentRun> {
