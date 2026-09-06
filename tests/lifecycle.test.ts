@@ -109,6 +109,49 @@ test("automatic ambiguous recovery is bounded, backoff-aware, fail-closed, and r
   assert.ok(control.listAuditEvents(run.id).some((event) => event.type === "call_recovery_exhausted"));
 });
 
+test("explicit reconciliation cannot bypass exhausted ambiguous recovery", async () => {
+  class AlwaysAmbiguousProvider extends FakeCallProvider {
+    readonly seenKeys: string[] = [];
+    override async start(input: StartCallInput): Promise<StartCallResult> {
+      this.seenKeys.push(input.idempotencyKey);
+      throw new Error("connection lost after send");
+    }
+  }
+
+  const clock = new MutableClock(new Date("2026-09-07T00:00:00.000Z"));
+  const store = new InMemoryControlPlaneStore();
+  const provider = new AlwaysAmbiguousProvider();
+  const control = new ControlPlane(store, provider, clock);
+  const agent = control.registerAgent({ name: "fail-closed-agent", platform: "test", ownerId: "owner-1" });
+  const run = control.startRun(agent.id, "Working");
+  const lifecycle = new LifecycleManager(control, store, clock, {
+    maxAutomaticRecoveryAttempts: 1,
+    baseBackoffMs: 1_000,
+    maxBackoffMs: 1_000,
+  });
+
+  const escalation = await control.requestOwnerDecision({
+    runId: run.id,
+    scopeId: "payments",
+    question: "Retry the charge?",
+    blocking: true,
+    idempotencyKey: "core-exhaustion-guard",
+  });
+  const attemptId = escalation.callAttemptId!;
+
+  await lifecycle.sweep();
+  const exhausted = control.getCallAttempt(attemptId);
+  assert.ok(exhausted.automaticRecoveryExhaustedAt);
+  assert.equal(provider.seenKeys.length, 2);
+
+  await control.reconcileEscalation(escalation.id);
+  await control.recoverCallAttempt(attemptId);
+
+  assert.equal(provider.seenKeys.length, 2);
+  assert.equal(control.getCallAttempt(attemptId).status, "ambiguous");
+  assert.deepEqual(control.checkpoint(run.id).unresolvedBlockingScopes, ["payments"]);
+});
+
 test("lifecycle sweep expires a policy-deferred escalation without creating a phone side effect", async () => {
   const clock = new MutableClock(new Date("2026-09-07T00:00:00.000Z"));
   const store = new InMemoryControlPlaneStore();
