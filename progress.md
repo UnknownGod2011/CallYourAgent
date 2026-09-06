@@ -2,7 +2,7 @@
 
 ## Current status
 
-Architecture-first TypeScript control-plane implementation is in place with deterministic fake-provider behavior, a production CALL-E provider adapter, durable recovery semantics for ambiguous call creation, and provider-webhook reconciliation that converges with polling through one terminal transition path. Duplicate terminal delivery is now explicitly guarded both by call-attempt terminal state and webhook event-id deduplication.
+Architecture-first TypeScript control-plane implementation now has a durable SQLite-backed store, transactional webhook reconciliation, deterministic fake-provider behavior, a production CALL-E provider adapter, ambiguous-call recovery, and provider-webhook/polling convergence. GitHub Actions CI now provides a real Node 24 verification path and has successfully completed typecheck + the full test suite for the persistence increment.
 
 ## Inspected this run
 
@@ -12,11 +12,12 @@ Architecture-first TypeScript control-plane implementation is in place with dete
 - `README.md` in full.
 - `docs/ARCHITECTURE.md` in full.
 - `docs/INTEGRATIONS.md` in full.
-- Core source files including `domain.ts`, `store.ts`, `call-provider.ts`, `calle-provider.ts`, `control-plane.ts`, and exports.
-- Existing control-plane tests.
+- Core source files needed for the persistence boundary, including `domain.ts`, `store.ts`, `control-plane.ts`, `call-provider.ts`, and exports.
+- Existing test layout and `package.json` / TypeScript configuration.
 - Recent commit history on `main`.
-- Open GitHub issues endpoint: none present.
-- Current CALL-E Calls API documentation for terminal webhook correlation. The docs state that terminal webhooks use a top-level event `id`, return the call task under `data`, and use `data.id` as the call id; caller metadata is echoed on webhook payloads.
+- Open GitHub issues endpoint: none present; therefore no open PR was surfaced by that endpoint either.
+- Current Node documentation for `node:sqlite` / `DatabaseSync` availability and Node 24 behavior.
+- GitHub Actions run state and job steps after adding CI.
 
 ## Previously implemented
 
@@ -27,70 +28,106 @@ Architecture-first TypeScript control-plane implementation is in place with dete
 - End-to-end fake-provider tests covering non-blocking continuation, branch-specific blocking, decision resolution, callback steering, checkpoint consumption, and idempotency.
 - Production `CalleCallProvider` mapping to CALL-E's asynchronous create/get APIs with server-side auth, stable `Idempotency-Key`, recipient phone, correlation metadata, optional webhook URL, and purpose-specific structured result schemas.
 - Persisted replayable call requests and same-idempotency-key recovery for ambiguous create outcomes.
+- Polling/webhook convergence through one terminal transition path.
+- CALL-E terminal webhook parser with event-id deduplication and duplicate-side-effect tests.
 - Architecture and integration-boundary documentation.
 
 ## Implemented this run
 
-- Added `processedWebhookEventIds` to the store contract and in-memory store so repeated provider events have an explicit deduplication key.
-- Added `ControlPlane.ingestProviderWebhook({ eventId, providerCallId, outcome })`.
-- Refactored polling reconciliation and webhook ingestion to share one internal terminal transition path instead of separately creating decisions/instructions.
-- The shared terminal transition is idempotent at call-attempt level: already `completed` or `failed` attempts are no-ops.
-- Owner-decision terminal outcomes now resolve the linked escalation through the same logic regardless of whether evidence arrived through polling or a webhook.
-- Owner-callback terminal outcomes queue instructions through the same logic regardless of delivery path.
-- Added explicit webhook event-id deduplication so repeated delivery returns `duplicate: true` without repeating domain side effects.
-- Added regression coverage proving a decision webhook delivered twice creates exactly one `OwnerDecision` and unblocks the scope once.
-- Added regression coverage proving webhook completion followed by polling cannot enqueue callback instructions twice.
-- Added `parseCalleTerminalWebhook` as a CALL-E-specific boundary parser. It accepts documented terminal CallTask webhook payloads, uses the top-level event id for deduplication, maps `data.id` to provider call id, rejects/non-mutates non-terminal or malformed payloads, maps `failed`/`canceled` to failed outcomes, and extracts decision answers or callback instructions from `structured_result`.
-- Added parser tests for completed decisions, callback instructions, ignored non-terminal events, and terminal failures.
-- Exported the CALL-E webhook parser publicly.
-- Updated `docs/ARCHITECTURE.md` with polling/webhook convergence, event-id dedup semantics, and the requirement that a future durable store atomically records the event and applies its terminal state transition.
+### Durable store boundary
+
+- Extended `ControlPlaneStore` with a synchronous `transaction(operation)` contract.
+- `InMemoryControlPlaneStore.transaction` executes inline, preserving existing deterministic behavior.
+- Wrapped `ControlPlane.ingestProviderWebhook` in the store transaction boundary, so provider-event lookup, terminal state application, decision/instruction creation, and webhook event recording are one atomic domain mutation when the backing store supports transactions.
+
+### SQLite persistence
+
+- Added `SqliteControlPlaneStore` using Node 24's built-in `node:sqlite` `DatabaseSync`.
+- Added durable SQL-backed map/set implementations while preserving the existing tested `Map`/`Set` control-plane contract.
+- Persisted:
+  - agents,
+  - runs,
+  - escalations,
+  - owner decisions,
+  - owner instructions,
+  - replayable call attempts,
+  - escalation idempotency mappings,
+  - callback idempotency mappings,
+  - processed webhook event ids.
+- Enabled WAL, foreign-key mode, and normal synchronous durability mode for the reference single-process deployment.
+- Added an explicit `BEGIN IMMEDIATE` / `COMMIT` / `ROLLBACK` transaction implementation.
+- On rollback, reloads all in-memory SQL mirrors so the process cannot continue with memory diverged from committed durable state.
+- Added SQL uniqueness for escalation idempotency keys and non-null provider call ids.
+- Added indexes for run/status lookups on instructions and escalations.
+- Exported `SqliteControlPlaneStore` from the public package surface.
+- Raised the documented runtime engine to Node 24+ to match the built-in SQLite implementation.
+
+### Tests
+
+- Added persistence test proving agent/run/escalation/instruction/call-attempt state survives a close/reopen cycle.
+- Added transaction rollback test proving both SQL rows and in-memory mirrors revert after a thrown domain mutation.
+- Added SQL uniqueness test proving two call attempts cannot claim the same provider call id.
+
+### CI / verification
+
+- Added `.github/workflows/ci.yml` for pushes to `main` and pull requests.
+- CI uses Node 24 and runs dependency installation followed by `npm run check`.
+- Initial workflow revision used `npm ci` but the repository does not yet have a lockfile; corrected it to `npm install --no-audit --no-fund` rather than leaving knowingly broken CI.
+- GitHub Actions run `34041142863` completed successfully; the `Typecheck and test` step completed successfully under Node 24.
+- A subsequent documentation-only CI run was in progress at the time this progress file was prepared; the code-bearing run had already passed.
+
+### Documentation
+
+- Updated `docs/ARCHITECTURE.md` with the durable SQLite persistence model, transactional webhook invariant, rollback mirror-reload behavior, SQL uniqueness guarantees, Node 24 requirement, CI verification path, and Postgres evolution boundary.
 
 ## Architecture decisions
 
-1. Polling and webhooks are transport mechanisms for the same provider result and must share one domain transition path.
-2. Webhook deduplication uses the provider's stable event id; provider call id alone is insufficient because a call may legitimately produce multiple events.
-3. A terminal call attempt is a second idempotency barrier. This protects against a delayed webhook after polling and against different event ids carrying the same terminal evidence.
-4. Unknown provider call ids are rejected rather than recorded as processed. This avoids poisoning event dedup state before the correlated call attempt exists.
-5. In a SQL-backed store, event-id insertion and outcome application must occur atomically in one transaction.
-6. Provider-specific payload parsing stays outside the core domain. The control plane consumes a provider-agnostic `CallOutcome`.
-7. HTTP-level webhook authentication/signature verification must happen before `parseCalleTerminalWebhook` / `ingestProviderWebhook`; the current repository does not claim such verification yet.
-8. Live CALL-E success is still not claimed without authorized credentials and an observed real call.
+1. The existing synchronous domain API is intentionally preserved for the reference implementation rather than forcing an async persistence rewrite before the MVP is stable.
+2. SQLite is the durable single-control-plane store for the hackathon/reference deployment; a future multi-instance Postgres adapter must preserve the exact same uniqueness and transaction semantics.
+3. Webhook event recording and terminal side effects must execute inside one store transaction.
+4. SQL-backed `Map`/`Set` mirrors allow the tested domain code to remain unchanged while making every mutation durable.
+5. A rollback must repair both SQL and in-memory state; rolling back only SQL would be unsafe because later domain reads use the mirrors.
+6. Provider call id uniqueness is enforced below the application layer, not only by code conventions.
+7. CI is now the authoritative executable verification path when the automation environment cannot clone the repository itself.
+8. CALL-E remains a transport adapter; live CALL-E success is still not claimed without authorized credentials and an observed real call.
 
 ## Verification performed
 
-- Reviewed all modified files through GitHub writes and repository reads available to this run.
-- Added deterministic unit tests for duplicate decision webhook delivery and webhook-then-poll callback reconciliation.
-- Added deterministic unit tests for CALL-E terminal webhook payload parsing.
-- Verified the current CALL-E documentation states that terminal webhooks identify the event at top-level `id` and the call task at `data.id`, matching the new adapter boundary.
-- Local TypeScript compilation/tests are still **not claimed as executed successfully** because this automation environment has previously been unable to resolve/clone `github.com`; GitHub connector reads/writes are functioning. No unsupported success claim was made.
+- GitHub Actions successfully executed Node 24 dependency installation, TypeScript typecheck, build, and Node test suite through `npm run check` for the code-bearing CI run.
+- The CI job's `Typecheck and test` step reported `success`.
+- Reviewed every new/modified file through GitHub connector reads/writes.
+- Verified official Node documentation exposes `DatabaseSync` through `node:sqlite` and that it is available without the old experimental CLI flag in current Node 24-era releases.
+- No live CALL-E call was attempted because no authorized API key/phone credential is available to this run.
 
 ## CALL-E integration status
 
-- Fake provider: implemented.
+- Fake provider: implemented and tested.
 - Production CALL-E HTTP provider: implemented.
 - Server-only API key handling: implemented by provider configuration and `.env.example` convention.
 - Stable provider idempotency key propagation: implemented.
 - Polling terminal reconciliation: implemented.
 - Purpose-specific structured decision/callback results: implemented.
-- Ambiguous create-call persistence and same-key recovery: implemented at the control-plane/domain layer.
+- Ambiguous create-call persistence and same-key recovery: implemented.
 - Terminal webhook payload parser: implemented.
-- Webhook event-id deduplication + shared terminal reconciliation: implemented at the control-plane/in-memory-store layer.
+- Webhook event-id deduplication + shared terminal reconciliation: implemented.
+- Durable webhook transaction boundary: implemented for SQLite store.
+- Durable SQLite state across restart: implemented and tested.
 - HTTP webhook receiver/authentication: not yet implemented.
-- Durable SQL persistence / transactional webhook atomicity: not yet implemented.
 - Live CALL-E call: not attempted because no credential/authorized phone is available to this run.
 
 ## Current blockers
 
 No product-design blocker and no blocker to continued repository development.
 
-Environment-only verification limitation: an actual package install / `tsc` / Node test execution has not yet been possible from prior automation containers because direct GitHub checkout could not resolve `github.com`. GitHub connector operations remain healthy.
+Live CALL-E verification still requires a valid `CALLE_API_KEY`, an authorized destination phone number, and any provider webhook-secret/authentication material required by the current CALL-E account configuration.
 
 ## Highest-value next actions
 
-1. Add a durable SQL-backed store with transactional unique constraints for escalation/callback idempotency, provider call ids, webhook event ids, instruction consumption, and persisted replayable `CallAttempt.request`; make webhook-event insertion + terminal transition atomic.
-2. Add a minimal HTTP service/configuration bootstrap selecting fake vs CALL-E provider from environment and exposing health/register/run/status/escalation/checkpoint/callback operations.
-3. Add authenticated CALL-E webhook ingress that verifies provider authenticity according to current documented mechanism before parsing/ingesting an event.
-4. Add MCP tools as a thin adapter over the exact same control-plane/HTTP semantics.
-5. Build a small TypeScript SDK for generic agents and then the first real Claude/Claude Code MCP/checkpoint integration.
-6. Add quiet hours, call budgets, retry bounds, expiration sweep behavior, and audit events before broadening UI scope.
-7. As soon as an environment with package/network access is available, run `npm run check` and fix any TypeScript/runtime issues before expanding aggressively.
+1. Add a minimal HTTP server/bootstrap selecting fake vs CALL-E provider and in-memory vs SQLite store from environment.
+2. Expose health, agent registration, run start/status, escalation creation/status, checkpoint, owner callback, and reconciliation endpoints over the same `ControlPlane` methods.
+3. Add authenticated CALL-E webhook ingress; verify the provider's current webhook-auth mechanism before accepting mutations.
+4. Add API authentication for agent-facing endpoints so arbitrary callers cannot create calls or consume instructions.
+5. Add MCP tools as a thin adapter over the exact same control-plane semantics.
+6. Build a small TypeScript SDK and then the first real Claude/Claude Code checkpoint integration.
+7. Add quiet hours, call budgets, retry bounds, expiration sweep behavior, and audit events before broad UI scope.
+8. Add and commit a lockfile once dependency management is stabilized, then switch CI back to `npm ci` for fully reproducible installs.
