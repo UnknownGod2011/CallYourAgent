@@ -66,6 +66,17 @@ export function createCallYourAgentMcpServer(config: McpServerConfig): McpServer
     catch (error) { return asToolError(error); }
   });
 
+  server.registerTool("get_audit_timeline", {
+    description: "Read the durable run timeline showing progress reports, policy deferrals, call transitions, decisions, callbacks, and safe-checkpoint instruction handling. Audit metadata intentionally excludes full call transcripts and decision text.",
+    inputSchema: z.object({
+      runId: z.string().min(1),
+      limit: z.number().int().min(1).max(500).default(100),
+    }),
+  }, async ({ runId, limit }) => {
+    try { return asToolResult(await client.getAuditTimeline(runId, limit)); }
+    catch (error) { return asToolError(error); }
+  });
+
   server.registerTool("request_owner_decision", {
     description: "Ask the owner an important question by phone. Blocking applies only to the supplied scope; unrelated scopes may continue.",
     inputSchema: z.object({
