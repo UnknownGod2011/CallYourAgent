@@ -87,7 +87,12 @@ export class ControlPlane {
       { runId: input.runId, escalationId: escalation.id, scopeId: input.scopeId },
     );
 
-    const next: Escalation = { ...escalation, status: "calling", callAttemptId: attempt.id, updatedAt: this.isoNow() };
+    const next: Escalation = {
+      ...escalation,
+      status: "calling",
+      callAttemptId: attempt.id,
+      updatedAt: this.isoNow(),
+    };
     this.store.escalations.set(next.id, next);
     return next;
   }
@@ -101,7 +106,9 @@ export class ControlPlane {
       return expired;
     }
     if (!escalation.callAttemptId) return escalation;
-    const attempt = this.store.callAttempts.get(escalation.callAttemptId)!;
+
+    let attempt = this.requireCallAttempt(escalation.callAttemptId);
+    if (attempt.status === "ambiguous") attempt = await this.recoverCallAttempt(attempt.id);
     if (!attempt.providerCallId) return escalation;
 
     const outcome = await this.calls.getOutcome(attempt.providerCallId);
@@ -152,10 +159,10 @@ export class ControlPlane {
   }
 
   async reconcileCallback(callAttemptId: string): Promise<CallAttempt> {
-    const attempt = this.store.callAttempts.get(callAttemptId);
-    if (!attempt) throw new Error(`Unknown call attempt: ${callAttemptId}`);
+    let attempt = this.requireCallAttempt(callAttemptId);
     if (attempt.purpose !== "owner_callback") throw new Error("Call attempt is not an owner callback");
-    if (["completed", "failed", "ambiguous"].includes(attempt.status)) return attempt;
+    if (["completed", "failed"].includes(attempt.status)) return attempt;
+    if (attempt.status === "ambiguous") attempt = await this.recoverCallAttempt(attempt.id);
     if (!attempt.providerCallId) return attempt;
 
     const outcome = await this.calls.getOutcome(attempt.providerCallId);
@@ -165,6 +172,38 @@ export class ControlPlane {
       for (const text of outcome.instructions ?? []) this.enqueueInstruction(attempt.correlationId, text, "callback");
     }
     return finished;
+  }
+
+  async recoverCallAttempt(callAttemptId: string): Promise<CallAttempt> {
+    const attempt = this.requireCallAttempt(callAttemptId);
+    if (attempt.status !== "ambiguous") return attempt;
+
+    try {
+      const started = await this.calls.start({
+        idempotencyKey: attempt.idempotencyKey,
+        purpose: attempt.purpose,
+        task: attempt.request.task,
+        metadata: attempt.request.metadata,
+      });
+      const recovered: CallAttempt = {
+        ...attempt,
+        providerCallId: started.providerCallId,
+        status: started.status,
+        lastError: undefined,
+        updatedAt: this.isoNow(),
+      };
+      this.store.callAttempts.set(recovered.id, recovered);
+      return recovered;
+    } catch (error) {
+      const stillAmbiguous: CallAttempt = {
+        ...attempt,
+        status: "ambiguous",
+        lastError: errorMessage(error),
+        updatedAt: this.isoNow(),
+      };
+      this.store.callAttempts.set(stillAmbiguous.id, stillAmbiguous);
+      return stillAmbiguous;
+    }
   }
 
   checkpoint(runId: string, consume = false): CheckpointResult {
@@ -213,19 +252,37 @@ export class ControlPlane {
   ): Promise<CallAttempt> {
     const now = this.isoNow();
     const attempt: CallAttempt = {
-      id: randomUUID(), purpose, correlationId, provider: this.calls.name, status: "queued",
-      idempotencyKey, createdAt: now, updatedAt: now,
+      id: randomUUID(),
+      purpose,
+      correlationId,
+      provider: this.calls.name,
+      status: "queued",
+      idempotencyKey,
+      request: { task, metadata: { ...metadata } },
+      createdAt: now,
+      updatedAt: now,
     };
     this.store.callAttempts.set(attempt.id, attempt);
+
     try {
       const started = await this.calls.start({ idempotencyKey, purpose, task, metadata });
-      const next = { ...attempt, providerCallId: started.providerCallId, status: started.status, updatedAt: this.isoNow() };
+      const next: CallAttempt = {
+        ...attempt,
+        providerCallId: started.providerCallId,
+        status: started.status,
+        updatedAt: this.isoNow(),
+      };
       this.store.callAttempts.set(next.id, next);
       return next;
     } catch (error) {
-      const ambiguous = { ...attempt, status: "ambiguous" as const, updatedAt: this.isoNow() };
+      const ambiguous: CallAttempt = {
+        ...attempt,
+        status: "ambiguous",
+        lastError: errorMessage(error),
+        updatedAt: this.isoNow(),
+      };
       this.store.callAttempts.set(ambiguous.id, ambiguous);
-      throw error;
+      return ambiguous;
     }
   }
 
@@ -259,7 +316,17 @@ export class ControlPlane {
     return value;
   }
 
+  private requireCallAttempt(id: string): CallAttempt {
+    const value = this.store.callAttempts.get(id);
+    if (!value) throw new Error(`Unknown call attempt: ${id}`);
+    return value;
+  }
+
   private isoNow(): string {
     return this.clock.now().toISOString();
   }
+}
+
+function errorMessage(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
 }
