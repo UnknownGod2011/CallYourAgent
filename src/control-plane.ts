@@ -247,6 +247,18 @@ export class ControlPlane {
     return instruction;
   }
 
+  getRun(runId: string): AgentRun {
+    return this.requireRun(runId);
+  }
+
+  getEscalation(escalationId: string): Escalation {
+    return this.requireEscalation(escalationId);
+  }
+
+  getCallAttempt(callAttemptId: string): CallAttempt {
+    return this.requireCallAttempt(callAttemptId);
+  }
+
   getDecision(escalationId: string): OwnerDecision | undefined {
     const escalation = this.requireEscalation(escalationId);
     return escalation.decisionId ? this.store.decisions.get(escalation.decisionId) : undefined;
