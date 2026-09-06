@@ -12,6 +12,7 @@ import type {
   OwnerInstruction,
 } from "./domain.js";
 import type { CallProvider } from "./call-provider.js";
+import { CallPolicy } from "./call-policy.js";
 import type { ControlPlaneStore } from "./store.js";
 
 export interface Clock {
@@ -36,6 +37,7 @@ export class ControlPlane {
     private readonly store: ControlPlaneStore,
     private readonly calls: CallProvider,
     private readonly clock: Clock = systemClock,
+    private readonly callPolicy: CallPolicy = new CallPolicy(),
   ) {}
 
   registerAgent(input: Omit<AgentRegistration, "id" | "createdAt">): AgentRegistration {
@@ -91,22 +93,7 @@ export class ControlPlane {
     this.store.escalations.set(escalation.id, escalation);
     this.store.escalationByIdempotencyKey.set(input.idempotencyKey, escalation.id);
 
-    const attempt = await this.startCall(
-      "owner_decision",
-      escalation.id,
-      `Decision needed from the agent owner. Question: ${input.question}${input.context ? `\nContext: ${input.context}` : ""}`,
-      `decision:${input.idempotencyKey}`,
-      { runId: input.runId, escalationId: escalation.id, scopeId: input.scopeId },
-    );
-
-    const next: Escalation = {
-      ...escalation,
-      status: "calling",
-      callAttemptId: attempt.id,
-      updatedAt: this.isoNow(),
-    };
-    this.store.escalations.set(next.id, next);
-    return next;
+    return this.startEscalationCallIfAllowed(escalation);
   }
 
   async reconcileEscalation(escalationId: string): Promise<Escalation> {
@@ -117,7 +104,7 @@ export class ControlPlane {
       this.store.escalations.set(expired.id, expired);
       return expired;
     }
-    if (!escalation.callAttemptId) return escalation;
+    if (!escalation.callAttemptId) return this.startEscalationCallIfAllowed(escalation);
 
     let attempt = this.requireCallAttempt(escalation.callAttemptId);
     if (attempt.status === "ambiguous") attempt = await this.recoverCallAttempt(attempt.id);
@@ -262,6 +249,39 @@ export class ControlPlane {
   getDecision(escalationId: string): OwnerDecision | undefined {
     const escalation = this.requireEscalation(escalationId);
     return escalation.decisionId ? this.store.decisions.get(escalation.decisionId) : undefined;
+  }
+
+  private async startEscalationCallIfAllowed(escalation: Escalation): Promise<Escalation> {
+    if (escalation.callAttemptId || escalation.status !== "pending") return escalation;
+    const run = this.requireRunningRun(escalation.runId);
+    const owner = this.requireAgent(run.agentId);
+    const decision = this.callPolicy.assessDecisionCall({
+      run,
+      owner,
+      priority: escalation.priority,
+      now: this.clock.now(),
+      attempts: this.store.callAttempts.values(),
+      runs: this.store.runs,
+      agents: this.store.agents,
+    });
+    if (!decision.allowed) return escalation;
+
+    const attempt = await this.startCall(
+      "owner_decision",
+      escalation.id,
+      `Decision needed from the agent owner. Question: ${escalation.question}${escalation.context ? `\nContext: ${escalation.context}` : ""}`,
+      `decision:${escalation.idempotencyKey}`,
+      { runId: escalation.runId, escalationId: escalation.id, scopeId: escalation.scopeId },
+    );
+
+    const next: Escalation = {
+      ...escalation,
+      status: "calling",
+      callAttemptId: attempt.id,
+      updatedAt: this.isoNow(),
+    };
+    this.store.escalations.set(next.id, next);
+    return next;
   }
 
   private applyTerminalOutcome(attempt: CallAttempt, outcome: CallOutcome): CallAttempt {
