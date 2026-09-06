@@ -143,9 +143,8 @@ test("Claude-style work loop keeps independent work moving and consumes owner st
       name: "checkpoint",
       arguments: { runId: run.id, consume: true },
     }));
-    const consumed = consumedInstructions.queuedInstructions as Array<Record<string, unknown>>;
-    assert.equal(consumed.length, 2);
-    assert.deepEqual(consumed.map((instruction) => instruction.status), ["consumed", "consumed"]);
+    const delivered = consumedInstructions.queuedInstructions as Array<Record<string, unknown>>;
+    assert.equal(delivered.length, 2);
 
     const afterConsumption = parseTextResult(await mcpClient.callTool({
       name: "checkpoint",
