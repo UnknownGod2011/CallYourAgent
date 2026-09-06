@@ -70,21 +70,28 @@ Polling and webhooks are delivery mechanisms for the same terminal provider outc
 - a poll completing before a delayed webhook also remains safe because already-terminal attempts are no-ops;
 - duplicate webhook delivery is explicitly deduplicated by provider event id.
 
-The store tracks processed webhook event ids. A durable SQL implementation must make event-id insertion and terminal domain transition transactional so a crash cannot apply the outcome without recording the event or record the event without applying the outcome.
+`ingestProviderWebhook` executes lookup, terminal transition, and provider-event recording inside the store's synchronous transaction boundary. The durable SQLite implementation therefore commits or rolls back the webhook event and all associated domain mutations together. If a mutation throws, both the SQL transaction and the in-memory mirrors are restored to the pre-event state.
 
 CALL-E's current Calls API documents terminal webhook payloads with a top-level event `id` and the terminal CallTask under `data`; the call task id is `data.id`. `parseCalleTerminalWebhook` validates this boundary and converts only terminal `completed`, `failed`, or `canceled` payloads into the provider-agnostic `CallOutcome` consumed by the control plane. HTTP signature/authentication verification belongs in the future HTTP ingress adapter before this parser is called.
 
-## Persistence evolution
+## Durable persistence
 
-`InMemoryControlPlaneStore` is the first deterministic implementation of the store contract. It exists to validate domain behavior before selecting a database. A durable implementation should preserve the same semantics and add transactions/unique constraints for:
+`InMemoryControlPlaneStore` remains the fastest deterministic test implementation. `SqliteControlPlaneStore` is now the default durable architecture for a single control-plane deployment and deliberately preserves the same synchronous `Map`/`Set` contract used by the tested domain layer.
 
-- escalation idempotency keys,
-- callback idempotency keys,
-- provider call ids,
-- webhook event ids,
-- instruction consumption.
+The SQLite store:
 
-Persisted `CallAttempt` rows must include the exact replayable provider request fields used by recovery; storing only a provider id is insufficient when the original create response may never have reached the control plane.
+- persists agents, runs, escalations, decisions, instructions, replayable call attempts, idempotency mappings, and processed webhook event ids;
+- uses WAL mode and an explicit synchronous transaction API;
+- reloads in-memory mirrors from SQL after a rollback so memory cannot diverge from committed state;
+- enforces unique escalation idempotency keys;
+- enforces unique non-null provider call ids;
+- uses primary keys for callback/escalation idempotency maps and webhook event ids;
+- indexes run/status fields used by instruction and escalation lookup;
+- survives process-style close/reopen with queued state and replayable call-attempt state intact.
+
+The implementation uses Node's built-in `node:sqlite` `DatabaseSync`, so the repository currently requires Node 24+. This avoids a native third-party database dependency for the hackathon/reference deployment while keeping SQL semantics and transaction boundaries explicit. A future multi-instance deployment can replace the store with Postgres without changing the `ControlPlane` domain semantics, but that adapter must preserve the same uniqueness and atomicity guarantees.
+
+Persisted `CallAttempt` rows include the exact replayable provider request fields used by recovery; storing only a provider id is insufficient when the original create response may never have reached the control plane.
 
 ## CALL-E mapping
 
@@ -99,10 +106,14 @@ The production adapter uses the current asynchronous Calls API:
 
 `CALLE_API_KEY` must only exist in trusted server environments.
 
+## Verification architecture
+
+The repository has GitHub Actions CI on `main` and pull requests using Node 24. CI installs dependencies, runs TypeScript typechecking, builds, and executes the Node test suite. This provides an external verification path even when an automation runtime cannot clone the repository directly.
+
 ## Next architectural layers
 
-1. Durable SQL store with transactional uniqueness, including webhook-event/application atomicity.
-2. Minimal HTTP service exposing control-plane operations plus authenticated CALL-E webhook ingress.
+1. Minimal HTTP service exposing control-plane operations plus authenticated CALL-E webhook ingress.
+2. Environment/bootstrap selection between fake and CALL-E providers and in-memory vs durable SQLite storage.
 3. MCP server implemented as a thin adapter over the HTTP/core methods.
 4. TypeScript client SDK.
 5. Claude Code integration as the first end-to-end external agent adapter.
