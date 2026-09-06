@@ -5,6 +5,26 @@ export type EscalationPriority = "low" | "normal" | "high" | "critical";
 export type EscalationStatus = "pending" | "calling" | "resolved" | "expired" | "failed";
 export type RunStatus = "running" | "completed" | "failed" | "canceled";
 export type InstructionStatus = "queued" | "consumed";
+export type PolicyDeferralReason = "below_priority_gate" | "quiet_hours" | "run_budget_exhausted" | "owner_budget_exhausted";
+export type AuditActor = "agent" | "owner" | "control_plane" | "provider";
+export type AuditEventType =
+  | "agent_registered"
+  | "run_started"
+  | "run_status_reported"
+  | "escalation_created"
+  | "call_policy_deferred"
+  | "call_policy_released"
+  | "escalation_expired"
+  | "call_attempt_created"
+  | "call_attempt_started"
+  | "call_attempt_ambiguous"
+  | "call_attempt_completed"
+  | "call_attempt_failed"
+  | "owner_decision_recorded"
+  | "owner_callback_requested"
+  | "owner_instruction_queued"
+  | "owner_instruction_consumed"
+  | "provider_webhook_reconciled";
 
 export interface AgentRegistration {
   id: Id;
@@ -47,6 +67,7 @@ export interface Escalation {
   idempotencyKey: string;
   callAttemptId?: Id;
   decisionId?: Id;
+  deferredReason?: PolicyDeferralReason;
   createdAt: IsoDate;
   updatedAt: IsoDate;
   expiresAt?: IsoDate;
@@ -101,6 +122,20 @@ export interface CallOutcome {
   answer?: string;
   instructions?: string[];
   structured?: Record<string, unknown>;
+}
+
+export interface AuditEvent {
+  id: Id;
+  type: AuditEventType;
+  actor: AuditActor;
+  runId?: Id;
+  agentId?: Id;
+  escalationId?: Id;
+  callAttemptId?: Id;
+  instructionId?: Id;
+  summary: string;
+  details?: Record<string, unknown>;
+  createdAt: IsoDate;
 }
 
 export interface CheckpointResult {
