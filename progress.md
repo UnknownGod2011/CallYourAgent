@@ -2,7 +2,7 @@
 
 ## Current status
 
-CallYourAgent is a durable Node 24 TypeScript control plane for two-way voice coordination between autonomous AI agents and their owners. The product has SQLite persistence, deterministic fake and production CALL-E providers, same-idempotency ambiguous-call recovery, polling/webhook convergence, authenticated HTTP APIs, a typed TypeScript client, stdio MCP, CI-proven Claude-style branch/checkpoint behavior, autonomous decision-call policy, a durable privacy-aware audit timeline, and now a background lifecycle manager with bounded automatic ambiguous-call recovery.
+CallYourAgent is a durable Node 24 TypeScript control plane for two-way voice coordination between autonomous AI agents and their owners. The product has SQLite persistence, deterministic fake and production CALL-E providers, same-idempotency ambiguous-call recovery, polling/webhook convergence, authenticated HTTP APIs, a typed TypeScript client, stdio MCP, CI-proven Claude-style branch/checkpoint behavior, autonomous decision-call policy, a durable privacy-aware audit timeline, and now a CI-verified background lifecycle manager with bounded automatic ambiguous-call recovery.
 
 The core semantics remain unchanged: an agent may call its owner for genuinely important judgment without freezing unrelated scopes; the owner may independently request a callback to hear current status and steer the run; human answers/instructions become durable structured state consumed only at safe checkpoints.
 
@@ -91,17 +91,21 @@ Added `tests/lifecycle.test.ts` covering:
 
 ## Verification performed
 
-Repository code is committed only after the final tree is assembled. The local execution container still cannot resolve `github.com`, so direct local clone/test execution is unavailable. This run therefore relies on the repository's GitHub Actions Node 24 CI after commit for authoritative typecheck/build/test verification. CI status must be checked before claiming the new code passes.
+- The local execution container still cannot resolve `github.com`, so direct local clone/test execution remains unavailable.
+- First code-bearing CI run `34059840042` on commit `68b351cd2196b38dffda8bef426c55aea0285cb2` reached the Node 24 typecheck/test step but failed because the intentionally-throwing test provider override inferred `Promise<void>` instead of the provider contract's `Promise<StartCallResult>`.
+- Production lifecycle code was not weakened. The test fixture was corrected with an explicit `Promise<StartCallResult>` override signature in commit `2e462d25bf262d528dca774734bda231b11f175f`.
+- Final CI run `34059882548` completed successfully: checkout, Node 24 setup, dependency installation, `npm run check`, TypeScript typecheck/build path, and the complete test suite all passed.
+- No live CALL-E call was attempted because this run has no authorized CALL-E credential, owner destination phone, or public HTTPS deployment.
 
 ## CALL-E integration status
 
-- Fake provider: implemented and previously CI-tested; lifecycle tests extend its end-to-end use.
+- Fake provider: implemented and CI-tested; lifecycle tests now verify autonomous reconciliation paths too.
 - Production CALL-E adapter: implemented with server-only API key, structured results, polling, webhook URL, and provider idempotency.
 - Same-key ambiguous recovery: implemented.
-- Automatic recovery bounds/backoff: implemented by lifecycle manager this run.
+- Automatic recovery bounds/backoff: implemented and CI-tested by the lifecycle manager this run.
 - Webhook dedupe + durable transaction: implemented.
 - HTTP + TypeScript SDK + MCP path: implemented.
-- Live CALL-E call: still not attempted; this run has no authorized `CALLE_API_KEY`, owner destination phone, or public HTTPS deployment.
+- Live CALL-E call: still not attempted; credentials/authorized phone/public HTTPS deployment are not available to this run.
 
 ## Current blockers
 
@@ -111,11 +115,11 @@ Live CALL-E verification still requires a valid CALL-E credential, authorized ow
 
 ## Highest-value next actions
 
-1. Verify this lifecycle increment in GitHub Actions; fix any type/test regressions before proceeding.
-2. Move recovery-exhaustion enforcement into core reconciliation or scoped API permissions so untrusted callers cannot bypass automatic retry limits.
-3. Add stale in-progress call timeout policy distinct from ambiguous-create recovery.
-4. Add credential scopes and callback/reconcile rate limits before exposing the API beyond a trusted single-owner environment.
-5. Add graceful shutdown that stops background lifecycle work and cleanly closes SQLite/server resources.
-6. Add production deployment guidance for a host with persistent disk and stable public HTTPS webhook ingress.
-7. Generate a lockfile and switch CI to `npm ci` once dependency choices stabilize.
+1. Move recovery-exhaustion enforcement into core reconciliation or scoped API permissions so untrusted callers cannot bypass automatic retry limits.
+2. Add stale in-progress call timeout policy distinct from ambiguous-create recovery.
+3. Add credential scopes and callback/reconcile rate limits before exposing the API beyond a trusted single-owner environment.
+4. Add graceful shutdown that stops background lifecycle work and cleanly closes SQLite/server resources.
+5. Add production deployment guidance for a host with persistent disk and stable public HTTPS webhook ingress.
+6. Generate a lockfile and switch CI to `npm ci` once dependency choices stabilize.
+7. Exercise the documented Claude Code MCP registration path in a real host and record exact results.
 8. After reliability/security hardening, build a small status/demo UI on the existing run/audit APIs.
