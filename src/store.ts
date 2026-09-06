@@ -16,6 +16,7 @@ export interface ControlPlaneStore {
   callAttempts: Map<string, CallAttempt>;
   escalationByIdempotencyKey: Map<string, string>;
   callbackByIdempotencyKey: Map<string, string>;
+  processedWebhookEventIds: Set<string>;
 }
 
 export class InMemoryControlPlaneStore implements ControlPlaneStore {
@@ -27,4 +28,5 @@ export class InMemoryControlPlaneStore implements ControlPlaneStore {
   callAttempts = new Map<string, CallAttempt>();
   escalationByIdempotencyKey = new Map<string, string>();
   callbackByIdempotencyKey = new Map<string, string>();
+  processedWebhookEventIds = new Set<string>();
 }
