@@ -17,6 +17,12 @@ export interface ControlPlaneStore {
   escalationByIdempotencyKey: Map<string, string>;
   callbackByIdempotencyKey: Map<string, string>;
   processedWebhookEventIds: Set<string>;
+
+  /**
+   * Execute a synchronous domain mutation atomically when the backing store
+   * supports transactions. The in-memory implementation executes inline.
+   */
+  transaction<T>(operation: () => T): T;
 }
 
 export class InMemoryControlPlaneStore implements ControlPlaneStore {
@@ -29,4 +35,8 @@ export class InMemoryControlPlaneStore implements ControlPlaneStore {
   escalationByIdempotencyKey = new Map<string, string>();
   callbackByIdempotencyKey = new Map<string, string>();
   processedWebhookEventIds = new Set<string>();
+
+  transaction<T>(operation: () => T): T {
+    return operation();
+  }
 }
