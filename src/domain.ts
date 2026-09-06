@@ -126,6 +126,7 @@ export interface CallOutcome {
 
 export interface AuditEvent {
   id: Id;
+  sequence: number;
   type: AuditEventType;
   actor: AuditActor;
   runId?: Id;
