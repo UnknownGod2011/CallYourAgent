@@ -76,6 +76,11 @@ export interface CallbackRequest {
   prompt?: string;
 }
 
+export interface PersistedCallRequest {
+  task: string;
+  metadata: Record<string, string>;
+}
+
 export interface CallAttempt {
   id: Id;
   purpose: "owner_decision" | "owner_callback";
@@ -84,6 +89,8 @@ export interface CallAttempt {
   providerCallId?: string;
   status: "queued" | "in_progress" | "completed" | "failed" | "ambiguous";
   idempotencyKey: string;
+  request: PersistedCallRequest;
+  lastError?: string;
   createdAt: IsoDate;
   updatedAt: IsoDate;
 }
