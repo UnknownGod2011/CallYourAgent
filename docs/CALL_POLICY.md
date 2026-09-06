@@ -36,9 +36,11 @@ Per-owner 24-hour budget attribution follows the persisted call attempt's `runId
 
 ## Bounded ambiguous-call recovery
 
-The runtime now includes a periodic `LifecycleManager` sweep. It advances deferred/expired escalations, polls active decision and callback calls, and automatically recovers ambiguous create requests without requiring an agent to call reconciliation endpoints.
+The runtime includes a periodic `LifecycleManager` sweep. It advances deferred/expired escalations, polls active decision and callback calls, and automatically recovers ambiguous create requests without requiring an agent to call reconciliation endpoints.
 
 Automatic recovery is deliberately bounded. The manager replays the exact persisted provider request and the exact original idempotency key. Failed recovery attempts receive exponential backoff capped by configuration. Once the configured automatic attempt budget is exhausted, the attempt remains `ambiguous` and receives `automaticRecoveryExhaustedAt`; it is not relabeled `failed`, because the original request may actually have reached the provider. This is a fail-closed manual-review state that prevents automatic duplicate-call risk.
+
+The fail-closed invariant is enforced inside `ControlPlane.recoverCallAttempt`, not only inside the background lifecycle manager. Therefore explicit `reconcileEscalation`, `reconcileCallback`, or direct recovery calls cannot silently create another provider request after `automaticRecoveryExhaustedAt` is set. A future operator-only override must be an explicit, separately authorized operation rather than an accidental side effect of ordinary reconciliation.
 
 The lifecycle manager records `call_recovery_scheduled` and `call_recovery_exhausted` audit events without copying call task/transcript content.
 
@@ -48,8 +50,6 @@ Runtime settings are:
 - `CYA_MAX_AUTOMATIC_RECOVERY_ATTEMPTS` (default 3)
 - `CYA_RECOVERY_BASE_BACKOFF_MS` (default 5000)
 - `CYA_RECOVERY_MAX_BACKOFF_MS` (default 60000)
-
-An explicit operator/agent reconciliation remains an intentional manual override path; automatic background behavior is what is bounded by this policy.
 
 ## Owner-requested callbacks
 
@@ -61,13 +61,14 @@ The decision policy gate intentionally applies only to autonomous **agent -> own
 - Deferred calls do not consume provider idempotency keys or budget slots.
 - Critical quiet-hour bypass is explicit and configurable.
 - Expiry is checked before deferred policy reevaluation.
-- Automatic ambiguous recovery always preserves the original provider idempotency key.
+- Ambiguous recovery always preserves the original provider idempotency key.
 - Backoff state and automatic-recovery exhaustion live on the durable `CallAttempt` and therefore survive SQLite restart.
 - Exhausted ambiguity stays ambiguous rather than pretending the provider definitely failed.
+- Ordinary reconciliation cannot bypass an exhausted recovery budget.
 - Background reconciliation does not consume owner instructions; agents still consume them only at safe checkpoints.
 
 ## Next policy work
 
 - Add API-level callback rate limiting and credential scopes.
-- Move the automatic-recovery guard into the core reconciliation primitive if manual reconciliation should also be bounded in untrusted deployments.
 - Add stale in-progress call timeout policy separate from ambiguous create recovery.
+- Design an explicit operator-only manual recovery override, with separate authorization and audit, only if real deployments require it.
