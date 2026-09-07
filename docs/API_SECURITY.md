@@ -28,6 +28,18 @@ These presets intentionally never include `*`. They are convenience defaults, no
 
 Credential ids and bearer tokens must both be unique. Authentication comparisons use constant-time equality. The server never returns configured tokens.
 
+## Credential capabilities
+
+Authenticated clients can inspect the effective permissions of the bearer credential they are already using through:
+
+```text
+GET /v1/auth/capabilities
+```
+
+The response contains only the stable credential id and its effective concrete scopes. It never returns bearer-token material. A legacy trusted `*` credential is projected as the five concrete capabilities rather than exposing the wildcard itself. This keeps owner/operator surfaces from needing to infer privileges from token labels or from probing side-effecting endpoints.
+
+The endpoint is authenticated, side-effect free, and returned with `Cache-Control: no-store`. It does not grant access to any run data on its own; normal route-level scope checks remain authoritative.
+
 ## Targeted rate limits
 
 Two real-world-control surfaces are rate-limited per credential id with an in-memory fixed window:
