@@ -84,8 +84,10 @@ test("operator demo advance resolves only the blocked branch and acknowledges ex
   assert.ok(eventTypes.lastIndexOf("owner_instruction_consumed") > eventTypes.indexOf("owner_instruction_queued"));
 });
 
-test("operator demo launcher proves the judge-facing state through the authenticated HTTP boundary", async () => {
+test("operator demo launcher exposes only a least-privilege browser credential over HTTP", async () => {
   const demo = await startOperatorDemoServer({ port: 0, apiToken: "operator-http-acceptance-token" });
+  const authorization = { authorization: `Bearer ${demo.apiToken}` };
+  const jsonHeaders = { ...authorization, "content-type": "application/json" };
 
   try {
     const pageResponse = await fetch(demo.operatorUrl);
@@ -102,9 +104,7 @@ test("operator demo launcher proves the judge-facing state through the authentic
     const unauthenticated = await fetch(overviewUrl);
     assert.equal(unauthenticated.status, 401);
 
-    const authenticated = await fetch(overviewUrl, {
-      headers: { authorization: `Bearer ${demo.apiToken}` },
-    });
+    const authenticated = await fetch(overviewUrl, { headers: authorization });
     assert.equal(authenticated.status, 200);
     assert.equal(authenticated.headers.get("cache-control"), "no-store");
     const overview = await authenticated.json() as {
@@ -120,28 +120,39 @@ test("operator demo launcher proves the judge-facing state through the authentic
     assert.equal(serializedOverview.includes("Keep production deploy paused"), false);
     assert.equal(serializedOverview.includes("queuedInstructions"), false);
 
+    const auditResponse = await fetch(
+      `${demo.baseUrl}/v1/runs/${encodeURIComponent(demo.fixture.runId)}/audit`,
+      { headers: authorization },
+    );
+    assert.equal(auditResponse.status, 200, "browser token should retain audit:read");
+
     const checkpointResponse = await fetch(
       `${demo.baseUrl}/v1/runs/${encodeURIComponent(demo.fixture.runId)}/checkpoint`,
-      {
-        method: "POST",
-        headers: {
-          authorization: `Bearer ${demo.apiToken}`,
-          "content-type": "application/json",
-        },
-        body: JSON.stringify({ consume: false }),
-      },
+      { method: "POST", headers: jsonHeaders, body: JSON.stringify({ consume: false }) },
     );
-    assert.equal(checkpointResponse.status, 200);
-    const checkpoint = await checkpointResponse.json() as {
-      unresolvedBlockingScopes: string[];
-      queuedInstructions: Array<{ text: string }>;
-    };
-    assert.deepEqual(checkpoint.unresolvedBlockingScopes, ["production-deploy"]);
-    assert.deepEqual(
-      checkpoint.queuedInstructions.map((instruction) => instruction.text),
-      ["Keep production deploy paused until the final validation report is ready."],
-      "steering should remain durable for the agent checkpoint even though the operator overview hides it",
+    assert.equal(checkpointResponse.status, 403, "browser token must not have agent:write");
+
+    const acknowledgeResponse = await fetch(
+      `${demo.baseUrl}/v1/runs/${encodeURIComponent(demo.fixture.runId)}/instructions/ack`,
+      { method: "POST", headers: jsonHeaders, body: JSON.stringify({ instructionIds: [] }) },
     );
+    assert.equal(acknowledgeResponse.status, 403, "browser token must not acknowledge steering");
+
+    const reconcileResponse = await fetch(
+      `${demo.baseUrl}/v1/escalations/${encodeURIComponent(demo.fixture.blockingEscalationId)}/reconcile`,
+      { method: "POST", headers: jsonHeaders, body: "{}" },
+    );
+    assert.equal(reconcileResponse.status, 403, "browser token must not have calls:reconcile");
+
+    const callbackResponse = await fetch(`${demo.baseUrl}/v1/callbacks`, {
+      method: "POST",
+      headers: jsonHeaders,
+      body: JSON.stringify({
+        runId: demo.fixture.runId,
+        idempotencyKey: "browser-must-not-call-owner",
+      }),
+    });
+    assert.equal(callbackResponse.status, 403, "browser token must not have owner:callback");
 
     const advanced = await demo.advance();
     const advancedAgain = await demo.advance();
@@ -150,9 +161,7 @@ test("operator demo launcher proves the judge-facing state through the authentic
     assert.deepEqual(advanced.unresolvedBlockingScopes, []);
     assert.equal(advanced.queuedInstructionCount, 0);
 
-    const finalOverviewResponse = await fetch(overviewUrl, {
-      headers: { authorization: `Bearer ${demo.apiToken}` },
-    });
+    const finalOverviewResponse = await fetch(overviewUrl, { headers: authorization });
     assert.equal(finalOverviewResponse.status, 200);
     const finalOverview = await finalOverviewResponse.json() as {
       run: { currentScope?: string };
