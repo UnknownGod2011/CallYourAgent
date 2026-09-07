@@ -25,10 +25,20 @@ export function operatorConsoleHtml(): string {
     .status { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:10px; margin-top:14px; }
     .metric { padding:12px; background:#091829; border-radius:12px; min-height:78px; }
     .metric b { display:block; margin-top:6px; overflow-wrap:anywhere; }
+    .legend { display:flex; flex-wrap:wrap; gap:7px; margin:12px 0 14px; }
+    .legend-item, .event-stage { display:inline-flex; align-items:center; gap:6px; border:1px solid #29486d; border-radius:999px; padding:4px 8px; font-size:11px; font-weight:700; letter-spacing:.02em; }
     .timeline { display:flex; flex-direction:column; gap:10px; max-height:640px; overflow:auto; padding-right:4px; }
-    .event { border-left:3px solid #2e6fe7; background:#091829; border-radius:0 12px 12px 0; padding:11px 13px; }
+    .event { --stage:#2e6fe7; border-left:3px solid var(--stage); background:#091829; border-radius:0 12px 12px 0; padding:11px 13px; }
+    .event[data-stage="decision-request"] { --stage:#ffb86b; }
+    .event[data-stage="call"] { --stage:#8fb6ff; }
+    .event[data-stage="decision"] { --stage:#88e5b7; }
+    .event[data-stage="callback"] { --stage:#caa8ff; }
+    .event[data-stage="steering"] { --stage:#ffd88f; }
+    .event[data-stage="acknowledged"] { --stage:#61d7c7; }
+    .event-stage { color:var(--stage); border-color:color-mix(in srgb,var(--stage) 42%,#29486d); }
     .event-top { display:flex; gap:10px; justify-content:space-between; color:#9eb0c8; font-size:12px; }
-    .event strong { display:block; margin:5px 0; }
+    .event-heading { display:flex; gap:8px; align-items:center; flex-wrap:wrap; margin:6px 0; }
+    .event-heading strong { display:block; }
     .error { color:#ff9a9a; min-height:22px; margin-top:10px; white-space:pre-wrap; }
     .ok { color:#88e5b7; }
     .warning { color:#ffd88f; }
@@ -68,7 +78,10 @@ export function operatorConsoleHtml(): string {
     </section>
     <section class="card">
       <div style="display:flex;justify-content:space-between;gap:12px;align-items:center"><div><div class="tag">Causal timeline</div><h2 style="margin:5px 0 0">What actually happened</h2></div><button id="auto" class="secondary" style="width:auto;margin:0">Auto refresh: off</button></div>
-      <p class="muted">Shows persisted operational events such as policy deferral, calls, decisions, branch resume, callbacks, queued steering, and checkpoint consumption.</p>
+      <p class="muted">Every card is a persisted metadata-only event. Stage labels make the human loop visible without exposing decision answers, callback transcripts, or owner instruction text.</p>
+      <div class="legend" aria-label="Timeline stages">
+        <span class="legend-item">Needs owner</span><span class="legend-item">Phone call</span><span class="legend-item">Decision</span><span class="legend-item">Callback</span><span class="legend-item">Steering queued</span><span class="legend-item">Steering acknowledged</span>
+      </div>
       <div id="timeline" class="timeline"><div class="muted">Load a run to view its timeline.</div></div>
     </section>
   </div>
@@ -86,6 +99,19 @@ export function operatorConsoleHtml(): string {
     return value;
   };
   const escapeHtml = (value) => String(value ?? '').replace(/[&<>"']/g, (c) => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+  const eventStage = (type) => {
+    if (type === 'escalation_created' || type === 'call_policy_deferred' || type === 'call_policy_released') return { id:'decision-request', label:'Needs owner' };
+    if (type === 'call_attempt_created' || type === 'call_attempt_started' || type === 'call_attempt_ambiguous' || type === 'call_attempt_stalled' || type === 'call_attempt_completed' || type === 'call_attempt_failed' || type === 'call_attempt_canceled' || type === 'call_recovery_scheduled' || type === 'call_recovery_exhausted') return { id:'call', label:'Phone call' };
+    if (type === 'owner_decision_recorded' || type === 'escalation_expired') return { id:'decision', label:'Decision' };
+    if (type === 'owner_callback_requested') return { id:'callback', label:'Callback' };
+    if (type === 'owner_instruction_queued') return { id:'steering', label:'Steering queued' };
+    if (type === 'owner_instruction_consumed') return { id:'acknowledged', label:'Steering acknowledged' };
+    return { id:'system', label:'Agent / system' };
+  };
+  const renderEvent = (event) => {
+    const stage = eventStage(event.type);
+    return '<article class="event" data-stage="' + escapeHtml(stage.id) + '"><div class="event-top"><span>#' + event.sequence + ' · ' + escapeHtml(event.actor) + '</span><time>' + escapeHtml(new Date(event.createdAt).toLocaleTimeString()) + '</time></div><div class="event-heading"><span class="event-stage">' + escapeHtml(stage.label) + '</span><strong>' + escapeHtml(event.type) + '</strong></div><div>' + escapeHtml(event.summary) + '</div></article>';
+  };
   const load = async () => {
     const runId = byId('runId').value.trim();
     byId('message').textContent = '';
@@ -113,7 +139,7 @@ export function operatorConsoleHtml(): string {
         : blocked.length
           ? blocked.length + ' scope' + (blocked.length === 1 ? ' is' : 's are') + ' waiting for owner resolution.'
           : 'No scope is currently blocked on owner judgment.';
-      byId('timeline').innerHTML = audit.events.slice().reverse().map((event) => '<article class="event"><div class="event-top"><span>#' + event.sequence + ' · ' + escapeHtml(event.actor) + '</span><time>' + escapeHtml(new Date(event.createdAt).toLocaleTimeString()) + '</time></div><strong>' + escapeHtml(event.type) + '</strong><div>' + escapeHtml(event.summary) + '</div></article>').join('') || '<div class="muted">No audit events yet.</div>';
+      byId('timeline').innerHTML = audit.events.slice().reverse().map(renderEvent).join('') || '<div class="muted">No audit events yet.</div>';
       byId('message').textContent = 'Connected'; byId('message').className = 'error ok';
     } catch (error) { byId('message').className = 'error'; byId('message').textContent = error.message; }
   };
