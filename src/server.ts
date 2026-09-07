@@ -31,6 +31,9 @@ export function buildRuntimeFromEnv(env: NodeJS.ProcessEnv = process.env) {
       ownerPhone: required(env.CYA_OWNER_PHONE, "CYA_OWNER_PHONE"),
       baseUrl: env.CALLE_BASE_URL,
       webhookUrl: `${publicBaseUrl}/webhooks/calle?token=${encodeURIComponent(webhookToken)}`,
+      requestTimeoutMs: env.CYA_CALLE_HTTP_TIMEOUT_MS
+        ? positiveInteger(env.CYA_CALLE_HTTP_TIMEOUT_MS, "CYA_CALLE_HTTP_TIMEOUT_MS")
+        : undefined,
     });
   } else {
     throw new Error(`Unsupported CYA_CALL_PROVIDER: ${providerMode}`);
@@ -52,17 +55,22 @@ export function buildRuntimeFromEnv(env: NodeJS.ProcessEnv = process.env) {
     ? new InMemoryControlPlaneStore()
     : SqliteControlPlaneStore.open(env.CYA_SQLITE_PATH ?? "callyouragent.db");
 
-  const callPolicy = new CallPolicy(callPolicyConfig);
-  const controlPlane = new ControlPlane(store, provider, undefined, callPolicy);
-  const lifecycle = new LifecycleManager(controlPlane, store, undefined, lifecycleConfig);
-  const server = createControlPlaneHttpServer(controlPlane, {
-    apiToken,
-    apiCredentials,
-    calleWebhookToken: env.CYA_CALLE_WEBHOOK_TOKEN,
-    rateLimits,
-  });
+  try {
+    const callPolicy = new CallPolicy(callPolicyConfig);
+    const controlPlane = new ControlPlane(store, provider, undefined, callPolicy);
+    const lifecycle = new LifecycleManager(controlPlane, store, undefined, lifecycleConfig);
+    const server = createControlPlaneHttpServer(controlPlane, {
+      apiToken,
+      apiCredentials,
+      calleWebhookToken: env.CYA_CALLE_WEBHOOK_TOKEN,
+      rateLimits,
+    });
 
-  return { server, controlPlane, lifecycle, provider, store };
+    return { server, controlPlane, lifecycle, provider, store };
+  } catch (error) {
+    store.close();
+    throw error;
+  }
 }
 
 export type RunningRuntime = ReturnType<typeof buildRuntimeFromEnv> & {
