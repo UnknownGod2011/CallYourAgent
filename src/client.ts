@@ -10,6 +10,7 @@ import type {
   OwnerDecisionRequest,
   OwnerInstruction,
 } from "./domain.js";
+import type { CredentialCapabilities } from "./http-server.js";
 import type { RunOverview } from "./run-overview.js";
 
 export interface CallYourAgentClientOptions {
@@ -81,6 +82,10 @@ export class CallYourAgentClient {
 
   async health(): Promise<{ ok: boolean }> {
     return this.request("GET", "/health", undefined, false);
+  }
+
+  async getCredentialCapabilities(): Promise<CredentialCapabilities> {
+    return this.request("GET", "/v1/auth/capabilities");
   }
 
   async registerAgent(input: RegisterAgentInput): Promise<AgentRegistration> {

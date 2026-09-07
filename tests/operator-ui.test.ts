@@ -49,6 +49,14 @@ test("operator console is a static privacy-safe shell with explicit causal timel
   assert.match(body, /owner_instruction_consumed/);
   assert.match(body, /data-stage/);
 
+  assert.match(body, /\/v1\/auth\/capabilities/);
+  assert.match(body, /Owner callback enabled/);
+  assert.match(body, /Read-only/);
+  assert.match(body, /id="callback" class="secondary" disabled/);
+  assert.match(body, /scopes\.includes\('owner:callback'\)/);
+  assert.match(body, /token'\)\.addEventListener\('input', resetCapabilities\)/);
+  assert.match(body, /server independently enforces the scope/i);
+
   assert.doesNotMatch(body, /queuedInstructions/);
   assert.doesNotMatch(body, /operator-test-secret/);
   assert.doesNotMatch(body, /hook-secret/);

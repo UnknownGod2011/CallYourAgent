@@ -23,6 +23,20 @@ async function start(token = "agent-secret") {
   return { client, provider };
 }
 
+test("typed client exposes authenticated credential capabilities", async () => {
+  const { client } = await start();
+  const capabilities = await client.getCredentialCapabilities();
+  assert.equal(capabilities.credentialId, "legacy");
+  assert.deepEqual(capabilities.scopes, [
+    "agent:read",
+    "agent:write",
+    "audit:read",
+    "owner:callback",
+    "calls:reconcile",
+  ]);
+  assert.ok(!capabilities.scopes.includes("*" as never));
+});
+
 test("typed client drives register, run, escalation, status, and checkpoint flow", async () => {
   const { client } = await start();
   assert.deepEqual(await client.health(), { ok: true });
