@@ -84,7 +84,7 @@ CYA_CALL_PROVIDER=fake
 CYA_STORE=sqlite
 ```
 
-Verify health, persistence across restart, agent/MCP registration, decision/callback flows, audit history, and safe-checkpoint instruction consumption. The fake provider is intentionally deterministic so this path can be exercised without CALL-E credentials or credits.
+Verify health, readiness, persistence across restart, agent/MCP registration, decision/callback flows, audit history, and safe-checkpoint instruction consumption. The fake provider is intentionally deterministic so this path can be exercised without CALL-E credentials or credits.
 
 Only then switch to:
 
@@ -94,9 +94,17 @@ CYA_CALL_PROVIDER=calle
 
 Live mode additionally requires `CALLE_API_KEY`, `CYA_OWNER_PHONE`, `CYA_PUBLIC_BASE_URL`, and `CYA_CALLE_WEBHOOK_TOKEN`. Switching provider mode does not change the agent-facing HTTP/MCP contract.
 
-## Health and monitoring
+## Health, readiness, and monitoring
 
-`GET /health` is an unauthenticated **process liveness** endpoint. It does not claim that CALL-E credentials, public webhook routing, or the phone provider are currently healthy.
+`GET /health` is an unauthenticated **process liveness** endpoint. It only means the HTTP process is serving requests.
+
+`GET /ready` is an unauthenticated, side-effect-free **deployment readiness/configuration** endpoint. It reports only non-secret operational facts: selected provider mode, store mode, whether live CALL-E configuration/public-webhook configuration was validated at startup, and `providerNetworkChecked: false`. A successfully booted `calle` runtime can therefore report that all required local configuration was present without implying that CALL-E itself is reachable, the owner phone is authorized, public ingress is externally routable, or a real call has succeeded. `/ready` never sends a CALL-E request and never triggers a phone side effect.
+
+This distinction is intentional:
+
+- `/health` answers “is this process alive?”;
+- `/ready` answers “did the selected runtime mode pass local startup configuration validation?”;
+- neither endpoint is evidence of live provider success.
 
 Operationally monitor at least:
 
@@ -115,6 +123,7 @@ The following are intentional limitations, not hidden capabilities:
 - one SQLite-backed control-plane instance is the supported reference topology;
 - rate limits are process-local;
 - TLS is expected to terminate at the platform/reverse proxy;
-- `/health` is liveness, not provider readiness;
+- `/health` is liveness only;
+- `/ready` validates local selected-mode configuration only and explicitly does not probe CALL-E;
 - real Claude Code host acceptance still requires running the documented MCP registration in an actual Claude Code environment;
 - live CALL-E success must not be claimed until a real authorized credential, owner destination, and public HTTPS webhook path are exercised successfully.
