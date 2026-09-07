@@ -28,6 +28,35 @@ async function api(base: string, path: string, init: RequestInit = {}, token = "
   });
 }
 
+test("health and readiness are unauthenticated but readiness does not claim provider reachability", async () => {
+  const { base } = await start({
+    apiToken: "agent-secret",
+    readiness: {
+      ready: true,
+      providerMode: "calle",
+      storeMode: "sqlite",
+      liveCallConfiguration: "configured",
+      publicWebhookConfiguration: "configured",
+      providerNetworkChecked: false,
+    },
+  });
+
+  const health = await fetch(`${base}/health`);
+  assert.equal(health.status, 200);
+  assert.deepEqual(await health.json(), { ok: true });
+
+  const ready = await fetch(`${base}/ready`);
+  assert.equal(ready.status, 200);
+  assert.deepEqual(await ready.json(), {
+    ready: true,
+    providerMode: "calle",
+    storeMode: "sqlite",
+    liveCallConfiguration: "configured",
+    publicWebhookConfiguration: "configured",
+    providerNetworkChecked: false,
+  });
+});
+
 test("agent API requires bearer auth and preserves non-blocking checkpoint semantics", async () => {
   const { base } = await start();
   assert.equal((await fetch(`${base}/health`)).status, 200);
