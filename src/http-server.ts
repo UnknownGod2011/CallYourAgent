@@ -4,6 +4,7 @@ import { URL } from "node:url";
 import { parseCalleTerminalWebhook } from "./calle-webhook.js";
 import type { ControlPlane } from "./control-plane.js";
 import { operatorConsoleHtml } from "./operator-ui.js";
+import { getRunOverview } from "./run-overview.js";
 
 export type ApiScope = "agent:read" | "agent:write" | "audit:read" | "owner:callback" | "calls:reconcile" | "*";
 
@@ -114,6 +115,12 @@ export function createControlPlaneHttpServer(controlPlane: ControlPlane, options
         const rawLimit = url.searchParams.get("limit");
         const limit = rawLimit === null ? 100 : Number(rawLimit);
         return json(res, 200, { events: controlPlane.listAuditEvents(decodeURIComponent(auditMatch[1]!), limit) });
+      }
+
+      const overviewMatch = url.pathname.match(/^\/v1\/runs\/([^/]+)\/overview$/);
+      if (req.method === "GET" && overviewMatch) {
+        if (!hasScope(credential, "agent:read")) return forbidden(res, "agent:read");
+        return json(res, 200, getRunOverview(controlPlane, decodeURIComponent(overviewMatch[1]!)));
       }
 
       const runMatch = url.pathname.match(/^\/v1\/runs\/([^/]+)$/);
