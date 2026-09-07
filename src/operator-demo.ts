@@ -19,6 +19,14 @@ export interface OperatorDemoFixtureResult {
   duplicateCallbackDeduped: boolean;
 }
 
+export interface OperatorDemoAdvanceResult {
+  decisionAnswer: string;
+  resumedScope: string | undefined;
+  unresolvedBlockingScopes: string[];
+  acknowledgedInstructionIds: string[];
+  queuedInstructionCount: number;
+}
+
 export interface OperatorDemoServerOptions {
   host?: string;
   port?: number;
@@ -31,6 +39,7 @@ export interface OperatorDemoServer {
   baseUrl: string;
   operatorUrl: string;
   apiToken: string;
+  advance(): Promise<OperatorDemoAdvanceResult>;
   close(): Promise<void>;
 }
 
@@ -110,6 +119,61 @@ export async function seedOperatorDemoFixture(
 }
 
 /**
+ * Advances the seeded fixture through the existing domain operations only.
+ *
+ * The fake provider supplies terminal evidence for the already-created decision call,
+ * normal reconciliation records the owner decision and releases only that blocked
+ * scope, and the agent then pulls and acknowledges the exact queued steering ids at a
+ * safe checkpoint. No demo-only mutation endpoint or alternate state machine exists.
+ */
+export async function advanceOperatorDemoFixture(
+  controlPlane: ControlPlane,
+  provider: FakeCallProvider,
+  fixture: OperatorDemoFixtureResult,
+): Promise<OperatorDemoAdvanceResult> {
+  const escalation = controlPlane.getEscalation(fixture.blockingEscalationId);
+  assert.ok(escalation.callAttemptId, "blocking demo escalation must have a call attempt");
+  const decisionAttempt = controlPlane.getCallAttempt(escalation.callAttemptId);
+  assert.ok(decisionAttempt.providerCallId, "blocking demo decision must have a provider call id");
+
+  provider.complete(decisionAttempt.providerCallId, {
+    status: "completed",
+    answer: "Approved. Proceed once final validation is complete.",
+    structured: {
+      approved: true,
+      condition: "final validation complete",
+    },
+  });
+  const resolved = await controlPlane.reconcileEscalation(escalation.id);
+  assert.equal(resolved.status, "resolved", "demo decision reconciliation must resolve the blocked escalation");
+
+  const checkpoint = controlPlane.checkpoint(fixture.runId, false);
+  assert.deepEqual(checkpoint.unresolvedBlockingScopes, [], "resolved decision must release only the blocked scope");
+  assert.equal(checkpoint.queuedInstructions.length, 1, "demo steering should still be queued at the safe checkpoint");
+
+  const acknowledged = controlPlane.acknowledgeInstructions(
+    fixture.runId,
+    checkpoint.queuedInstructions.map((instruction) => instruction.id),
+  );
+  controlPlane.heartbeat(fixture.runId, {
+    summary: "Owner approval recorded; callback steering incorporated at a safe checkpoint; production deploy resumed.",
+    currentScope: "production-deploy",
+  });
+
+  const overview = getRunOverview(controlPlane, fixture.runId);
+  assert.deepEqual(overview.unresolvedBlockingScopes, []);
+  assert.equal(overview.queuedInstructionCount, 0);
+
+  return {
+    decisionAnswer: controlPlane.getDecision(escalation.id)?.answer ?? "",
+    resumedScope: overview.run.currentScope,
+    unresolvedBlockingScopes: overview.unresolvedBlockingScopes,
+    acknowledgedInstructionIds: acknowledged.map((instruction) => instruction.id),
+    queuedInstructionCount: overview.queuedInstructionCount,
+  };
+}
+
+/**
  * Starts the deterministic operator-demo fixture through the same HTTP boundary used
  * by the browser console. Tests can pass port 0 to let the OS allocate an ephemeral
  * localhost port without inventing a second demo server implementation.
@@ -146,6 +210,7 @@ export async function startOperatorDemoServer(
   });
   const address = server.address() as AddressInfo;
   const baseUrl = `http://${host}:${address.port}`;
+  let advancePromise: Promise<OperatorDemoAdvanceResult> | undefined;
 
   return {
     server,
@@ -153,6 +218,10 @@ export async function startOperatorDemoServer(
     baseUrl,
     operatorUrl: `${baseUrl}/operator`,
     apiToken,
+    advance: () => {
+      advancePromise ??= advanceOperatorDemoFixture(controlPlane, provider, fixture);
+      return advancePromise;
+    },
     close: () => new Promise<void>((resolve, reject) => {
       server.close((error) => error ? reject(error) : resolve());
     }),
@@ -177,8 +246,24 @@ async function runOperatorDemoServer(): Promise<void> {
       blockedScopes: demo.fixture.unresolvedBlockingScopes,
       pendingSteering: demo.fixture.queuedInstructionCount,
     },
+    nextAction: "Open /operator, load the printed run/token, then press Enter here to resolve the decision and safely acknowledge steering.",
     note: "Local hackathon fixture only. This does not claim a live CALL-E phone call.",
   }, null, 2));
+
+  process.stdin.setEncoding("utf8");
+  process.stdin.once("data", () => {
+    void demo.advance().then((advanced) => {
+      console.log(JSON.stringify({
+        ok: true,
+        advanced: true,
+        result: advanced,
+        nextAction: "Refresh /operator to see Decision and Steering acknowledged, with production-deploy resumed.",
+      }, null, 2));
+    }).catch((error) => {
+      console.error("CallYourAgent operator demo advance failed", error);
+      process.exitCode = 1;
+    });
+  });
 
   const close = () => {
     void demo.close().catch((error) => {
