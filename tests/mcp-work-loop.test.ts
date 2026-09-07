@@ -16,7 +16,7 @@ function parseTextResult(result: { content?: unknown }): Record<string, unknown>
   return JSON.parse(first!.text!) as Record<string, unknown>;
 }
 
-test("Claude-style work loop keeps independent work moving and consumes owner steering at a checkpoint", async () => {
+test("Claude-style work loop keeps independent work moving and exactly acknowledges owner steering", async () => {
   const provider = new FakeCallProvider();
   const controlPlane = new ControlPlane(new InMemoryControlPlaneStore(), provider);
   const http = createControlPlaneHttpServer(controlPlane, { apiToken: "agent-secret" });
@@ -139,19 +139,51 @@ test("Claude-style work loop keeps independent work moving and consumes owner st
     assert.equal(queued.length, 2);
     assert.deepEqual(queued.map((instruction) => instruction.status), ["queued", "queued"]);
 
-    const consumedInstructions = parseTextResult(await mcpClient.callTool({
-      name: "checkpoint",
-      arguments: { runId: run.id, consume: true },
-    }));
-    const delivered = consumedInstructions.queuedInstructions as Array<Record<string, unknown>>;
-    assert.equal(delivered.length, 2);
+    // Simulate steering that arrives after this safe checkpoint but before the worker
+    // acknowledges the exact instructions it incorporated.
+    const later = controlPlane.enqueueInstruction(run.id as string, "Also add a rollback note before merging.", "api");
 
-    const afterConsumption = parseTextResult(await mcpClient.callTool({
+    const acknowledged = parseTextResult(await mcpClient.callTool({
+      name: "acknowledge_owner_instructions",
+      arguments: {
+        runId: run.id,
+        instructionIds: queued.map((instruction) => instruction.id),
+      },
+    }));
+    const acknowledgedInstructions = acknowledged.instructions as Array<Record<string, unknown>>;
+    assert.equal(acknowledgedInstructions.length, 2);
+    assert.deepEqual(acknowledgedInstructions.map((instruction) => instruction.status), ["consumed", "consumed"]);
+
+    // Retrying the exact acknowledgement is idempotent.
+    const retried = parseTextResult(await mcpClient.callTool({
+      name: "acknowledge_owner_instructions",
+      arguments: {
+        runId: run.id,
+        instructionIds: queued.map((instruction) => instruction.id),
+      },
+    }));
+    const retriedInstructions = retried.instructions as Array<Record<string, unknown>>;
+    assert.deepEqual(retriedInstructions.map((instruction) => instruction.status), ["consumed", "consumed"]);
+
+    const afterAcknowledgement = parseTextResult(await mcpClient.callTool({
       name: "checkpoint",
       arguments: { runId: run.id, consume: false },
     }));
-    assert.deepEqual(afterConsumption.queuedInstructions, []);
-    assert.deepEqual(afterConsumption.unresolvedBlockingScopes, []);
+    const remaining = afterAcknowledgement.queuedInstructions as Array<Record<string, unknown>>;
+    assert.equal(remaining.length, 1);
+    assert.equal(remaining[0]?.id, later.id);
+    assert.equal(remaining[0]?.status, "queued");
+    assert.deepEqual(afterAcknowledgement.unresolvedBlockingScopes, []);
+
+    await mcpClient.callTool({
+      name: "acknowledge_owner_instructions",
+      arguments: { runId: run.id, instructionIds: [later.id] },
+    });
+    const finalCheckpoint = parseTextResult(await mcpClient.callTool({
+      name: "checkpoint",
+      arguments: { runId: run.id, consume: false },
+    }));
+    assert.deepEqual(finalCheckpoint.queuedInstructions, []);
   } finally {
     await mcpClient.close();
     await mcpServer.close();
