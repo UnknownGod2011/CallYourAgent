@@ -28,6 +28,18 @@ export interface OperatorDemoAdvanceResult {
   queuedInstructionCount: number;
 }
 
+export interface OperatorDemoFreshCallbackResult {
+  callbackId: string;
+  providerCallId: string;
+  queuedInstructionCount: number;
+  queuedInstructionIds: string[];
+}
+
+export interface OperatorDemoFreshSteeringResult {
+  acknowledgedInstructionIds: string[];
+  queuedInstructionCount: number;
+}
+
 export interface OperatorDemoServerOptions {
   host?: string;
   port?: number;
@@ -47,6 +59,8 @@ export interface OperatorDemoServer {
   /** Owner-facing token that can observe the run and request callbacks, but cannot mutate agent state or reconcile calls. */
   ownerToken: string;
   advance(): Promise<OperatorDemoAdvanceResult>;
+  completeFreshOwnerCallback(): Promise<OperatorDemoFreshCallbackResult>;
+  consumeFreshOwnerSteering(): Promise<OperatorDemoFreshSteeringResult>;
   close(): Promise<void>;
 }
 
@@ -181,6 +195,76 @@ export async function advanceOperatorDemoFixture(
 }
 
 /**
+ * Completes a callback that was newly requested through the normal owner HTTP/API
+ * path after the seeded callback. The trusted demo process discovers the durable call
+ * attempt, supplies deterministic provider evidence, and reconciles it through the
+ * same ControlPlane method used in production. No browser reconciliation scope is
+ * required and no steering text is returned to the browser-facing overview.
+ */
+export async function completeFreshOwnerCallback(
+  controlPlane: ControlPlane,
+  provider: FakeCallProvider,
+  store: InMemoryControlPlaneStore,
+  fixture: OperatorDemoFixtureResult,
+): Promise<OperatorDemoFreshCallbackResult> {
+  const candidates = [...store.callAttempts.values()]
+    .filter((attempt) => attempt.purpose === "owner_callback"
+      && attempt.correlationId === fixture.runId
+      && attempt.id !== fixture.callbackId
+      && !["completed", "failed"].includes(attempt.status))
+    .sort((left, right) => right.createdAt.localeCompare(left.createdAt));
+  const attempt = candidates[0];
+  assert.ok(attempt, "request a fresh owner callback from /operator before completing this demo step");
+  assert.ok(attempt.providerCallId, "fresh fake owner callback should have a provider call id");
+
+  const before = new Set(
+    controlPlane.checkpoint(fixture.runId, false).queuedInstructions.map((instruction) => instruction.id),
+  );
+  provider.complete(attempt.providerCallId, {
+    status: "completed",
+    instructions: ["Roll out to 25% first, review error rates, then continue only if the metrics stay healthy."],
+  });
+  const reconciled = await controlPlane.reconcileCallback(attempt.id);
+  assert.equal(reconciled.status, "completed", "fresh owner callback must reconcile to completed");
+
+  const checkpoint = controlPlane.checkpoint(fixture.runId, false);
+  const queuedInstructionIds = checkpoint.queuedInstructions
+    .filter((instruction) => !before.has(instruction.id))
+    .map((instruction) => instruction.id);
+  assert.equal(queuedInstructionIds.length, 1, "fresh owner callback must queue exactly one new steering instruction");
+
+  return {
+    callbackId: attempt.id,
+    providerCallId: attempt.providerCallId,
+    queuedInstructionCount: checkpoint.queuedInstructions.length,
+    queuedInstructionIds,
+  };
+}
+
+/**
+ * Consumes only the steering created by completeFreshOwnerCallback, and only after an
+ * explicit safe checkpoint. This keeps the demo faithful to the real worker contract:
+ * human steering becomes durable queued state first and is acknowledged separately.
+ */
+export function consumeFreshOwnerSteering(
+  controlPlane: ControlPlane,
+  fixture: OperatorDemoFixtureResult,
+  instructionIds: string[],
+): OperatorDemoFreshSteeringResult {
+  const checkpoint = controlPlane.checkpoint(fixture.runId, false);
+  const available = new Set(checkpoint.queuedInstructions.map((instruction) => instruction.id));
+  for (const instructionId of instructionIds) {
+    assert.ok(available.has(instructionId), `fresh owner steering ${instructionId} must still be queued at the safe checkpoint`);
+  }
+  const acknowledged = controlPlane.acknowledgeInstructions(fixture.runId, instructionIds);
+  const overview = getRunOverview(controlPlane, fixture.runId);
+  return {
+    acknowledgedInstructionIds: acknowledged.map((instruction) => instruction.id),
+    queuedInstructionCount: overview.queuedInstructionCount,
+  };
+}
+
+/**
  * Starts the deterministic operator-demo fixture through the same HTTP boundary used
  * by the browser console. Tests can pass port 0 to let the OS allocate an ephemeral
  * localhost port without inventing a second demo server implementation.
@@ -224,6 +308,8 @@ export async function startOperatorDemoServer(
   const address = server.address() as AddressInfo;
   const baseUrl = `http://${host}:${address.port}`;
   let advancePromise: Promise<OperatorDemoAdvanceResult> | undefined;
+  let freshCallbackPromise: Promise<OperatorDemoFreshCallbackResult> | undefined;
+  let freshSteeringResult: OperatorDemoFreshSteeringResult | undefined;
 
   return {
     server,
@@ -235,6 +321,17 @@ export async function startOperatorDemoServer(
     advance: () => {
       advancePromise ??= advanceOperatorDemoFixture(controlPlane, provider, fixture);
       return advancePromise;
+    },
+    completeFreshOwnerCallback: () => {
+      freshCallbackPromise ??= completeFreshOwnerCallback(controlPlane, provider, store, fixture);
+      return freshCallbackPromise;
+    },
+    consumeFreshOwnerSteering: async () => {
+      if (freshSteeringResult) return freshSteeringResult;
+      const completed = await (freshCallbackPromise ?? completeFreshOwnerCallback(controlPlane, provider, store, fixture));
+      freshCallbackPromise ??= Promise.resolve(completed);
+      freshSteeringResult = consumeFreshOwnerSteering(controlPlane, fixture, completed.queuedInstructionIds);
+      return freshSteeringResult;
     },
     close: () => new Promise<void>((resolve, reject) => {
       server.close((error) => error ? reject(error) : resolve());
@@ -264,21 +361,51 @@ async function runOperatorDemoServer(): Promise<void> {
       blockedScopes: demo.fixture.unresolvedBlockingScopes,
       pendingSteering: demo.fixture.queuedInstructionCount,
     },
-    nextAction: "Use the read token to observe. Use the separate owner token only when demonstrating owner-requested callback. Then press Enter here to resolve the seeded decision and safely acknowledge steering.",
+    nextAction: "Stage 1: load the run with the read token, then press Enter here to resolve the seeded decision and safely acknowledge its steering.",
     note: "Local hackathon fixture only. Neither browser token has agent-write or reconciliation authority. This does not claim a live CALL-E phone call.",
   }, null, 2));
 
+  let step = 0;
+  let inputChain = Promise.resolve();
   process.stdin.setEncoding("utf8");
-  process.stdin.once("data", () => {
-    void demo.advance().then((advanced) => {
-      console.log(JSON.stringify({
-        ok: true,
-        advanced: true,
-        result: advanced,
-        nextAction: "Refresh /operator to see Decision and Steering acknowledged, with production-deploy resumed.",
-      }, null, 2));
+  process.stdin.on("data", () => {
+    inputChain = inputChain.then(async () => {
+      if (step === 0) {
+        const advanced = await demo.advance();
+        step = 1;
+        console.log(JSON.stringify({
+          ok: true,
+          stage: "seeded-decision-resolved",
+          result: advanced,
+          nextAction: "Refresh /operator. Then paste the separate owner token, load the same run, click Call me about this run, and press Enter here again.",
+        }, null, 2));
+        return;
+      }
+      if (step === 1) {
+        const completed = await demo.completeFreshOwnerCallback();
+        step = 2;
+        console.log(JSON.stringify({
+          ok: true,
+          stage: "fresh-owner-callback-reconciled",
+          result: completed,
+          nextAction: "Refresh /operator: fresh steering is now durably queued. Press Enter here once more to acknowledge only that steering at a safe checkpoint.",
+        }, null, 2));
+        return;
+      }
+      if (step === 2) {
+        const consumed = await demo.consumeFreshOwnerSteering();
+        step = 3;
+        console.log(JSON.stringify({
+          ok: true,
+          stage: "fresh-owner-steering-acknowledged",
+          result: consumed,
+          nextAction: "Refresh /operator to see the fresh Callback → Steering queued → Steering acknowledged sequence.",
+        }, null, 2));
+        return;
+      }
+      console.log(JSON.stringify({ ok: true, stage: "complete", nextAction: "Demo flow already completed. Refresh /operator or stop with Ctrl+C." }, null, 2));
     }).catch((error) => {
-      console.error("CallYourAgent operator demo advance failed", error);
+      console.error("CallYourAgent operator demo step failed", error);
       process.exitCode = 1;
     });
   });
