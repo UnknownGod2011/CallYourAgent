@@ -31,6 +31,7 @@ export function operatorConsoleHtml(): string {
     .event strong { display:block; margin:5px 0; }
     .error { color:#ff9a9a; min-height:22px; margin-top:10px; white-space:pre-wrap; }
     .ok { color:#88e5b7; }
+    .warning { color:#ffd88f; }
     code { color:#b9d2ff; }
     @media (max-width:800px) { .grid { grid-template-columns:1fr; } header { align-items:flex-start; flex-direction:column; } }
   </style>
@@ -38,7 +39,7 @@ export function operatorConsoleHtml(): string {
 <body>
 <main>
   <header>
-    <div><div class="tag">Human escalation control plane</div><h1>CallYourAgent</h1><div class="muted">Live run status and durable audit history. No duplicate state layer.</div></div>
+    <div><div class="tag">Human escalation control plane</div><h1>CallYourAgent</h1><div class="muted">Active work, branch-level blocking, pending steering, and durable audit history. No duplicate state layer.</div></div>
     <div class="muted">Token stays in this browser tab and is sent only as an Authorization header.</div>
   </header>
   <div class="grid">
@@ -50,11 +51,14 @@ export function operatorConsoleHtml(): string {
       <div id="message" class="error"></div>
       <div id="status" class="status" hidden>
         <div class="metric"><span class="muted">Run</span><b id="runStatus"></b></div>
-        <div class="metric"><span class="muted">Current scope</span><b id="scope"></b></div>
+        <div class="metric"><span class="muted">Active scope</span><b id="scope"></b></div>
+        <div class="metric"><span class="muted">Blocked scopes</span><b id="blockedScopes"></b></div>
+        <div class="metric"><span class="muted">Pending steering</span><b id="steeringCount"></b></div>
         <div class="metric" style="grid-column:1/-1"><span class="muted">Agent summary</span><b id="summary"></b></div>
         <div class="metric"><span class="muted">Updated</span><b id="updated"></b></div>
         <div class="metric"><span class="muted">Audit events</span><b id="eventCount"></b></div>
       </div>
+      <p id="scopeNote" class="muted" hidden style="margin:12px 0 0"></p>
       <hr style="border:0;border-top:1px solid #24405f;margin:22px 0" />
       <h2>Request owner callback</h2>
       <p class="muted">Requires an <code>owner:callback</code> credential. The callback receives the current run context; resulting steering enters the durable instruction queue.</p>
@@ -87,16 +91,28 @@ export function operatorConsoleHtml(): string {
     byId('message').textContent = '';
     if (!runId || !byId('token').value.trim()) { byId('message').textContent = 'Token and run ID are required.'; return; }
     try {
-      const [run, audit] = await Promise.all([
-        request('/v1/runs/' + encodeURIComponent(runId)),
+      const [overview, audit] = await Promise.all([
+        request('/v1/runs/' + encodeURIComponent(runId) + '/overview'),
         request('/v1/runs/' + encodeURIComponent(runId) + '/audit?limit=250'),
       ]);
+      const run = overview.run;
+      const blocked = overview.unresolvedBlockingScopes || [];
       byId('status').hidden = false;
       byId('runStatus').textContent = run.status;
       byId('scope').textContent = run.currentScope || '—';
+      byId('blockedScopes').textContent = blocked.length ? blocked.join(', ') : 'None';
+      byId('steeringCount').textContent = String(overview.queuedInstructionCount ?? 0);
       byId('summary').textContent = run.summary;
       byId('updated').textContent = new Date(run.updatedAt).toLocaleString();
       byId('eventCount').textContent = audit.events.length;
+      const activeIndependent = run.currentScope && !blocked.includes(run.currentScope);
+      byId('scopeNote').hidden = false;
+      byId('scopeNote').className = activeIndependent && blocked.length ? 'warning' : 'muted';
+      byId('scopeNote').textContent = activeIndependent && blocked.length
+        ? 'Independent work is still active while ' + blocked.length + ' blocked scope' + (blocked.length === 1 ? ' waits.' : 's wait.')
+        : blocked.length
+          ? blocked.length + ' scope' + (blocked.length === 1 ? ' is' : 's are') + ' waiting for owner resolution.'
+          : 'No scope is currently blocked on owner judgment.';
       byId('timeline').innerHTML = audit.events.slice().reverse().map((event) => '<article class="event"><div class="event-top"><span>#' + event.sequence + ' · ' + escapeHtml(event.actor) + '</span><time>' + escapeHtml(new Date(event.createdAt).toLocaleTimeString()) + '</time></div><strong>' + escapeHtml(event.type) + '</strong><div>' + escapeHtml(event.summary) + '</div></article>').join('') || '<div class="muted">No audit events yet.</div>';
       byId('message').textContent = 'Connected'; byId('message').className = 'error ok';
     } catch (error) { byId('message').className = 'error'; byId('message').textContent = error.message; }
