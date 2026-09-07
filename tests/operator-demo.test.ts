@@ -2,7 +2,11 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import { FakeCallProvider } from "../src/call-provider.js";
 import { ControlPlane } from "../src/control-plane.js";
-import { seedOperatorDemoFixture, startOperatorDemoServer } from "../src/operator-demo.js";
+import {
+  advanceOperatorDemoFixture,
+  seedOperatorDemoFixture,
+  startOperatorDemoServer,
+} from "../src/operator-demo.js";
 import { getRunOverview } from "../src/run-overview.js";
 import { InMemoryControlPlaneStore } from "../src/store.js";
 
@@ -10,7 +14,7 @@ async function makeFixture() {
   const provider = new FakeCallProvider();
   const controlPlane = new ControlPlane(new InMemoryControlPlaneStore(), provider);
   const fixture = await seedOperatorDemoFixture(controlPlane, provider);
-  return { controlPlane, fixture };
+  return { controlPlane, provider, fixture };
 }
 
 test("operator demo fixture reproduces branch-safe privacy-safe state using real control-plane semantics", async () => {
@@ -50,6 +54,34 @@ test("operator demo fixture reproduces branch-safe privacy-safe state using real
     },
     "fresh demo launches should reproduce the same semantic state",
   );
+});
+
+test("operator demo advance resolves only the blocked branch and acknowledges exact steering ids at a safe checkpoint", async () => {
+  const current = await makeFixture();
+  const before = current.controlPlane.checkpoint(current.fixture.runId, false);
+  const instructionIds = before.queuedInstructions.map((instruction) => instruction.id);
+
+  const advanced = await advanceOperatorDemoFixture(
+    current.controlPlane,
+    current.provider,
+    current.fixture,
+  );
+
+  assert.equal(advanced.decisionAnswer, "Approved. Proceed once final validation is complete.");
+  assert.equal(advanced.resumedScope, "production-deploy");
+  assert.deepEqual(advanced.unresolvedBlockingScopes, []);
+  assert.deepEqual(advanced.acknowledgedInstructionIds, instructionIds);
+  assert.equal(advanced.queuedInstructionCount, 0);
+
+  const after = current.controlPlane.checkpoint(current.fixture.runId, false);
+  assert.deepEqual(after.unresolvedBlockingScopes, []);
+  assert.deepEqual(after.queuedInstructions, []);
+
+  const timeline = current.controlPlane.listAuditEvents(current.fixture.runId);
+  const eventTypes = timeline.map((event) => event.type);
+  assert.ok(eventTypes.includes("owner_decision_recorded"));
+  assert.ok(eventTypes.includes("owner_instruction_consumed"));
+  assert.ok(eventTypes.lastIndexOf("owner_instruction_consumed") > eventTypes.indexOf("owner_instruction_queued"));
 });
 
 test("operator demo launcher proves the judge-facing state through the authenticated HTTP boundary", async () => {
@@ -110,6 +142,26 @@ test("operator demo launcher proves the judge-facing state through the authentic
       ["Keep production deploy paused until the final validation report is ready."],
       "steering should remain durable for the agent checkpoint even though the operator overview hides it",
     );
+
+    const advanced = await demo.advance();
+    const advancedAgain = await demo.advance();
+    assert.deepEqual(advancedAgain, advanced, "repeated demo advance requests should share one deterministic transition");
+    assert.equal(advanced.resumedScope, "production-deploy");
+    assert.deepEqual(advanced.unresolvedBlockingScopes, []);
+    assert.equal(advanced.queuedInstructionCount, 0);
+
+    const finalOverviewResponse = await fetch(overviewUrl, {
+      headers: { authorization: `Bearer ${demo.apiToken}` },
+    });
+    assert.equal(finalOverviewResponse.status, 200);
+    const finalOverview = await finalOverviewResponse.json() as {
+      run: { currentScope?: string };
+      unresolvedBlockingScopes: string[];
+      queuedInstructionCount: number;
+    };
+    assert.equal(finalOverview.run.currentScope, "production-deploy");
+    assert.deepEqual(finalOverview.unresolvedBlockingScopes, []);
+    assert.equal(finalOverview.queuedInstructionCount, 0);
   } finally {
     await demo.close();
   }
