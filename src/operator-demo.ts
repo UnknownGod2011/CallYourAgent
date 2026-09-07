@@ -30,6 +30,7 @@ export interface OperatorDemoAdvanceResult {
 export interface OperatorDemoServerOptions {
   host?: string;
   port?: number;
+  /** Browser-facing read/audit token. It intentionally has no mutation scopes. */
   apiToken?: string;
 }
 
@@ -38,6 +39,7 @@ export interface OperatorDemoServer {
   fixture: OperatorDemoFixtureResult;
   baseUrl: string;
   operatorUrl: string;
+  /** Browser-facing read/audit token; retained as apiToken for CLI/test compatibility. */
   apiToken: string;
   advance(): Promise<OperatorDemoAdvanceResult>;
   close(): Promise<void>;
@@ -187,13 +189,17 @@ export async function startOperatorDemoServer(
     throw new Error("operator demo port must be an integer from 0 through 65535");
   }
 
-  const apiToken = options.apiToken?.trim() || "cya-local-demo-token";
+  const apiToken = options.apiToken?.trim() || "cya-local-demo-read-token";
   const store = new InMemoryControlPlaneStore();
   const provider = new FakeCallProvider();
   const controlPlane = new ControlPlane(store, provider);
   const fixture = await seedOperatorDemoFixture(controlPlane, provider);
   const server = createControlPlaneHttpServer(controlPlane, {
-    apiToken,
+    apiCredentials: [{
+      id: "operator-demo-browser",
+      token: apiToken,
+      scopes: ["agent:read", "audit:read"],
+    }],
     readiness: {
       ready: true,
       providerMode: "fake",
@@ -232,7 +238,7 @@ async function runOperatorDemoServer(): Promise<void> {
   const host = process.env.CYA_OPERATOR_DEMO_HOST?.trim() || "127.0.0.1";
   const rawPort = process.env.CYA_OPERATOR_DEMO_PORT?.trim();
   const port = rawPort ? Number(rawPort) : 8788;
-  const apiToken = process.env.CYA_OPERATOR_DEMO_TOKEN?.trim() || "cya-local-demo-token";
+  const apiToken = process.env.CYA_OPERATOR_DEMO_TOKEN?.trim() || "cya-local-demo-read-token";
   const demo = await startOperatorDemoServer({ host, port, apiToken });
 
   console.log(JSON.stringify({
@@ -241,13 +247,14 @@ async function runOperatorDemoServer(): Promise<void> {
     operatorUrl: demo.operatorUrl,
     runId: demo.fixture.runId,
     apiToken: demo.apiToken,
+    tokenScopes: ["agent:read", "audit:read"],
     expectedIndicators: {
       activeScope: demo.fixture.activeScope,
       blockedScopes: demo.fixture.unresolvedBlockingScopes,
       pendingSteering: demo.fixture.queuedInstructionCount,
     },
-    nextAction: "Open /operator, load the printed run/token, then press Enter here to resolve the decision and safely acknowledge steering.",
-    note: "Local hackathon fixture only. This does not claim a live CALL-E phone call.",
+    nextAction: "Open /operator, load the printed run/read token, then press Enter here to resolve the decision and safely acknowledge steering.",
+    note: "Local hackathon fixture only. Browser token is read/audit-only. This does not claim a live CALL-E phone call.",
   }, null, 2));
 
   process.stdin.setEncoding("utf8");
