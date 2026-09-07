@@ -10,7 +10,8 @@ An integration needs only to be able to:
 2. report a compact current-status summary;
 3. raise an owner-decision request;
 4. inspect whether its current scope is blocked;
-5. pull queued owner instructions at safe checkpoints.
+5. pull queued owner instructions at safe checkpoints;
+6. acknowledge exactly the instruction ids it actually incorporated.
 
 A richer platform may expose these through MCP tools/hooks. A custom agent can use HTTP/SDK calls directly. Audit-timeline access is optional and observational; it is useful for operators, demos, and agent self-inspection but is not required for the core decision/callback loop.
 
@@ -38,8 +39,17 @@ const escalation = await cya.requestOwnerDecision({
 
 // Other independent scopes may continue.
 const checkpoint = await cya.checkpoint(run.id);
+for (const instruction of checkpoint.queuedInstructions) {
+  // Incorporate at this safe work boundary.
+}
+await cya.acknowledgeInstructions(
+  run.id,
+  checkpoint.queuedInstructions.map((instruction) => instruction.id),
+);
 const timeline = await cya.getAuditTimeline(run.id);
 ```
+
+The preferred instruction flow is deliberately two-phase: read a checkpoint without consuming it, incorporate only the returned instructions, then acknowledge those exact ids. If new steering arrives between the pull and acknowledgement, it remains queued for the next checkpoint. Acknowledgement retries are idempotent. The legacy `checkpoint(runId, true)` behavior remains for compatibility, but new integrations should prefer exact acknowledgement.
 
 ## MCP adapter
 
@@ -57,6 +67,7 @@ The current MCP tools are:
 - `request_owner_decision`
 - `get_escalation_status`
 - `checkpoint`
+- `acknowledge_owner_instructions`
 - `request_owner_callback`
 - `reconcile_escalation`
 - `reconcile_callback`
@@ -93,15 +104,16 @@ The intended workflow is checkpoint-based rather than fake mid-generation interr
 2. `report_status` between meaningful work units;
 3. call `request_owner_decision` only for genuinely important human judgment;
 4. continue unrelated scopes when the escalation is non-blocking or branch-scoped;
-5. call `checkpoint` between work units and incorporate queued owner instructions before continuing that scope;
-6. when the owner independently requests a callback, CALL-E captures steering as queued instructions, which the same checkpoint loop consumes;
-7. optionally inspect `get_audit_timeline` to explain prior deferrals/call transitions without changing agent state.
+5. call `checkpoint` between work units without consuming instructions;
+6. incorporate the returned queued instructions at that safe boundary, then call `acknowledge_owner_instructions` with exactly those ids;
+7. when the owner independently requests a callback, CALL-E captures steering as queued instructions, which the same checkpoint/acknowledgement loop consumes safely;
+8. optionally inspect `get_audit_timeline` to explain prior deferrals/call transitions without changing agent state.
 
 This proves the product semantics without requiring Claude Code to support undocumented mid-token interruption.
 
 ## Codex
 
-Use the same checkpoint model and the same MCP or typed HTTP client boundary. Codex integration should let a running workflow publish status, raise an escalation, consume queued instructions between work units, and optionally read the audit timeline. Do not implement a Codex-only state machine.
+Use the same checkpoint/acknowledgement model and the same MCP or typed HTTP client boundary. Codex integration should let a running workflow publish status, raise an escalation, incorporate queued instructions between work units, acknowledge the exact ids incorporated, and optionally read the audit timeline. Do not implement a Codex-only state machine.
 
 ## ChatGPT / ChatGPT Work / scheduled workflows
 
@@ -122,7 +134,13 @@ const checkpoint = await cya.checkpoint(run.id);
 for (const instruction of checkpoint.queuedInstructions) {
   // Incorporate at a safe work boundary.
 }
+await cya.acknowledgeInstructions(
+  run.id,
+  checkpoint.queuedInstructions.map((instruction) => instruction.id),
+);
 ```
+
+The acknowledgement step means an instruction is only marked consumed after the worker says it incorporated that specific durable item. Steering that arrives a moment later is not accidentally swept into the same checkpoint.
 
 ## Phone-provider boundary
 
