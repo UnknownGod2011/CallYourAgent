@@ -20,7 +20,10 @@ export interface CalleCallProviderOptions {
   baseUrl?: string;
   webhookUrl?: string;
   fetchImpl?: FetchLike;
+  requestTimeoutMs?: number;
 }
+
+const DEFAULT_REQUEST_TIMEOUT_MS = 15_000;
 
 const decisionSchema = {
   type: "object",
@@ -51,12 +54,18 @@ export class CalleCallProvider implements CallProvider {
   readonly name = "call-e";
   private readonly baseUrl: string;
   private readonly fetchImpl: FetchLike;
+  private readonly requestTimeoutMs: number;
 
   constructor(private readonly options: CalleCallProviderOptions) {
     if (!options.apiKey.trim()) throw new Error("CALL-E API key is required");
     if (!options.ownerPhone.trim()) throw new Error("Owner phone is required");
+    const requestTimeoutMs = options.requestTimeoutMs ?? DEFAULT_REQUEST_TIMEOUT_MS;
+    if (!Number.isInteger(requestTimeoutMs) || requestTimeoutMs < 1) {
+      throw new Error("CALL-E request timeout must be a positive integer");
+    }
     this.baseUrl = (options.baseUrl ?? "https://api.heycall-e.com").replace(/\/$/, "");
     this.fetchImpl = options.fetchImpl ?? fetch;
+    this.requestTimeoutMs = requestTimeoutMs;
   }
 
   async start(input: StartCallInput): Promise<StartCallResult> {
@@ -76,6 +85,7 @@ export class CalleCallProvider implements CallProvider {
         "Idempotency-Key": input.idempotencyKey,
       },
       body: JSON.stringify(body),
+      signal: AbortSignal.timeout(this.requestTimeoutMs),
     });
 
     if (!response.ok) {
@@ -97,6 +107,7 @@ export class CalleCallProvider implements CallProvider {
     const response = await this.fetchImpl(`${this.baseUrl}/v1/calls/${encodeURIComponent(providerCallId)}`, {
       method: "GET",
       headers: { Authorization: `Bearer ${this.options.apiKey}` },
+      signal: AbortSignal.timeout(this.requestTimeoutMs),
     });
 
     if (!response.ok) {
