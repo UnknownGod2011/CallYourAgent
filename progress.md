@@ -6,77 +6,87 @@ CallYourAgent is a durable Node 24 TypeScript control plane for asynchronous two
 
 The repository includes SQLite persistence, deterministic fake and production CALL-E providers, replayable/idempotent call attempts, polling/webhook convergence, scoped authenticated HTTP APIs, a typed TypeScript client, stdio MCP, branch-scoped blocking, call policy/quiet hours/budgets, privacy-aware audit history, bounded lifecycle recovery, fail-closed ambiguous/stalled handling, API abuse controls, graceful shutdown, hard CALL-E HTTP deadlines, reproducible dependencies, readiness/liveness surfaces, a deterministic end-to-end demo, operator console, production Docker image, and single-instance persistent-volume Compose deployment.
 
-This run extended the privacy-safe `RunOverview` projection through the authenticated HTTP API and typed TypeScript client, with an end-to-end regression proving that blocked scopes and queued-steering counts are visible without leaking steering text or consuming queued instructions.
+This run wired the operator console to the existing privacy-safe `RunOverview` contract so the hackathon surface now visibly distinguishes active independent work, unresolved blocked scopes, and pending owner steering count without receiving owner instruction text.
 
 ## Exact repo state inspected this run
 
-Before making changes, inspected the complete recursive `main` tree at HEAD `865aecd969eaa5d932d0e27993e4944f3e0651ea`, including source, tests, workflows, package/deployment assets, and documentation paths.
+Before making changes, inspected the complete recursive `main` tree at HEAD `1702e95d49fe7ee305a3e10588792f701c83b8b0`, including source, tests, workflows, package/deployment assets, and documentation paths. Also inspected the full tests directory listing to confirm current acceptance/regression coverage.
 
-Read `AGENTS.md`, this file, `README.md`, `docs/ARCHITECTURE.md`, and `docs/INTEGRATIONS.md` in full before editing. Inspected recent commits through the privacy-safe run-overview work. Checked repository issues and pull requests; there were none.
+Read `AGENTS.md`, this file, `README.md`, `docs/ARCHITECTURE.md`, `docs/INTEGRATIONS.md`, and `docs/OPERATOR_CONSOLE.md` in full before editing. Inspected recent commits through the authenticated run-overview HTTP/client integration and checked repository issues and pull requests; there were no open issues or PRs.
 
-Inspected the implementation/test surfaces relevant to this increment: `src/run-overview.ts`, `src/http-server.ts`, `src/client.ts`, `src/operator-ui.ts`, `src/call-provider.ts`, `src/domain.ts`, `tests/http-server.test.ts`, and `tests/operator-ui.test.ts`.
+Inspected the implementation/test surfaces relevant to this increment: `src/operator-ui.ts`, `src/run-overview.ts`, the authenticated overview route/client behavior established in the previous run, `tests/operator-ui.test.ts`, the test-suite layout, and `package.json` scripts.
 
-A direct local clone was attempted only for convenience, but outbound DNS to github.com remains unavailable in this runtime. Repository mutation used the connected GitHub API and verification used GitHub Actions; no local result was fabricated.
+The previously corrected run-overview commit `d4fae29cbbf9e51d8e1b0d4e9afb23e2896bdcc3` was rechecked before new changes; its CI, Container, and Compose workflows had all completed successfully.
+
+Repository mutation used the connected GitHub API and verification used GitHub Actions; no local-only result was fabricated.
 
 ## Changes made this run
 
-### Authenticated run-overview HTTP contract
+### Branch-safe operator overview
 
-Added `GET /v1/runs/:runId/overview` to `src/http-server.ts` under the existing `agent:read` scope. The route delegates directly to shared `getRunOverview(...)`; it does not reimplement state filtering in the HTTP layer.
+Updated `src/operator-ui.ts` so `/operator` now reads:
 
-The response contains only:
+- `GET /v1/runs/:runId/overview` for the sanitized run projection;
+- `GET /v1/runs/:runId/audit` for the existing durable causal timeline.
 
-- current run snapshot;
+The console no longer needs the plain run-read route for its status card. The visible status area now shows:
+
+- run state;
+- active/current scope;
 - unresolved blocking scope ids;
-- queued owner-instruction count.
+- pending owner-steering count;
+- agent summary, update time, and audit-event count.
 
-It does not return owner instruction objects or instruction text, and the underlying projection uses `checkpoint(..., false)`, so reading it does not acknowledge or consume steering.
+The UI also explains when the current scope is independent of one or more blocked scopes, making the core product invariant visible during a demo: one branch can be waiting on owner judgment while unrelated work remains active.
 
-### Typed TypeScript client support
+Crucially, the browser receives only `queuedInstructionCount`; owner instruction objects/text remain outside the overview contract and are still consumed only through the agent checkpoint/instruction path.
 
-Added `CallYourAgentClient.getRunOverview(runId): Promise<RunOverview>` so generic/custom-agent adapters and future platform integrations can consume the same stable sanitized contract without hand-building URLs or parsing ad hoc JSON.
+### Operator regression coverage
 
-### HTTP/client acceptance regression
+Strengthened `tests/operator-ui.test.ts` to verify that the static operator shell:
 
-Added `tests/run-overview-http.test.ts`. It starts the real authenticated HTTP server with a deterministic fake provider, creates a run with independent current work plus a blocking production scope, completes an owner callback with two sensitive steering instructions, and verifies:
+1. includes the Active scope, Blocked scopes, and Pending steering indicators;
+2. calls the authenticated `/overview` endpoint;
+3. references `queuedInstructionCount` rather than `queuedInstructions`;
+4. still embeds no configured API token or webhook secret;
+5. still leaves the overview API protected when no bearer credential is supplied.
 
-1. the overview route rejects unauthenticated access;
-2. the typed client returns the independent current scope and unresolved blocked scope;
-3. only the queued steering count is returned;
-4. serialized overview output contains neither steering instruction nor a `queuedInstructions` field;
-5. reading the overview does not consume the instructions, which remain queued at the next agent checkpoint.
+### Documentation
 
-The first test revision failed because the callback test credential intentionally lacked the separate `calls:reconcile` scope required to reconcile the fake provider result. GitHub Actions exposed the permission error. The test credential was corrected to include that explicit scope; production authorization behavior was not weakened.
+Updated `docs/OPERATOR_CONSOLE.md` to describe the privacy-safe overview contract, the branch-safe demo behavior, the queued-count-only privacy rule, and the exact demo sequence for showing active independent work beside blocked scopes.
 
-Code-bearing commits this run:
+Code/documentation commits this run:
 
-- `7aecd482df77345594307b16a3e8d990c882782c` — expose privacy-safe run overview HTTP API;
-- `a2728d76c19c435a6b2eab551e256a7f72e40f54` — add typed run overview client;
-- `77a45300a611e05e93c1e83660862a20d0896837` — add HTTP/client privacy regression;
-- `d4fae29cbbf9e51d8e1b0d4e9afb23e2896bdcc3` — fix test credential scope after CI surfaced the mismatch.
+- `1d94716c8190700cd55fe1f6627228827af7ffbe` — show branch-safe run overview in operator console;
+- `2d95eb49b7fbe9a8f5184f1a4e9de906ab5eb335` — cover operator branch-safe overview indicators;
+- `36d36b11a1ad93cde2c99c9d9229dbc31c86abf0` — document the operator overview behavior.
 
 ## Architecture decisions made this run
 
-1. The HTTP layer exposes the shared sanitized projection rather than duplicating checkpoint/privacy logic.
-2. `agent:read` is the correct scope for the overview because the operation is observational and non-consuming; it does not grant access to audit history or owner callback mutation.
-3. Instruction text remains available only through the agent checkpoint/instruction contract, not operator-style overview reads.
-4. Reading run status must remain free of checkpoint acknowledgement side effects.
-5. The typed client is the canonical adapter boundary; future operator/MCP/platform surfaces should consume the same route/client semantics where appropriate rather than creating another business-state path.
-6. This run still does not claim mid-token interruption or any new first-party platform capability.
+1. `/operator` consumes the same sanitized `RunOverview` contract already used by the HTTP client instead of deriving blocked scopes or instruction state from audit events.
+2. Operator status reads remain observational and non-consuming; viewing the console cannot acknowledge owner instructions.
+3. Pending steering is represented as a count only. Instruction text remains an agent-side checkpoint concern and is not promoted into an operator/dashboard data surface.
+4. The console explicitly separates the active/current scope from unresolved blocked scopes so branch-level non-blocking behavior is visible rather than merely described in documentation.
+5. The audit timeline remains a separate durable causal view; the overview is current-state projection, not a second event log or state machine.
+6. No new platform capability or mid-token interruption behavior is claimed.
 
 ## Verification performed
 
-GitHub Actions CI run `34127435069` on the first acceptance-test revision completed with typecheck/build succeeding and 52/53 tests passing. The sole failure was the new test attempting callback reconciliation with a credential missing the required `calls:reconcile` scope. The failure was inspected from the job log and fixed without changing production authorization semantics.
+The final code/documentation state at commit `36d36b11a1ad93cde2c99c9d9229dbc31c86abf0` triggered all repository workflows and all completed successfully:
 
-The corrected commit `d4fae29cbbf9e51d8e1b0d4e9afb23e2896bdcc3` triggered the repository's standard CI, Container, and Compose workflows. At the time this progress entry was written those fresh workflows had started but had not yet all reached terminal status, so no success is fabricated here.
+- CI run `34131122190` — successful; this workflow performs locked dependency installation, TypeScript typecheck, build, and the full Node test suite, including the strengthened operator-console regression.
+- Compose deployment run `34131122300` — successful.
+- Container run `34131122271` — successful.
+
+The repository currently has no separate lint script or migration command in `package.json`; the available standard verification is `typecheck`, build/test via `check`, plus the Container and Compose workflow checks above.
 
 No live CALL-E call was attempted or claimed.
 
 ## CALL-E integration status
 
-- Fake provider: implemented and tested across owner decisions, callbacks, branch-scoped blocking, durable steering, exact acknowledgement, idempotency, policy/lifecycle recovery, auditability, SQLite restart, deterministic demo, MCP work-loop acceptance, and privacy-safe run overview semantics. This run adds the real HTTP/client path for that overview.
+- Fake provider: implemented and tested across owner decisions, callbacks, branch-scoped blocking, durable steering, exact acknowledgement, idempotency, policy/lifecycle recovery, auditability, SQLite restart, deterministic demo, MCP work-loop acceptance, privacy-safe run overview semantics, and now an operator visualization of those semantics.
 - Production CALL-E adapter: implemented with server-only `CALLE_API_KEY`, provider idempotency, structured result handling, polling/webhook convergence, bounded HTTP requests, duplicate-call prevention, exact-key ambiguous replay, and fail-closed stalled handling.
-- HTTP + TypeScript SDK + MCP: implemented over shared control-plane semantics. `RunOverview` is now available through HTTP and the typed client; operator wiring remains next.
+- HTTP + TypeScript SDK + MCP: implemented over shared control-plane semantics. The operator console now consumes the same sanitized overview route rather than introducing another business-state path.
 - Live CALL-E success: unverified; no real authorized phone call was made.
 
 ## Current blockers / external prerequisites
@@ -89,8 +99,8 @@ Real Claude Code host acceptance still requires running the documented stdio MCP
 
 ## Highest-value next actions
 
-1. Wire `/operator` to `GET /v1/runs/:runId/overview` so the hackathon console visibly distinguishes the independent active scope, unresolved blocked scopes, and queued-steering count without receiving steering text.
-2. Add operator-console regression coverage for those indicators and preserve the current no-credentials-in-page guarantees.
-3. Confirm the corrected commit's CI, Container, and Compose workflows reach terminal success; fix any newly surfaced failure before further feature work.
+1. Add a small deterministic operator/demo fixture command or endpoint flow that seeds a realistic active-run scenario (one independent active scope, one blocked scope, pending owner steering) using only the fake provider and existing public contracts, so judges can reproduce the visual demo without manual API choreography.
+2. Keep that fixture outside production business semantics: it should orchestrate existing APIs/services rather than add a demo-only state machine.
+3. Add focused regression coverage proving the demo fixture is idempotent/reproducible and does not weaken authentication or expose instruction text.
 4. When an actual Claude Code host is available, run the documented stdio MCP host acceptance flow with the deterministic fake provider.
 5. When the user-only CALL-E prerequisites are available, perform a bounded live provider acceptance test and record only the observed result.
