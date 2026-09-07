@@ -16,10 +16,9 @@ export function buildRuntimeFromEnv(env: NodeJS.ProcessEnv = process.env) {
   if (!apiToken && apiCredentials.length === 0) {
     throw new Error("CYA_API_TOKEN or CYA_API_CREDENTIALS_JSON is required");
   }
-
-  const store = storeMode === "memory"
-    ? new InMemoryControlPlaneStore()
-    : SqliteControlPlaneStore.open(env.CYA_SQLITE_PATH ?? "callyouragent.db");
+  if (storeMode !== "memory" && storeMode !== "sqlite") {
+    throw new Error(`Unsupported CYA_STORE: ${storeMode}`);
+  }
 
   let provider: FakeCallProvider | CalleCallProvider;
   if (providerMode === "fake") {
@@ -37,24 +36,88 @@ export function buildRuntimeFromEnv(env: NodeJS.ProcessEnv = process.env) {
     throw new Error(`Unsupported CYA_CALL_PROVIDER: ${providerMode}`);
   }
 
-  const callPolicy = new CallPolicy(callPolicyConfigFromEnv(env));
+  // Validate every remaining environment-derived setting before opening a durable store.
+  const callPolicyConfig = callPolicyConfigFromEnv(env);
+  const lifecycleConfig = lifecycleRecoveryConfigFromEnv(env);
+  const rateLimits = {
+    ownerCallbacksPerWindow: env.CYA_CALLBACK_RATE_LIMIT_PER_MINUTE
+      ? nonNegativeInteger(env.CYA_CALLBACK_RATE_LIMIT_PER_MINUTE, "CYA_CALLBACK_RATE_LIMIT_PER_MINUTE")
+      : undefined,
+    reconciliationsPerWindow: env.CYA_RECONCILE_RATE_LIMIT_PER_MINUTE
+      ? nonNegativeInteger(env.CYA_RECONCILE_RATE_LIMIT_PER_MINUTE, "CYA_RECONCILE_RATE_LIMIT_PER_MINUTE")
+      : undefined,
+  };
+
+  const store = storeMode === "memory"
+    ? new InMemoryControlPlaneStore()
+    : SqliteControlPlaneStore.open(env.CYA_SQLITE_PATH ?? "callyouragent.db");
+
+  const callPolicy = new CallPolicy(callPolicyConfig);
   const controlPlane = new ControlPlane(store, provider, undefined, callPolicy);
-  const lifecycle = new LifecycleManager(controlPlane, store, undefined, lifecycleRecoveryConfigFromEnv(env));
+  const lifecycle = new LifecycleManager(controlPlane, store, undefined, lifecycleConfig);
   const server = createControlPlaneHttpServer(controlPlane, {
     apiToken,
     apiCredentials,
     calleWebhookToken: env.CYA_CALLE_WEBHOOK_TOKEN,
-    rateLimits: {
-      ownerCallbacksPerWindow: env.CYA_CALLBACK_RATE_LIMIT_PER_MINUTE
-        ? nonNegativeInteger(env.CYA_CALLBACK_RATE_LIMIT_PER_MINUTE, "CYA_CALLBACK_RATE_LIMIT_PER_MINUTE")
-        : undefined,
-      reconciliationsPerWindow: env.CYA_RECONCILE_RATE_LIMIT_PER_MINUTE
-        ? nonNegativeInteger(env.CYA_RECONCILE_RATE_LIMIT_PER_MINUTE, "CYA_RECONCILE_RATE_LIMIT_PER_MINUTE")
-        : undefined,
-    },
+    rateLimits,
   });
 
   return { server, controlPlane, lifecycle, provider, store };
+}
+
+export type RunningRuntime = ReturnType<typeof buildRuntimeFromEnv> & {
+  port: number;
+  shutdown(): Promise<void>;
+};
+
+/**
+ * Start the HTTP control plane and periodic lifecycle sweep as one owned runtime.
+ * Shutdown is idempotent and drains both HTTP work and any in-flight sweep before
+ * the backing store is closed.
+ */
+export async function startRuntimeFromEnv(env: NodeJS.ProcessEnv = process.env): Promise<RunningRuntime> {
+  const port = tcpPort(env.PORT ?? "8787", "PORT");
+  const intervalMs = lifecycleSweepIntervalMsFromEnv(env);
+  const runtime = buildRuntimeFromEnv(env);
+
+  try {
+    await listen(runtime.server, port);
+  } catch (error) {
+    runtime.store.close();
+    throw error;
+  }
+
+  let stopping = false;
+  let activeSweep: Promise<void> | undefined;
+  const runSweep = (): void => {
+    if (stopping || activeSweep) return;
+    activeSweep = runtime.lifecycle.sweep()
+      .then((result) => {
+        if (result.errors.length > 0) console.error("CallYourAgent lifecycle sweep errors", result.errors);
+      })
+      .catch((error) => console.error("CallYourAgent lifecycle sweep failed", error))
+      .finally(() => { activeSweep = undefined; });
+  };
+
+  const sweepTimer = setInterval(runSweep, intervalMs);
+  sweepTimer.unref();
+
+  let shutdownPromise: Promise<void> | undefined;
+  const shutdown = (): Promise<void> => {
+    if (shutdownPromise) return shutdownPromise;
+    stopping = true;
+    clearInterval(sweepTimer);
+    const httpDrain = closeServer(runtime.server);
+    const sweepDrain = activeSweep ?? Promise.resolve();
+    shutdownPromise = Promise.all([httpDrain, sweepDrain]).then(() => {
+      runtime.store.close();
+    });
+    return shutdownPromise;
+  };
+
+  const address = runtime.server.address();
+  const listeningPort = typeof address === "object" && address !== null ? address.port : port;
+  return { ...runtime, port: listeningPort, shutdown };
 }
 
 export function apiCredentialsFromEnv(env: NodeJS.ProcessEnv): ApiCredential[] {
@@ -63,7 +126,7 @@ export function apiCredentialsFromEnv(env: NodeJS.ProcessEnv): ApiCredential[] {
   try { parsed = JSON.parse(env.CYA_API_CREDENTIALS_JSON); }
   catch { throw new Error("CYA_API_CREDENTIALS_JSON must be valid JSON"); }
   if (!Array.isArray(parsed)) throw new Error("CYA_API_CREDENTIALS_JSON must be a JSON array");
-  return parsed.map((value, index) => {
+  const credentials = parsed.map((value, index) => {
     if (typeof value !== "object" || value === null || Array.isArray(value)) {
       throw new Error(`CYA_API_CREDENTIALS_JSON[${index}] must be an object`);
     }
@@ -75,6 +138,13 @@ export function apiCredentialsFromEnv(env: NodeJS.ProcessEnv): ApiCredential[] {
     }
     return { id: record.id, token: record.token, scopes: record.scopes as ApiScope[] };
   });
+  if (new Set(credentials.map((credential) => credential.id)).size !== credentials.length) {
+    throw new Error("CYA_API_CREDENTIALS_JSON credential ids must be unique");
+  }
+  if (new Set(credentials.map((credential) => credential.token)).size !== credentials.length) {
+    throw new Error("CYA_API_CREDENTIALS_JSON credential tokens must be unique");
+  }
+  return credentials;
 }
 
 export function callPolicyConfigFromEnv(env: NodeJS.ProcessEnv): CallPolicyConfig {
@@ -147,6 +217,12 @@ function positiveInteger(value: string, name: string): number {
   return parsed;
 }
 
+function tcpPort(value: string, name: string): number {
+  const parsed = Number(value);
+  if (!Number.isInteger(parsed) || parsed < 0 || parsed > 65535) throw new Error(`${name} must be a valid TCP port`);
+  return parsed;
+}
+
 function hour(value: string, name: string): number {
   const parsed = Number(value);
   if (!Number.isInteger(parsed) || parsed < 0 || parsed > 23) throw new Error(`${name} must be an hour from 0 to 23`);
@@ -158,16 +234,47 @@ function priority(value: string, name: string): EscalationPriority {
   throw new Error(`${name} must be one of low, normal, high, critical`);
 }
 
+function listen(server: ReturnType<typeof createControlPlaneHttpServer>, port: number): Promise<void> {
+  return new Promise((resolve, reject) => {
+    const onError = (error: Error): void => {
+      server.off("listening", onListening);
+      reject(error);
+    };
+    const onListening = (): void => {
+      server.off("error", onError);
+      resolve();
+    };
+    server.once("error", onError);
+    server.once("listening", onListening);
+    server.listen(port);
+  });
+}
+
+function closeServer(server: ReturnType<typeof createControlPlaneHttpServer>): Promise<void> {
+  return new Promise((resolve, reject) => {
+    server.close((error) => error ? reject(error) : resolve());
+  });
+}
+
 if (import.meta.url === `file://${process.argv[1]}`) {
-  const port = Number(process.env.PORT ?? "8787");
-  if (!Number.isInteger(port) || port < 1 || port > 65535) throw new Error("PORT must be a valid TCP port");
-  const { server, lifecycle } = buildRuntimeFromEnv();
-  const intervalMs = lifecycleSweepIntervalMsFromEnv(process.env);
-  const sweepTimer = setInterval(() => {
-    void lifecycle.sweep().then((result) => {
-      if (result.errors.length > 0) console.error("CallYourAgent lifecycle sweep errors", result.errors);
-    }).catch((error) => console.error("CallYourAgent lifecycle sweep failed", error));
-  }, intervalMs);
-  sweepTimer.unref();
-  server.listen(port, () => console.log(`CallYourAgent listening on :${port}`));
+  void startRuntimeFromEnv().then((runtime) => {
+    console.log(`CallYourAgent listening on :${runtime.port}`);
+    let signalReceived = false;
+    const handleSignal = (signal: NodeJS.Signals): void => {
+      if (signalReceived) return;
+      signalReceived = true;
+      console.error(`CallYourAgent received ${signal}; shutting down gracefully`);
+      void runtime.shutdown()
+        .then(() => { process.exitCode = 0; })
+        .catch((error) => {
+          console.error("CallYourAgent graceful shutdown failed", error);
+          process.exitCode = 1;
+        });
+    };
+    process.once("SIGTERM", handleSignal);
+    process.once("SIGINT", handleSignal);
+  }).catch((error) => {
+    console.error("CallYourAgent startup failed", error);
+    process.exitCode = 1;
+  });
 }

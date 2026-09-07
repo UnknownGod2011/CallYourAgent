@@ -91,6 +91,7 @@ export class SqliteControlPlaneStore implements ControlPlaneStore {
 
   private readonly reloaders: Array<{ reload(): void }>;
   private transactionDepth = 0;
+  private closed = false;
 
   constructor(private readonly db: DatabaseSync) {
     this.migrate();
@@ -143,7 +144,9 @@ export class SqliteControlPlaneStore implements ControlPlaneStore {
   }
 
   close(): void {
+    if (this.closed) return;
     this.db.close();
+    this.closed = true;
   }
 
   private migrate(): void {

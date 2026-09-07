@@ -25,6 +25,9 @@ export interface ControlPlaneStore {
    * supports transactions. The in-memory implementation executes inline.
    */
   transaction<T>(operation: () => T): T;
+
+  /** Release backing resources. Implementations must make this idempotent. */
+  close(): void;
 }
 
 export class InMemoryControlPlaneStore implements ControlPlaneStore {
@@ -42,4 +45,6 @@ export class InMemoryControlPlaneStore implements ControlPlaneStore {
   transaction<T>(operation: () => T): T {
     return operation();
   }
+
+  close(): void {}
 }
