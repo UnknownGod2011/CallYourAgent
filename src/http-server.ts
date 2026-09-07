@@ -19,6 +19,15 @@ export interface HttpRateLimitOptions {
   windowMs?: number;
 }
 
+export interface ReadinessSnapshot {
+  ready: boolean;
+  providerMode: "fake" | "calle";
+  storeMode: "memory" | "sqlite";
+  liveCallConfiguration: "configured" | "not_applicable";
+  publicWebhookConfiguration: "configured" | "not_applicable";
+  providerNetworkChecked: false;
+}
+
 export interface HttpServerOptions {
   /** Backwards-compatible trusted token. Prefer apiCredentials for exposed deployments. */
   apiToken?: string;
@@ -26,6 +35,7 @@ export interface HttpServerOptions {
   calleWebhookToken?: string;
   maxBodyBytes?: number;
   rateLimits?: HttpRateLimitOptions;
+  readiness?: ReadinessSnapshot;
 }
 
 interface RateLimitEntry {
@@ -45,6 +55,17 @@ export function createControlPlaneHttpServer(controlPlane: ControlPlane, options
     try {
       const url = new URL(req.url ?? "/", "http://localhost");
       if (req.method === "GET" && url.pathname === "/health") return json(res, 200, { ok: true });
+      if (req.method === "GET" && url.pathname === "/ready") {
+        const readiness = options.readiness ?? {
+          ready: true,
+          providerMode: "fake" as const,
+          storeMode: "memory" as const,
+          liveCallConfiguration: "not_applicable" as const,
+          publicWebhookConfiguration: "not_applicable" as const,
+          providerNetworkChecked: false as const,
+        };
+        return json(res, readiness.ready ? 200 : 503, readiness);
+      }
       if (req.method === "GET" && url.pathname === "/operator") return html(res, 200, operatorConsoleHtml());
 
       if (req.method === "POST" && url.pathname === "/webhooks/calle") {
