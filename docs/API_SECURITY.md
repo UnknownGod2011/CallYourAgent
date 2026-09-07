@@ -17,6 +17,15 @@ Supported scopes are:
 
 The intended split is that normal agent/MCP credentials receive `agent:read`, `agent:write`, and optionally `audit:read`. A human-facing owner surface receives `owner:callback` (plus read access if needed). A trusted backend/operator worker receives `calls:reconcile`. This prevents a compromised normal agent credential from directly generating owner callbacks or repeatedly exercising provider reconciliation endpoints.
 
+The exported helpers in `src/credential-roles.ts` provide standard least-privilege role presets for integrations that construct credentials programmatically:
+
+- `agent` → `agent:read`, `agent:write`, `audit:read`;
+- `operator-read` → `agent:read`, `audit:read`;
+- `owner` → `agent:read`, `audit:read`, `owner:callback`;
+- `reconciler` → `calls:reconcile`.
+
+These presets intentionally never include `*`. They are convenience defaults, not a second authorization system: `createControlPlaneHttpServer` remains the enforcement boundary and custom scoped credentials are still supported directly.
+
 Credential ids and bearer tokens must both be unique. Authentication comparisons use constant-time equality. The server never returns configured tokens.
 
 ## Targeted rate limits
