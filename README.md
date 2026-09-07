@@ -45,7 +45,7 @@ For a judge-friendly browser demo, run:
 npm run demo:operator
 ```
 
-This starts a localhost-only fake-provider server and prints the `/operator` URL, run id, and local demo bearer token. The seeded run deliberately shows `documentation` still active while `production-deploy` is blocked and one owner steering instruction is pending. The console receives only the pending count, never the steering text. Stop the demo with Ctrl+C. This is deterministic fake-provider orchestration over the real control-plane semantics, not evidence of a live CALL-E call.
+This starts a localhost-only fake-provider server and prints the `/operator` URL, run id, and a local **read/audit-only** demo bearer token. The seeded run deliberately shows `documentation` still active while `production-deploy` is blocked and one owner steering instruction is pending. The browser token can read the privacy-safe overview and audit timeline, but it cannot checkpoint/acknowledge instructions, reconcile provider calls, mutate agent state, or request an owner callback. The trusted demo process performs the second-stage decision reconciliation and safe-checkpoint acknowledgement directly through the existing control-plane services when you press Enter. Stop the demo with Ctrl+C. This is deterministic fake-provider orchestration over the real control-plane semantics, not evidence of a live CALL-E call.
 
 ## Initial integration targets
 
@@ -66,7 +66,7 @@ An escalation belongs to a branch/scope, not necessarily to the whole agent run.
 
 A built-in browser console is available at `/operator`. It is a thin shell over the existing authenticated run/audit/callback APIs: it can display the current run summary and durable causal timeline, auto-refresh during a demo, and request an owner callback when the supplied token has `owner:callback`.
 
-The page itself contains no server credentials or run data. Entered bearer tokens stay in page memory and normal API scopes still apply. See [docs/OPERATOR_CONSOLE.md](docs/OPERATOR_CONSOLE.md).
+The page itself contains no server credentials or run data. Entered bearer tokens stay in page memory and normal API scopes still apply. The deterministic `demo:operator` launcher intentionally supplies only `agent:read` + `audit:read`; a real owner callback requires a separately scoped credential. See [docs/OPERATOR_CONSOLE.md](docs/OPERATOR_CONSOLE.md).
 
 ## Architecture and operations
 
