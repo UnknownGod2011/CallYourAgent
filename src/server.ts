@@ -2,7 +2,7 @@ import { ControlPlane } from "./control-plane.js";
 import { FakeCallProvider } from "./call-provider.js";
 import { CallPolicy, type CallPolicyConfig } from "./call-policy.js";
 import { CalleCallProvider } from "./calle-provider.js";
-import { createControlPlaneHttpServer, type ApiCredential, type ApiScope } from "./http-server.js";
+import { createControlPlaneHttpServer, type ApiCredential, type ApiScope, type ReadinessSnapshot } from "./http-server.js";
 import type { EscalationPriority } from "./domain.js";
 import { LifecycleManager, type LifecycleRecoveryConfig } from "./lifecycle.js";
 import { InMemoryControlPlaneStore } from "./store.js";
@@ -50,6 +50,7 @@ export function buildRuntimeFromEnv(env: NodeJS.ProcessEnv = process.env) {
       ? nonNegativeInteger(env.CYA_RECONCILE_RATE_LIMIT_PER_MINUTE, "CYA_RECONCILE_RATE_LIMIT_PER_MINUTE")
       : undefined,
   };
+  const readiness = readinessSnapshot(providerMode, storeMode);
 
   const store = storeMode === "memory"
     ? new InMemoryControlPlaneStore()
@@ -64,9 +65,10 @@ export function buildRuntimeFromEnv(env: NodeJS.ProcessEnv = process.env) {
       apiCredentials,
       calleWebhookToken: env.CYA_CALLE_WEBHOOK_TOKEN,
       rateLimits,
+      readiness,
     });
 
-    return { server, controlPlane, lifecycle, provider, store };
+    return { server, controlPlane, lifecycle, provider, store, readiness };
   } catch (error) {
     store.close();
     throw error;
@@ -126,6 +128,21 @@ export async function startRuntimeFromEnv(env: NodeJS.ProcessEnv = process.env):
   const address = runtime.server.address();
   const listeningPort = typeof address === "object" && address !== null ? address.port : port;
   return { ...runtime, port: listeningPort, shutdown };
+}
+
+export function readinessSnapshot(
+  providerMode: "fake" | "calle",
+  storeMode: "memory" | "sqlite",
+): ReadinessSnapshot {
+  const live = providerMode === "calle";
+  return {
+    ready: true,
+    providerMode,
+    storeMode,
+    liveCallConfiguration: live ? "configured" : "not_applicable",
+    publicWebhookConfiguration: live ? "configured" : "not_applicable",
+    providerNetworkChecked: false,
+  };
 }
 
 export function apiCredentialsFromEnv(env: NodeJS.ProcessEnv): ApiCredential[] {
