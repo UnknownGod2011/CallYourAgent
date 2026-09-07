@@ -30,6 +30,8 @@ docker compose -f deploy/compose.yml down
 
 Do **not** add `--volumes` unless you intentionally want to delete the persisted control-plane state.
 
+The repository's `Compose deployment` GitHub Actions workflow verifies more than process restart: it creates an agent and run through the authenticated HTTP API, updates the run state, restarts the same Compose service, and then verifies the run snapshot plus audit events are still available from the persisted SQLite volume. This is deployment-path evidence that API-created control-plane state survives restart; it does not replace the deeper domain/state-machine tests in the normal test suite.
+
 ## Live CALL-E mode
 
 Only after fake-mode verification, set `CYA_CALL_PROVIDER=calle` and provide all required server-side values:
