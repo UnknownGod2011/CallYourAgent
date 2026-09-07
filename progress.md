@@ -2,129 +2,96 @@
 
 ## Current status
 
-CallYourAgent is a durable Node 24 TypeScript control plane for asynchronous two-way voice coordination between autonomous AI agents and their owners. The core product semantics remain unchanged: an autonomous agent can request genuinely important human judgment without freezing unrelated branches/scopes; the owner can independently request a callback for current progress or steering; human decisions/instructions become durable structured state and are consumed at safe checkpoints rather than being represented as impossible mid-generation interruption.
+CallYourAgent is a durable Node 24 TypeScript control plane for asynchronous two-way voice coordination between autonomous AI agents and their owners. The product model remains unchanged: autonomous agents may request genuinely important owner judgment without freezing unrelated branches/scopes; owners may independently request callbacks for progress/questions/steering; human decisions and instructions become durable structured state consumed at explicit safe checkpoints rather than being represented as impossible mid-generation interruption.
 
-The repository currently includes SQLite persistence, deterministic fake and production CALL-E providers, replayable/idempotent call attempts, polling/webhook convergence, scoped authenticated HTTP APIs, a typed TypeScript client, stdio MCP, branch/checkpoint semantics, decision-call policy, privacy-aware audit history, bounded lifecycle recovery, fail-closed ambiguous/stalled call handling, API abuse controls, graceful runtime shutdown, hard CALL-E HTTP deadlines, reproducible npm dependencies, a thin operator console, a production container image, a single-instance Docker Compose reference deployment with persistent SQLite storage, and now an assertion-backed deterministic product demo that exercises the complete fake-provider owner-decision/callback/checkpoint story from one command.
+The repository includes SQLite persistence, deterministic fake and production CALL-E providers, replayable/idempotent call attempts, polling/webhook convergence, scoped authenticated HTTP APIs, a typed TypeScript client, stdio MCP, branch/checkpoint semantics, decision-call policy, privacy-aware audit history, bounded lifecycle recovery, fail-closed ambiguous/stalled handling, API abuse controls, graceful shutdown, hard provider HTTP deadlines, reproducible dependencies, an operator console, production Docker/Compose deployment, restart-persistence verification, an assertion-backed deterministic end-to-end demo, and now a side-effect-free readiness/configuration endpoint distinct from process liveness.
 
 ## Exact repo state inspected this run
 
-Before making any change, inspected the complete recursive `main` repository tree at commit `f4c798b34dcab34c8b38841f111015b8d36ee44f`. The recursive Git tree reported `truncated=false`; source, tests, package metadata, Docker/deployment assets, CI workflows, and every documentation path were included.
+Before changing code, inspected the complete recursive `main` Git tree at HEAD `55e27d247852ae2541a513ae3b09dce6db2522a9`. The tree included source, tests, workflows, package metadata, Docker/deployment assets, and all documentation paths.
 
-Read `AGENTS.md`, this file, `README.md`, `docs/ARCHITECTURE.md`, `docs/INTEGRATIONS.md`, `docs/CALL_POLICY.md`, `docs/API_SECURITY.md`, `docs/DEPLOYMENT.md`, `docs/OPERATOR_CONSOLE.md`, and `deploy/README.md` in full. Inspected recent commits through the durable Compose-state verification work. Checked repository issues and pull requests; there were none.
+Read `AGENTS.md`, this file, `README.md`, `docs/ARCHITECTURE.md`, `docs/INTEGRATIONS.md`, `docs/CALL_POLICY.md`, `docs/API_SECURITY.md`, `docs/DEPLOYMENT.md`, `docs/OPERATOR_CONSOLE.md`, and `deploy/README.md` in full. Inspected recent commits through the deterministic product-demo work. Checked repository issues and pull requests; both collections were empty.
 
-Also inspected the relevant implementation surfaces before choosing this increment: `src/http-server.ts`, `src/server.ts`, `src/client.ts`, `src/domain.ts`, `src/call-provider.ts`, the checkpoint/run portions of `src/control-plane.ts`, `tests/http-server.test.ts`, and `package.json`.
-
-The readiness/configuration endpoint remains a high-value operational increment, but this run identified an equally important hackathon/product gap that could be added as an isolated module without disturbing proven server behavior: there was no single executable command that demonstrated the complete core product story and failed loudly if any of its key invariants regressed.
-
-## Existing foundation preserved
-
-- Agent registration, run state, heartbeats/status, branch-scoped blocking, owner decisions, owner callbacks, durable instruction queues, and safe checkpoint consumption.
-- In-memory and durable `node:sqlite` stores with WAL, transactions, uniqueness constraints, rollback/reload behavior, durable audit ordering, and restart-safe state.
-- Fake CALL-E provider plus production CALL-E Calls API adapter with server-only credentials, structured results, provider idempotency, polling, terminal webhook support, and hard HTTP deadlines.
-- Persist-before-side-effect call attempts containing the exact replayable provider request and idempotency key.
-- Shared polling/webhook terminal transition and provider-event deduplication.
-- Typed HTTP client, stdio MCP adapter, and Claude-style checkpoint/work-loop tests.
-- Priority gates, quiet hours, critical bypass, per-run/per-owner call budgets, escalation expiry, durable policy deferral, bounded ambiguous recovery, and stalled accepted-call review state.
-- Scoped HTTP credentials and per-credential callback/reconciliation rate limits.
-- Owned runtime with non-overlapping lifecycle sweeps and graceful HTTP/lifecycle/store shutdown.
-- Reproducible dependency graph enforced with `npm ci`.
-- Built-in `/operator` UI over existing authenticated run/audit/callback APIs.
-- Production non-root Docker image and deterministic fake-provider container smoke testing.
-- Single-instance Compose deployment using a named volume for the full SQLite `/data` directory, with API-created run/audit state verified across a real container restart.
+Inspected the implementation surfaces relevant to the selected increment: `src/server.ts`, `src/http-server.ts`, and `tests/http-server.test.ts`. The highest-value unblocked item from the previous run was the documented readiness/configuration endpoint.
 
 ## Changes made this run
 
-### Assertion-backed deterministic product demo
+### Side-effect-free readiness/configuration endpoint
 
-Added `src/demo.ts`, which uses the real `ControlPlane`, `InMemoryControlPlaneStore`, and `FakeCallProvider`. It is not a separate scripted state machine, browser automation, or mock UI path. The demo invokes the same domain methods used by the HTTP/MCP integrations and contains assertions for the product invariants it is meant to demonstrate.
+Added unauthenticated `GET /ready`, deliberately separate from `GET /health`.
 
-The deterministic flow now proves in one run that:
+`/health` remains simple process liveness (`{ ok: true }`). `/ready` reports only non-secret deployment facts that were already validated while constructing the selected runtime:
 
-1. an agent registers and starts a run;
-2. a non-blocking owner decision schedules a fake provider call;
-3. that non-blocking decision does not appear in `unresolvedBlockingScopes`;
-4. the agent reports progress in an unrelated `test-suite` scope while the decision remains pending;
-5. a separate blocking escalation affects only the `production-deploy` scope;
-6. unrelated documentation work still continues while `production-deploy` is blocked;
-7. a fake structured owner decision is reconciled and removes that blocking scope;
-8. the earlier non-blocking decision is also reconciled without having frozen unrelated work;
-9. the run publishes fresh release status;
-10. an owner callback snapshots that current status and current scope into the persisted call request;
-11. fake callback completion produces two structured owner steering instructions;
-12. those instructions are visible as queued state before consumption;
-13. the agent consumes them only at an explicit safe checkpoint;
-14. a later checkpoint confirms they are no longer queued;
-15. the durable audit timeline contains the expected escalation, owner-decision, callback, instruction-queued, and instruction-consumed transitions.
+- `ready`;
+- `providerMode` (`fake` or `calle`);
+- `storeMode` (`memory` or `sqlite`);
+- whether live-call configuration is applicable/configured;
+- whether public-webhook configuration is applicable/configured;
+- `providerNetworkChecked: false`.
 
-The CLI entrypoint prints a JSON summary with the generated run/call ids, blocking-scope evidence, callback-context evidence, queued instructions, consumed count, and audit event sequence. Any assertion failure exits non-zero.
+The endpoint never calls CALL-E, never probes the network, never creates/reconciles a phone call, and never exposes `CALLE_API_KEY`, bearer credentials, owner phone number, public URL, or webhook token.
+
+`buildRuntimeFromEnv` now constructs the readiness snapshot only after existing environment validation has succeeded and passes that immutable snapshot into the HTTP adapter. In live mode, “configured” means the required server-side CALL-E key, owner destination, public base URL, and webhook token were present and accepted by startup validation. It explicitly does **not** mean CALL-E is reachable, the phone destination is authorized, public ingress is externally routable, or a real call has succeeded.
 
 ### Regression coverage
 
-Added `tests/demo.test.ts`. The normal test suite now executes the same exported demo flow and asserts the key externally understandable outcomes: unrelated work continues, exactly one branch is blocked before the decision, the block disappears after resolution, callback context is current, steering is queued, steering is consumed at a safe checkpoint, and the expected audit events exist.
+Extended `tests/http-server.test.ts` to verify that:
 
-### Reproducible command and README
+- `/health` is unauthenticated and retains its narrow liveness response;
+- `/ready` is unauthenticated;
+- a live-mode readiness snapshot returns the expected selected provider/store configuration;
+- `providerNetworkChecked` remains `false`, preventing the readiness surface from being misread as live CALL-E verification.
 
-Added:
+### Deployment documentation
 
-```text
-npm run demo
-```
+Updated `docs/DEPLOYMENT.md` with the health/readiness distinction and fake-first deployment guidance. The deployment docs now explicitly state:
 
-to `package.json`, implemented as a normal TypeScript build followed by `node dist/src/demo.js`.
-
-Updated `README.md` with a short deterministic-demo section showing `npm ci` followed by `npm run demo`, what the command proves, and the explicit limitation that this is fake-provider evidence rather than a claim of a live CALL-E phone call.
+- `/health` answers whether the process is serving;
+- `/ready` answers whether the selected runtime mode passed local startup configuration validation;
+- neither endpoint proves provider reachability or successful real phone behavior.
 
 ## Architecture decisions made this run
 
-1. The hackathon demo must execute the existing control-plane domain logic rather than introduce a second demo-only state layer. `src/demo.ts` therefore composes the same `ControlPlane` and `FakeCallProvider` already covered by production-oriented adapters.
-2. Product semantics should be executable assertions, not only README claims. If branch scoping, callback status context, queued steering, or checkpoint consumption regresses, `npm run demo`/the test suite should fail.
-3. The deterministic demo intentionally requires no CALL-E credential, no owner phone number, no public HTTPS deployment, and no browser. This keeps it safe, repeatable, and useful to judges/developers while live phone verification remains separately gated.
-4. The demo explicitly performs unrelated heartbeats while decisions are pending so “non-blocking” is demonstrated as continued work, not inferred merely from a status enum.
-5. Callback context is verified from the persisted call request, establishing that the owner receives a snapshot of current agent status rather than stale startup context.
-6. Human steering remains queued and checkpoint-consumed. Nothing in this work pretends to interrupt an in-flight model/token generation.
-7. The readiness/configuration endpoint remains the preferred next operational source increment and should stay side-effect-free: it must validate deployment configuration without probing CALL-E or initiating a phone call.
+1. Readiness must remain a pure snapshot of already-validated local configuration. It must not introduce a hidden provider side effect merely because an orchestrator polls an endpoint.
+2. Provider reachability is intentionally represented as unchecked. This avoids turning readiness polling into phone-provider traffic and prevents accidental claims of live verification.
+3. The readiness response is safe to leave unauthenticated because it exposes only coarse provider/store mode and configuration-state enums/booleans, never secret values or user/run state.
+4. Live-mode startup remains fail-fast for required server-side configuration. A runtime that reaches `ready: true` in `calle` mode has complete local configuration, but external reachability/authorization remains a separate operational concern.
+5. MCP, HTTP, SDK, branch-scoped blocking, durable owner instruction semantics, and provider idempotency behavior are unchanged.
 
 ## Verification performed
 
-Code-bearing commits:
+Code-bearing commits this run:
 
-- `da0dcc7fb6ed0b97c39041dfc2361ae80bcf6f1a` — `feat: add deterministic product demo`
-- `d836784d128c24fbbb8afc04a4f700c15b219a8a` — `test: cover deterministic product demo`
-- `083975efebedcaadae8e4382f0c969d916b4ea08` — `build: expose deterministic demo command`
-- `10998c00e8fdd701928880c4eebd608f37478371` — `docs: add deterministic demo entrypoint`
+- `9e79fa71f48d82cf4ed96abd72225ef8e1bd2cb4` — `feat: add side-effect-free readiness endpoint`
+- `3f6f9d9781a50f16149f3b3c455f530557fd57c2` — `feat: expose validated deployment readiness`
+- `f5d97f2b805d08f8dd804ecb3afab6829d6f6d7f` — `test: cover readiness endpoint semantics`
+- `cf03568ff401206f0c8c81e427a142ecc45bc204` — `docs: document readiness semantics`
 
-GitHub Actions on the code-bearing `083975efebedcaadae8e4382f0c969d916b4ea08` state all passed:
+GitHub Actions standard CI run `34103798817` on code-bearing commit `f5d97f2b805d08f8dd804ecb3afab6829d6f6d7f` completed successfully. This workflow uses the committed dependency lock with `npm ci` and runs the repository `npm run check` pipeline, covering TypeScript typechecking, build, and the compiled Node test suite including the new readiness regression test.
 
-- Standard `CI` run `34098411452`: passed. This covers locked `npm ci` plus the repository's `npm run check` pipeline, including TypeScript typecheck, build, and all `dist/tests/*.test.js` tests; the new deterministic demo regression test is therefore included.
-- `Compose deployment` run `34098411630`: passed, preserving the persistent-volume restart and API-created state/audit verification.
-- `Container` run `34098411383`: passed, preserving the production image build and deterministic fake-provider runtime smoke test.
+Container and Compose workflows were also triggered for the resulting main-branch states; the existing production-container and restart-persistence architecture was not changed by this increment.
 
 No live CALL-E call was attempted or claimed.
 
 ## CALL-E integration status
 
-- Fake provider: implemented and CI-tested for decision calls, callbacks, branch-scoped blocking, queued owner steering, checkpoint consumption, idempotency, policy, lifecycle recovery, auditability, SQLite restart, operator visualization, production container boot, Compose deployment/persistence, and now exposed through a single assertion-backed `npm run demo` product story.
-- Production CALL-E adapter: implemented with server-only API key, structured result schemas, provider idempotency, asynchronous polling, webhook URL construction, terminal reconciliation, bounded create/poll HTTP requests, and duplicate-call prevention.
-- Ambiguous create replay using the exact original idempotency key: implemented.
-- Bounded automatic recovery/backoff and core recovery-exhaustion enforcement: implemented and tested.
-- Accepted-call stale timeout/fail-closed `stalled` state: implemented and tested.
-- Webhook event-id validation/deduplication plus durable transaction: implemented.
-- HTTP + TypeScript SDK + MCP path: implemented.
+- Deterministic fake provider: implemented and tested across decision calls, callbacks, branch-scoped blocking, queued steering, safe checkpoint consumption, idempotency, policy/lifecycle handling, auditability, SQLite restart, operator visualization, production container boot, Compose persistence, and the assertion-backed `npm run demo` story.
+- Production CALL-E adapter: implemented with server-only API key, structured result schemas, provider idempotency, asynchronous polling, terminal webhook reconciliation, bounded create/poll requests, duplicate-call prevention, ambiguous replay with the exact original key, and fail-closed stalled handling.
+- HTTP + TypeScript SDK + MCP: implemented.
 - Scoped credentials plus callback/reconciliation rate limits: implemented and tested.
-- Graceful server/lifecycle/store shutdown: implemented and tested.
-- Production container + persistent-volume Compose deployment: implemented and CI-tested.
-- Live CALL-E call: **not attempted and not claimed**. A valid CALL-E credential, authorized owner phone destination, and stable public HTTPS deployment remain external prerequisites.
+- Graceful runtime shutdown and persistent-volume deployment: implemented and tested.
+- Liveness/readiness separation: implemented and tested. Readiness is local-configuration evidence only and never a provider probe.
+- Live CALL-E call: **not attempted and not claimed**.
 
 ## Current blockers
 
 There is no blocker to continued repository development.
 
-Live CALL-E verification still requires a valid CALL-E credential, authorized owner phone number, and public HTTPS deployment. Real Claude Code host acceptance still requires an actual Claude Code installation/session. The GitHub connector and GitHub Actions remain sufficient for continued repository mutations and executable verification when a normal local clone is unavailable.
+Live CALL-E verification still requires a valid CALL-E credential, authorized owner phone destination, and stable public HTTPS deployment/webhook path. Real Claude Code host acceptance still requires an actual Claude Code installation/session. Those external prerequisites do not block further control-plane work.
 
 ## Highest-value next actions
 
-1. Add a narrowly scoped readiness/configuration endpoint distinct from `/health`. It should report whether the selected fake/live deployment is internally configured correctly, expose no secrets, perform no CALL-E network probe, and never trigger a phone side effect.
-2. Evaluate explicit per-instruction acknowledgement semantics so a long-running agent can mark a specific steering instruction consumed only after it has incorporated it, without accidentally consuming a later-arriving instruction in the same checkpoint window. Preserve compatibility with the current simple checkpoint API unless the stronger delivery semantics clearly justify an extension.
-3. Exercise the documented Claude Code stdio MCP registration path in a real Claude Code host when such an environment becomes available, and record exact acceptance evidence.
-4. Consider exposing read-only unresolved-blocking-scope and queued-instruction counts in the operator console for a clearer hackathon visualization, without consuming state or creating a second business-state layer.
-5. Add broader Codex/ChatGPT adapters only where current platform capabilities genuinely support the existing tool/checkpoint semantics; never claim mid-generation interruption.
+1. Strengthen owner-instruction delivery semantics with explicit per-instruction acknowledgement/consumption so a worker can acknowledge exactly the instructions it incorporated, without consuming a later-arriving instruction in the same checkpoint window. Preserve the existing simple checkpoint API where possible.
+2. Add read-only unresolved blocking-scope and queued-instruction counts to the operator console/API surface for a clearer hackathon demonstration, without consuming state or creating a second business-state layer.
+3. Exercise the documented Claude Code stdio MCP registration path in a real Claude Code host when such an environment becomes available and record exact acceptance evidence.
+4. Keep broader Codex/ChatGPT adapters thin and capability-honest; add them only where current platform tool/checkpoint semantics genuinely support the shared control plane.
