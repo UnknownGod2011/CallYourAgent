@@ -44,6 +44,10 @@ On `SIGTERM` or `SIGINT` it:
 
 Configure the hosting platform with enough termination grace for active HTTP/provider work to finish. The runtime deliberately does not pretend that killing the process can cancel a phone call that CALL-E may already have accepted; persisted idempotency/call-attempt state remains the recovery source of truth after restart.
 
+CALL-E HTTP operations are independently bounded by `CYA_CALLE_HTTP_TIMEOUT_MS` (15 seconds by default). The bound applies to both `POST /v1/calls` and `GET /v1/calls/{id}`. A create timeout is intentionally treated as an ambiguous side effect by the control plane because the provider may have accepted the request before the local timeout; recovery therefore reuses the exact persisted idempotency key. A polling timeout only fails that reconciliation pass and never creates a replacement phone call. This keeps a hung provider connection from pinning a lifecycle sweep or graceful shutdown indefinitely.
+
+Runtime construction is also exception-safe after durable storage opens: if later policy/lifecycle/HTTP construction throws, the SQLite store is closed before the startup error propagates.
+
 ## Public HTTPS and CALL-E webhooks
 
 Live CALL-E mode requires a stable externally reachable HTTPS origin:
