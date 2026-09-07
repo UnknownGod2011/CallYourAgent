@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import type { Server } from "node:http";
 import type { AddressInfo } from "node:net";
 import { FakeCallProvider } from "./call-provider.js";
 import { ControlPlane } from "./control-plane.js";
@@ -16,6 +17,21 @@ export interface OperatorDemoFixtureResult {
   queuedInstructionCount: number;
   duplicateEscalationDeduped: boolean;
   duplicateCallbackDeduped: boolean;
+}
+
+export interface OperatorDemoServerOptions {
+  host?: string;
+  port?: number;
+  apiToken?: string;
+}
+
+export interface OperatorDemoServer {
+  server: Server;
+  fixture: OperatorDemoFixtureResult;
+  baseUrl: string;
+  operatorUrl: string;
+  apiToken: string;
+  close(): Promise<void>;
 }
 
 /**
@@ -93,15 +109,21 @@ export async function seedOperatorDemoFixture(
   };
 }
 
-async function runOperatorDemoServer(): Promise<void> {
-  const host = process.env.CYA_OPERATOR_DEMO_HOST?.trim() || "127.0.0.1";
-  const rawPort = process.env.CYA_OPERATOR_DEMO_PORT?.trim();
-  const port = rawPort ? Number(rawPort) : 8788;
+/**
+ * Starts the deterministic operator-demo fixture through the same HTTP boundary used
+ * by the browser console. Tests can pass port 0 to let the OS allocate an ephemeral
+ * localhost port without inventing a second demo server implementation.
+ */
+export async function startOperatorDemoServer(
+  options: OperatorDemoServerOptions = {},
+): Promise<OperatorDemoServer> {
+  const host = options.host?.trim() || "127.0.0.1";
+  const port = options.port ?? 8788;
   if (!Number.isInteger(port) || port < 0 || port > 65535) {
-    throw new Error("CYA_OPERATOR_DEMO_PORT must be an integer from 0 through 65535");
+    throw new Error("operator demo port must be an integer from 0 through 65535");
   }
 
-  const apiToken = process.env.CYA_OPERATOR_DEMO_TOKEN?.trim() || "cya-local-demo-token";
+  const apiToken = options.apiToken?.trim() || "cya-local-demo-token";
   const store = new InMemoryControlPlaneStore();
   const provider = new FakeCallProvider();
   const controlPlane = new ControlPlane(store, provider);
@@ -125,26 +147,43 @@ async function runOperatorDemoServer(): Promise<void> {
   const address = server.address() as AddressInfo;
   const baseUrl = `http://${host}:${address.port}`;
 
+  return {
+    server,
+    fixture,
+    baseUrl,
+    operatorUrl: `${baseUrl}/operator`,
+    apiToken,
+    close: () => new Promise<void>((resolve, reject) => {
+      server.close((error) => error ? reject(error) : resolve());
+    }),
+  };
+}
+
+async function runOperatorDemoServer(): Promise<void> {
+  const host = process.env.CYA_OPERATOR_DEMO_HOST?.trim() || "127.0.0.1";
+  const rawPort = process.env.CYA_OPERATOR_DEMO_PORT?.trim();
+  const port = rawPort ? Number(rawPort) : 8788;
+  const apiToken = process.env.CYA_OPERATOR_DEMO_TOKEN?.trim() || "cya-local-demo-token";
+  const demo = await startOperatorDemoServer({ host, port, apiToken });
+
   console.log(JSON.stringify({
     ok: true,
     mode: "deterministic-fake-provider",
-    operatorUrl: `${baseUrl}/operator`,
-    runId: fixture.runId,
-    apiToken,
+    operatorUrl: demo.operatorUrl,
+    runId: demo.fixture.runId,
+    apiToken: demo.apiToken,
     expectedIndicators: {
-      activeScope: fixture.activeScope,
-      blockedScopes: fixture.unresolvedBlockingScopes,
-      pendingSteering: fixture.queuedInstructionCount,
+      activeScope: demo.fixture.activeScope,
+      blockedScopes: demo.fixture.unresolvedBlockingScopes,
+      pendingSteering: demo.fixture.queuedInstructionCount,
     },
     note: "Local hackathon fixture only. This does not claim a live CALL-E phone call.",
   }, null, 2));
 
   const close = () => {
-    server.close((error) => {
-      if (error) {
-        console.error("CallYourAgent operator demo shutdown failed", error);
-        process.exitCode = 1;
-      }
+    void demo.close().catch((error) => {
+      console.error("CallYourAgent operator demo shutdown failed", error);
+      process.exitCode = 1;
     });
   };
   process.once("SIGINT", close);

@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import { FakeCallProvider } from "../src/call-provider.js";
 import { ControlPlane } from "../src/control-plane.js";
-import { seedOperatorDemoFixture } from "../src/operator-demo.js";
+import { seedOperatorDemoFixture, startOperatorDemoServer } from "../src/operator-demo.js";
 import { getRunOverview } from "../src/run-overview.js";
 import { InMemoryControlPlaneStore } from "../src/store.js";
 
@@ -50,4 +50,67 @@ test("operator demo fixture reproduces branch-safe privacy-safe state using real
     },
     "fresh demo launches should reproduce the same semantic state",
   );
+});
+
+test("operator demo launcher proves the judge-facing state through the authenticated HTTP boundary", async () => {
+  const demo = await startOperatorDemoServer({ port: 0, apiToken: "operator-http-acceptance-token" });
+
+  try {
+    const pageResponse = await fetch(demo.operatorUrl);
+    assert.equal(pageResponse.status, 200);
+    assert.equal(pageResponse.headers.get("cache-control"), "no-store");
+    const pageHtml = await pageResponse.text();
+    assert.match(pageHtml, /Active scope/);
+    assert.match(pageHtml, /Blocked scopes/);
+    assert.match(pageHtml, /Pending steering/);
+    assert.equal(pageHtml.includes("Keep production deploy paused"), false);
+    assert.equal(pageHtml.includes(demo.apiToken), false);
+
+    const overviewUrl = `${demo.baseUrl}/v1/runs/${encodeURIComponent(demo.fixture.runId)}/overview`;
+    const unauthenticated = await fetch(overviewUrl);
+    assert.equal(unauthenticated.status, 401);
+
+    const authenticated = await fetch(overviewUrl, {
+      headers: { authorization: `Bearer ${demo.apiToken}` },
+    });
+    assert.equal(authenticated.status, 200);
+    assert.equal(authenticated.headers.get("cache-control"), "no-store");
+    const overview = await authenticated.json() as {
+      run: { currentScope?: string };
+      unresolvedBlockingScopes: string[];
+      queuedInstructionCount: number;
+    };
+    assert.equal(overview.run.currentScope, "documentation");
+    assert.deepEqual(overview.unresolvedBlockingScopes, ["production-deploy"]);
+    assert.equal(overview.queuedInstructionCount, 1);
+
+    const serializedOverview = JSON.stringify(overview);
+    assert.equal(serializedOverview.includes("Keep production deploy paused"), false);
+    assert.equal(serializedOverview.includes("queuedInstructions"), false);
+
+    const checkpointResponse = await fetch(
+      `${demo.baseUrl}/v1/runs/${encodeURIComponent(demo.fixture.runId)}/checkpoint`,
+      {
+        method: "POST",
+        headers: {
+          authorization: `Bearer ${demo.apiToken}`,
+          "content-type": "application/json",
+        },
+        body: JSON.stringify({ consume: false }),
+      },
+    );
+    assert.equal(checkpointResponse.status, 200);
+    const checkpoint = await checkpointResponse.json() as {
+      unresolvedBlockingScopes: string[];
+      queuedInstructions: Array<{ text: string }>;
+    };
+    assert.deepEqual(checkpoint.unresolvedBlockingScopes, ["production-deploy"]);
+    assert.deepEqual(
+      checkpoint.queuedInstructions.map((instruction) => instruction.text),
+      ["Keep production deploy paused until the final validation report is ready."],
+      "steering should remain durable for the agent checkpoint even though the operator overview hides it",
+    );
+  } finally {
+    await demo.close();
+  }
 });
