@@ -20,7 +20,7 @@ async function start() {
   return `http://127.0.0.1:${address.port}`;
 }
 
-test("operator console is a static shell while control-plane data remains authenticated", async () => {
+test("operator console is a static shell over the privacy-safe overview while control-plane data remains authenticated", async () => {
   const base = await start();
   const page = await fetch(`${base}/operator`);
   assert.equal(page.status, 200);
@@ -32,9 +32,15 @@ test("operator console is a static shell while control-plane data remains authen
   assert.match(body, /CallYourAgent/);
   assert.match(body, /durable audit history/i);
   assert.match(body, /owner:callback/);
+  assert.match(body, /Active scope/);
+  assert.match(body, /Blocked scopes/);
+  assert.match(body, /Pending steering/);
+  assert.match(body, /\/v1\/runs\/.*\/overview/);
+  assert.match(body, /queuedInstructionCount/);
+  assert.doesNotMatch(body, /queuedInstructions/);
   assert.doesNotMatch(body, /operator-test-secret/);
   assert.doesNotMatch(body, /hook-secret/);
 
-  const protectedRun = await fetch(`${base}/v1/runs/not-a-run`);
-  assert.equal(protectedRun.status, 401);
+  const protectedOverview = await fetch(`${base}/v1/runs/not-a-run/overview`);
+  assert.equal(protectedOverview.status, 401);
 });
