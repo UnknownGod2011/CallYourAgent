@@ -43,11 +43,14 @@ An escalation belongs to a branch/scope, not necessarily to the whole agent run.
 - `blocking=false`: agent continues; answer is consumed later at a safe checkpoint.
 - Incoming owner instructions are queued rather than injected mid-token-generation.
 
-## Architecture
+## Architecture and operations
 
 See:
 - [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)
 - [docs/INTEGRATIONS.md](docs/INTEGRATIONS.md)
+- [docs/CALL_POLICY.md](docs/CALL_POLICY.md)
+- [docs/API_SECURITY.md](docs/API_SECURITY.md)
+- [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md)
 - [progress.md](progress.md)
 
 ## CALL-E
