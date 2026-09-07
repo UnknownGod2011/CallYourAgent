@@ -3,6 +3,7 @@ import { createServer, type IncomingMessage, type Server, type ServerResponse } 
 import { URL } from "node:url";
 import { parseCalleTerminalWebhook } from "./calle-webhook.js";
 import type { ControlPlane } from "./control-plane.js";
+import { operatorConsoleHtml } from "./operator-ui.js";
 
 export type ApiScope = "agent:read" | "agent:write" | "audit:read" | "owner:callback" | "calls:reconcile" | "*";
 
@@ -44,6 +45,7 @@ export function createControlPlaneHttpServer(controlPlane: ControlPlane, options
     try {
       const url = new URL(req.url ?? "/", "http://localhost");
       if (req.method === "GET" && url.pathname === "/health") return json(res, 200, { ok: true });
+      if (req.method === "GET" && url.pathname === "/operator") return html(res, 200, operatorConsoleHtml());
 
       if (req.method === "POST" && url.pathname === "/webhooks/calle") {
         if (!options.calleWebhookToken || !safeEqual(url.searchParams.get("token") ?? "", options.calleWebhookToken)) {
@@ -251,5 +253,16 @@ function nonNegative(value: number, name: string): number { if (!Number.isIntege
 function json(res: ServerResponse, status: number, value: unknown): void {
   const body = JSON.stringify(value);
   res.writeHead(status, { "content-type": "application/json; charset=utf-8", "content-length": Buffer.byteLength(body), "cache-control": "no-store" });
+  res.end(body);
+}
+function html(res: ServerResponse, status: number, body: string): void {
+  res.writeHead(status, {
+    "content-type": "text/html; charset=utf-8",
+    "content-length": Buffer.byteLength(body),
+    "cache-control": "no-store",
+    "content-security-policy": "default-src 'none'; style-src 'unsafe-inline'; script-src 'unsafe-inline'; connect-src 'self'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'",
+    "referrer-policy": "no-referrer",
+    "x-content-type-options": "nosniff",
+  });
   res.end(body);
 }
