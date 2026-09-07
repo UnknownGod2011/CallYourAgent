@@ -9,6 +9,7 @@
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "test": "npm run build && node --test dist/tests/*.test.js",
     "check": "npm run typecheck && npm test",
+    "demo": "npm run build && node dist/src/demo.js",
     "start": "node dist/src/server.js",
     "start:mcp": "node dist/src/mcp-server.js"
   },
