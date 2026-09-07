@@ -28,6 +28,17 @@ Two-way voice communication between humans and long-running AI agents:
 
 The system is not a generic phone dialer and not tied to one AI vendor. It is a control plane that can be integrated through MCP, SDK/API adapters, hooks, or platform-specific plugins.
 
+## Deterministic product demo
+
+Run the complete no-credentials product story with the fake CALL-E provider:
+
+```bash
+npm ci
+npm run demo
+```
+
+The command fails if a core invariant regresses. It proves that a non-blocking decision leaves unrelated work running, a blocking decision pauses only its scope and later resumes, an owner callback receives the current agent status, callback steering becomes queued structured state, and that steering is consumed only at a safe checkpoint. The emitted JSON includes the resulting run/call ids and durable audit-event sequence. It does **not** claim a live CALL-E phone call.
+
 ## Initial integration targets
 
 - Claude / Claude Code via MCP + adapter/hooks where supported.
