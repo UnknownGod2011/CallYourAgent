@@ -2,17 +2,17 @@
 
 ## Current status
 
-CallYourAgent is a durable Node 24 TypeScript control plane for asynchronous two-way voice coordination between autonomous AI agents and their owners. It currently has SQLite persistence, deterministic fake and production CALL-E providers, replayable/idempotent call attempts, polling/webhook convergence, scoped authenticated HTTP APIs, a typed TypeScript client, stdio MCP, CI-proven Claude-style branch/checkpoint behavior, decision-call policy, durable privacy-aware audit history, bounded lifecycle recovery, fail-closed ambiguous/stalled call handling, API abuse controls, an owned graceful runtime, and hard deadlines around CALL-E HTTP operations.
+CallYourAgent is a durable Node 24 TypeScript control plane for asynchronous two-way voice coordination between autonomous AI agents and their owners. It currently has SQLite persistence, deterministic fake and production CALL-E providers, replayable/idempotent call attempts, polling/webhook convergence, scoped authenticated HTTP APIs, a typed TypeScript client, stdio MCP, CI-proven Claude-style branch/checkpoint behavior, decision-call policy, durable privacy-aware audit history, bounded lifecycle recovery, fail-closed ambiguous/stalled call handling, API abuse controls, an owned graceful runtime, hard deadlines around CALL-E HTTP operations, and a committed reproducible npm dependency graph verified with `npm ci`.
 
 The core product semantics remain unchanged: an agent can escalate genuinely important human judgment without freezing unrelated scopes; the owner can independently request a callback to hear current status and steer the run; owner decisions and instructions become durable structured state and are consumed only at safe checkpoints rather than being represented as mid-generation interruption.
 
 ## Exact repo state inspected this run
 
-Before making changes, inspected the complete recursive `main` repository tree at `47e4dee197d114d5a96fc42bf6c2de03363a145b`, including every source, test, workflow, configuration, and documentation path. Inspected recent commits through the graceful runtime/deployment hardening work. Checked repository issues and pull requests; there were no open/relevant issues or PRs.
+Before making changes, inspected the complete recursive `main` repository tree at `081b29693a5ec1504fc45ef50fadae1ee4c187f7`, including source, tests, workflow/configuration files, and all documentation paths. Inspected the recent commit history through the CALL-E HTTP timeout hardening work. Checked repository issues and pull requests; there were no current issues or PRs.
 
-Read `AGENTS.md`, this file, `README.md`, `docs/ARCHITECTURE.md`, `docs/INTEGRATIONS.md`, `docs/CALL_POLICY.md`, `docs/API_SECURITY.md`, and `docs/DEPLOYMENT.md` in full before modifying the repository. Inspected `src/calle-provider.ts`, the call-start/reconciliation behavior in `src/control-plane.ts`, `src/server.ts`, `.env.example`, `tests/calle-provider.test.ts`, and `tests/server-runtime.test.ts` because the highest-value recorded next action was bounding provider HTTP operations without weakening ambiguous-call/idempotency guarantees.
+Read `AGENTS.md`, this file, `README.md`, `docs/ARCHITECTURE.md`, `docs/INTEGRATIONS.md`, `docs/CALL_POLICY.md`, `docs/API_SECURITY.md`, and `docs/DEPLOYMENT.md` in full before modifying the repository. Also inspected `package.json` and `.github/workflows/ci.yml` because the highest-value recorded next action was reproducible dependency locking and conversion from `npm install` to `npm ci`.
 
-Direct local clone/test execution remains unavailable in this runtime because the execution container cannot use the repository through a normal local GitHub clone path. Repository mutations therefore used authenticated GitHub repository operations and verification used the repository's GitHub Actions CI.
+The automation container still cannot resolve `github.com` directly, so a normal local clone/npm lockfile-generation path was unavailable. Rather than fabricate dependency versions or integrity hashes, this run used the repository's GitHub Actions environment to generate the lockfile from npm, exported that exact file as a short-lived workflow artifact, retrieved it, committed it, and then verified it in a fresh `npm ci` CI run.
 
 ## Existing foundation preserved
 
@@ -25,71 +25,63 @@ Direct local clone/test execution remains unavailable in this runtime because th
 - Priority gates, quiet hours, critical bypass, per-run/per-owner call budgets, escalation expiry, durable policy deferral, bounded ambiguous recovery, and stalled accepted-call review state.
 - Scoped HTTP credentials and per-credential callback/reconciliation rate limits.
 - Owned runtime with non-overlapping lifecycle sweeps plus graceful HTTP/lifecycle/store shutdown.
+- Hard timeout bounds around CALL-E create and reconciliation HTTP operations.
 
 ## Changes made this run
 
-### Hard deadline around CALL-E HTTP operations
+### Reproducible dependency graph
 
-Added `requestTimeoutMs` to the production `CalleCallProvider`, defaulting to 15 seconds. Both provider network paths now carry an `AbortSignal.timeout(...)` deadline:
+Added a committed npm lockfile (`package-lock.json`, lockfile version 3) generated by npm in the repository's Node 24 GitHub Actions environment. The lockfile captures exact resolved versions and registry integrity hashes instead of relying on semver-range resolution on each CI/deployment install.
 
-- `POST /v1/calls` call creation;
-- `GET /v1/calls/{id}` call-status reconciliation.
+The current locked top-level graph resolves:
 
-This closes the previous reliability gap where a hung provider connection could indefinitely pin a lifecycle sweep and therefore delay graceful shutdown.
+- `@modelcontextprotocol/server` 2.0.0;
+- `@modelcontextprotocol/client` 2.0.0;
+- `zod` 4.5.4;
+- `@types/node` 24.13.3;
+- `typescript` 5.9.3;
 
-The semantics deliberately differ at the control-plane level according to the operation:
+with all transitive package versions and integrity hashes recorded by npm.
 
-1. A timed-out **create** request throws from the provider into the existing persisted call-attempt boundary. The control plane records the attempt as `ambiguous`, preserving the exact original request and idempotency key. Automatic recovery therefore still replays only that same logical request/key; the timeout does not authorize a fresh call.
-2. A timed-out **poll** throws from `getOutcome`. That reconciliation pass fails and can be retried later against the already-known provider call id. It does not create a new provider call or mutate terminal state without evidence.
+### CI now enforces the lockfile
 
-`CalleCallProvider` validates that an explicitly supplied timeout is a positive integer.
+Changed GitHub Actions from:
 
-### Runtime configuration
+```text
+npm install --no-audit --no-fund
+```
 
-Live CALL-E mode now accepts `CYA_CALLE_HTTP_TIMEOUT_MS`; when omitted the provider uses its 15000 ms default. Environment parsing validates an explicitly supplied value before a durable store is opened.
+to:
 
-Updated `.env.example` and `docs/DEPLOYMENT.md` to document the timeout and the create-vs-poll safety semantics.
+```text
+npm ci --no-audit --no-fund
+```
 
-### Exception-safe runtime construction after SQLite opens
+and enabled the official `actions/setup-node` npm cache, which is keyed from the committed lockfile. CI therefore fails if `package.json` and `package-lock.json` drift instead of silently resolving a different graph.
 
-`buildRuntimeFromEnv()` now wraps post-store-open construction of `CallPolicy`, `ControlPlane`, `LifecycleManager`, and the HTTP server. If any of those constructors throws, the store is closed before the startup error propagates.
-
-This addresses the smaller resource-safety follow-up from the prior run: environment syntax is already validated before opening SQLite where possible, while derived constructor validation (for example policy/lifecycle invariants) can no longer leak the durable database handle.
-
-### Regression coverage
-
-Expanded `tests/calle-provider.test.ts` to verify:
-
-- outbound CALL-E requests actually receive an abort signal;
-- a hung create request is aborted at the configured deadline;
-- a hung reconciliation request is aborted at the configured deadline;
-- invalid timeout configuration is rejected.
-
-The existing control-plane behavior that converts provider create exceptions into durable ambiguous call attempts remains unchanged and continues to be covered by the broader state-machine/lifecycle tests.
+A temporary bootstrap commit added `actions/upload-artifact` only to retrieve the trustworthy CI-generated lockfile. The final workflow removes that bootstrap artifact step; it is not part of the permanent CI architecture.
 
 ## Architecture decisions made this run
 
-1. Provider network deadlines belong in the production `CallProvider` adapter, not in agent/MCP adapters or business prompts.
-2. Create-request timeout is ambiguous, not failed, because CALL-E may have accepted the real-world side effect before the local deadline fired.
-3. The exact persisted idempotency key remains the only automatic recovery key after a create timeout; timeout handling does not relax duplicate-call prevention.
-4. Poll timeout is a transient reconciliation failure against an existing provider call id and must never synthesize a terminal result or replacement call.
-5. One timeout setting is used for CALL-E create and poll operations for the current reference deployment; provider-specific tuning can be split later only if live evidence justifies it.
-6. Runtime construction owns the resource-cleanup boundary once a store has been opened: later constructor failure closes the store before propagating.
+1. Dependency integrity is part of the reproducibility/supply-chain boundary for a control plane that can trigger real-world phone side effects; CI must install a committed exact graph rather than re-resolving semver ranges every run.
+2. The lockfile must come from an actual npm resolution, not hand-authored or guessed package metadata. When the local runtime could not access npm/GitHub, the existing trusted GitHub Actions environment was used as the generator.
+3. `npm ci` is the canonical CI install command because it treats lockfile/package-manifest disagreement as an error and starts from the exact committed graph.
+4. The npm cache is a performance optimization only; the lockfile and npm integrity checks remain the source of dependency reproducibility.
+5. No business/domain behavior, CALL-E semantics, MCP protocol behavior, or persistence state machine was changed in this increment.
 
 ## Verification performed
 
-- Code-bearing provider implementation commit `8a455b7ededd4ef8004dff741226b478b82a8088` added the request deadline.
-- Test commit `aa5ef894dbc4316185b2970530243397806ce025` added deterministic hung-request coverage.
-- Runtime/config code commit `74846725ce2dc2d7ba1618c904883128bb13a621` wired `CYA_CALLE_HTTP_TIMEOUT_MS` and made post-store-open construction exception-safe.
-- GitHub Actions CI run `34075022569` for commit `74846725ce2dc2d7ba1618c904883128bb13a621` completed successfully on September 7, 2026 UTC.
-- The successful job used Node 24, installed dependencies, and ran the repository's `npm run check` pipeline. Typechecking/build/test execution all passed, including the new hung-create and hung-reconciliation timeout tests.
-- Documentation/configuration commits `b4016822a26e01d973e3cd98002cee6949e635f9` and `535ae46481ea13e80cd8d9676b58310192f12cde` record the timeout configuration and deployment semantics.
+- Bootstrap commit `439a395abd96b9115269d098245610bc7dfe02a2` temporarily uploaded the npm-generated `package-lock.json` from CI as artifact `package-lock`.
+- GitHub Actions run `34078208528` successfully completed dependency installation and generated the artifact; its normal typecheck/test pipeline also completed successfully.
+- The exact artifact lockfile was committed together with the permanent CI change in commit `a447827adefa6503cba52a065ea6eaef132648dd` (`build: lock dependencies and use npm ci`).
+- GitHub Actions run `34078300102` for `a447827adefa6503cba52a065ea6eaef132648dd` completed successfully on September 7, 2026 UTC.
+- That final verification used Node 24, `npm ci --no-audit --no-fund`, and the repository's `npm run check` pipeline. Locked dependency installation, TypeScript typechecking/build, and the full Node test suite all passed.
 - No live CALL-E call was attempted in this run.
 
 ## CALL-E integration status
 
-- Fake provider: implemented and CI-tested end-to-end, including decision calls, callbacks, branch-scoped blocking, queued owner steering, checkpoint consumption, idempotency, policy, lifecycle recovery, and auditability.
-- Production CALL-E adapter: implemented with server-only API key, structured result schemas, provider idempotency, asynchronous polling, webhook URL construction, terminal reconciliation, and now bounded create/poll HTTP requests.
+- Fake provider: implemented and CI-tested end-to-end, including decision calls, callbacks, branch-scoped blocking, queued owner steering, checkpoint consumption, idempotency, policy, lifecycle recovery, auditability, and restart-safe state.
+- Production CALL-E adapter: implemented with server-only API key, structured result schemas, provider idempotency, asynchronous polling, webhook URL construction, terminal reconciliation, bounded create/poll HTTP requests, and duplicate-call prevention.
 - Ambiguous create replay with the exact original idempotency key: implemented.
 - Automatic recovery bounds/backoff and core recovery-exhaustion enforcement: implemented and CI-tested.
 - Accepted-call stale timeout: implemented; terminal provider evidence is polled before stalling and CI-tested.
@@ -97,21 +89,20 @@ The existing control-plane behavior that converts provider create exceptions int
 - HTTP + TypeScript SDK + MCP path: implemented.
 - Scoped credentials + callback/reconciliation rate limits: implemented and CI-tested.
 - Graceful server/lifecycle/store shutdown: implemented and CI-tested.
-- CALL-E create/poll network timeout: implemented, configurable, and CI-tested this run.
+- Reproducible dependency graph / `npm ci`: implemented and CI-tested this run.
 - Live CALL-E call: **not attempted and not claimed**. A valid CALL-E credential, authorized owner phone destination, and stable public HTTPS deployment remain external prerequisites.
 
 ## Current blockers
 
 There is no blocker to continued repository development.
 
-Live CALL-E verification still requires a valid CALL-E credential, authorized owner phone number, and public HTTPS deployment. Host-level Claude Code acceptance still requires an actual Claude Code installation/session. Authenticated GitHub access and GitHub Actions continue to provide a working implementation/verification path in this runtime.
+Live CALL-E verification still requires a valid CALL-E credential, authorized owner phone number, and public HTTPS deployment. Host-level Claude Code acceptance still requires an actual Claude Code installation/session. The current automation runtime cannot perform a normal networked local clone, but authenticated GitHub repository operations and GitHub Actions provide a working implementation/verification path.
 
 ## Highest-value next actions
 
-1. Generate and commit a dependency lockfile, then switch CI from `npm install` to reproducible `npm ci` once the current dependency graph is captured cleanly.
-2. Exercise the documented Claude Code stdio MCP registration path in a real Claude Code host and record exact host acceptance results rather than inferring host behavior from protocol-level tests.
-3. Add a small operator/status surface over existing authenticated run/audit APIs so the hackathon demo visibly shows concurrent unrelated work, blocked-scope resume, call state, and checkpoint-consumed steering without introducing a second state layer.
-4. Consider a narrowly scoped provider-readiness endpoint or startup self-check only if it can report credentials/webhook/provider reachability without causing a phone side effect; keep `/health` as liveness.
-5. Add an explicit operator-only resolution/recovery path for `stalled` or exhausted-ambiguous calls only if real deployment testing demonstrates a need; keep it separately scoped and audited.
-6. Consider a shared store/rate limiter only when moving beyond the supported single-instance reference deployment.
-7. Add broader Codex/ChatGPT adapters only where current platform capabilities can genuinely support the existing checkpoint/tool semantics; do not duplicate the state machine or claim mid-generation interruption.
+1. Exercise the documented Claude Code stdio MCP registration path in a real Claude Code host and record exact host acceptance results rather than inferring host behavior from protocol-level tests. If that host is unavailable in the current runtime, keep progressing elsewhere rather than fabricating acceptance.
+2. Add a small operator/status surface over the existing authenticated run/audit APIs so the hackathon demo visibly shows concurrent unrelated work, blocked-scope resume, call state, and checkpoint-consumed steering without introducing a second state layer.
+3. Add a narrowly scoped readiness/configuration surface that can distinguish process liveness from deployment readiness without initiating a phone side effect or claiming external provider health it has not verified.
+4. Add an explicit operator-only resolution/recovery path for `stalled` or exhausted-ambiguous calls only if real deployment testing demonstrates a need; keep it separately scoped and audited.
+5. Consider a shared store/rate limiter only when moving beyond the supported single-instance reference deployment.
+6. Add broader Codex/ChatGPT adapters only where current platform capabilities can genuinely support the existing checkpoint/tool semantics; do not duplicate the state machine or claim mid-generation interruption.
