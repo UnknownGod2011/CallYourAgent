@@ -18,7 +18,7 @@ test("run overview is authenticated, privacy-safe, and non-consuming through HTT
   const server = createControlPlaneHttpServer(controlPlane, {
     apiCredentials: [
       { id: "agent", token: "agent-read-write", scopes: ["agent:read", "agent:write"] },
-      { id: "owner", token: "owner-callback", scopes: ["owner:callback", "agent:read"] },
+      { id: "owner", token: "owner-callback", scopes: ["owner:callback", "agent:read", "calls:reconcile"] },
     ],
   });
   servers.push(server);
