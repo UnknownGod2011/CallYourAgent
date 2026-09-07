@@ -1,0 +1,10 @@
+node_modules
+dist
+.git
+.github
+callyouragent.db
+callyouragent.db-*
+*.log
+.env
+.env.*
+!.env.example
