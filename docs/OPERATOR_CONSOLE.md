@@ -15,6 +15,8 @@ The overview is deliberately privacy-safe: it exposes only the **count** of queu
 
 The timeline reflects the same persisted events used by SDK/MCP callers: escalation creation, policy deferral/release, provider call transitions, owner decisions, callback requests, queued steering, and safe-checkpoint instruction consumption.
 
+For readability, the browser now groups those existing audit event types into presentation-only stage labels: **Needs owner**, **Phone call**, **Decision**, **Callback**, **Steering queued**, and **Steering acknowledged**. These labels do not create or infer new domain state. Each card still renders the persisted event sequence, actor, event type, timestamp, and privacy-safe summary from the audit API. The visual grouping is specifically meant to make the asynchronous human loop obvious to a judge while preserving the metadata-only audit boundary: decision answers, callback transcripts, escalation context, and owner instruction text are not added to the operator payload.
+
 The console can optionally request an owner callback through the existing `POST /v1/callbacks` endpoint. This requires a credential with `owner:callback`. It does not add another callback path and does not receive `CALLE_API_KEY`.
 
 ## Security model
@@ -56,8 +58,9 @@ This launcher is intentionally local-only by default and uses an in-memory store
 4. Enter the run id and a scoped token (or the values printed by `demo:operator`).
 5. Let the agent raise a blocking owner decision in one scope while reporting independent work in another scope.
 6. Refresh or enable three-second auto-refresh. The overview should show the independent active scope separately from the unresolved blocked scope(s).
-7. If owner steering has been queued, the page shows only the pending count; the instruction text remains available solely through the agent checkpoint contract.
-8. If using an owner-scoped token, request a callback from the page.
-9. After fake-provider completion, the timeline will show the callback and queued steering; after the agent's next safe checkpoint and exact acknowledgement, it will show instruction consumption.
+7. Follow the stage-labelled causal timeline to distinguish the decision request, provider-call progress, owner decision, callback, queued steering, and eventual exact acknowledgement.
+8. If owner steering has been queued, the page shows only the pending count; the instruction text remains available solely through the agent checkpoint contract.
+9. If using an owner-scoped token, request a callback from the page.
+10. After fake-provider completion, the timeline will show the callback and queued steering; after the agent's next safe checkpoint and exact acknowledgement, it will show instruction consumption as **Steering acknowledged**.
 
 The console is deliberately not presented as evidence of live CALL-E success. In fake mode it visualizes the deterministic control-plane flow; live phone transport remains separately gated by real CALL-E credentials, an authorized destination, and public HTTPS webhook ingress.
