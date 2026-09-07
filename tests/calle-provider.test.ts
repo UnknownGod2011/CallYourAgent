@@ -28,6 +28,7 @@ test("CALL-E provider sends idempotency, recipient, metadata, and decision schem
 
   assert.deepEqual(result, { providerCallId: "call_123", status: "queued" });
   assert.equal(new Headers(capturedInit?.headers).get("idempotency-key"), "decision:abc");
+  assert.ok(capturedInit?.signal instanceof AbortSignal);
   const body = JSON.parse(String(capturedInit?.body));
   assert.deepEqual(body.recipients, [{ phones: ["TEST_OWNER_PHONE"] }]);
   assert.deepEqual(body.metadata, { runId: "run_1", escalationId: "esc_1" });
@@ -68,3 +69,60 @@ test("CALL-E provider returns null while active and maps terminal failure", asyn
   assert.equal(failed?.status, "failed");
   assert.equal(failed?.structured?.failureCode, "unreachable");
 });
+
+test("CALL-E provider aborts a hung create request at the configured deadline", async () => {
+  const fetchImpl = hangingFetch();
+  const provider = new CalleCallProvider({
+    apiKey: "key",
+    ownerPhone: "TEST_OWNER_PHONE",
+    fetchImpl,
+    requestTimeoutMs: 10,
+  });
+
+  await assert.rejects(
+    provider.start({
+      idempotencyKey: "decision:timeout",
+      purpose: "owner_decision",
+      task: "Ask the owner.",
+      metadata: { runId: "run_timeout" },
+    }),
+    (error: unknown) => error instanceof Error && error.name === "TimeoutError",
+  );
+});
+
+test("CALL-E provider aborts a hung reconciliation request at the configured deadline", async () => {
+  const fetchImpl = hangingFetch();
+  const provider = new CalleCallProvider({
+    apiKey: "key",
+    ownerPhone: "TEST_OWNER_PHONE",
+    fetchImpl,
+    requestTimeoutMs: 10,
+  });
+
+  await assert.rejects(
+    provider.getOutcome("call_hung"),
+    (error: unknown) => error instanceof Error && error.name === "TimeoutError",
+  );
+});
+
+test("CALL-E provider rejects invalid request timeout configuration", () => {
+  assert.throws(
+    () => new CalleCallProvider({ apiKey: "key", ownerPhone: "TEST_OWNER_PHONE", requestTimeoutMs: 0 }),
+    /request timeout must be a positive integer/,
+  );
+});
+
+function hangingFetch(): typeof fetch {
+  return ((_: string | URL | Request, init?: RequestInit) => new Promise<Response>((_resolve, reject) => {
+    const signal = init?.signal;
+    if (!signal) {
+      reject(new Error("expected abort signal"));
+      return;
+    }
+    if (signal.aborted) {
+      reject(signal.reason);
+      return;
+    }
+    signal.addEventListener("abort", () => reject(signal.reason), { once: true });
+  })) as typeof fetch;
+}
