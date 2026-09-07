@@ -9,6 +9,7 @@ export * from "./control-plane.js";
 export * from "./run-overview.js";
 export * from "./lifecycle.js";
 export * from "./http-server.js";
+export * from "./credential-roles.js";
 export * from "./client.js";
 export * from "./mcp-server.js";
 export * from "./server.js";
