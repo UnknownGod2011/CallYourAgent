@@ -103,13 +103,24 @@ export function createCallYourAgentMcpServer(config: McpServerConfig): McpServer
   });
 
   server.registerTool("checkpoint", {
-    description: "Safe work-boundary check. Returns queued owner instructions plus unresolved blocking scopes. Set consume=true only when the agent is ready to incorporate the returned instructions now.",
+    description: "Safe work-boundary check. Returns queued owner instructions plus unresolved blocking scopes. Prefer consume=false, incorporate the returned instructions, then acknowledge their exact ids with acknowledge_owner_instructions.",
     inputSchema: z.object({
       runId: z.string().min(1),
-      consume: z.boolean().default(false),
+      consume: z.boolean().default(false).describe("Legacy one-step consumption. Prefer false plus explicit acknowledgement after incorporation."),
     }),
   }, async ({ runId, consume }) => {
     try { return asToolResult(await client.checkpoint(runId, consume)); }
+    catch (error) { return asToolError(error); }
+  });
+
+  server.registerTool("acknowledge_owner_instructions", {
+    description: "After incorporating owner steering at a safe checkpoint, acknowledge exactly those instruction ids. Later-arriving instructions remain queued. Retries are idempotent.",
+    inputSchema: z.object({
+      runId: z.string().min(1),
+      instructionIds: z.array(z.string().min(1)),
+    }),
+  }, async ({ runId, instructionIds }) => {
+    try { return asToolResult(await client.acknowledgeInstructions(runId, instructionIds)); }
     catch (error) { return asToolError(error); }
   });
 

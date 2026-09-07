@@ -8,6 +8,7 @@ import type {
   EscalationPriority,
   OwnerDecision,
   OwnerDecisionRequest,
+  OwnerInstruction,
 } from "./domain.js";
 
 export interface CallYourAgentClientOptions {
@@ -107,6 +108,15 @@ export class CallYourAgentClient {
 
   async checkpoint(runId: string, consume = false): Promise<CheckpointResult> {
     return this.request("POST", `/v1/runs/${encodeURIComponent(runId)}/checkpoint`, { consume });
+  }
+
+  async acknowledgeInstructions(runId: string, instructionIds: string[]): Promise<OwnerInstruction[]> {
+    const result = await this.request<{ instructions: OwnerInstruction[] }>(
+      "POST",
+      `/v1/runs/${encodeURIComponent(runId)}/instructions/ack`,
+      { instructionIds },
+    );
+    return result.instructions;
   }
 
   async requestOwnerDecision(input: OwnerDecisionRequest): Promise<Escalation> {

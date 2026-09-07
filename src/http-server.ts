@@ -138,6 +138,18 @@ export function createControlPlaneHttpServer(controlPlane: ControlPlane, options
         return json(res, 200, controlPlane.checkpoint(decodeURIComponent(checkpointMatch[1]!), value.consume === true));
       }
 
+      const acknowledgeMatch = url.pathname.match(/^\/v1\/runs\/([^/]+)\/instructions\/ack$/);
+      if (req.method === "POST" && acknowledgeMatch) {
+        if (!hasScope(credential, "agent:write")) return forbidden(res, "agent:write");
+        const value = record(body);
+        return json(res, 200, {
+          instructions: controlPlane.acknowledgeInstructions(
+            decodeURIComponent(acknowledgeMatch[1]!),
+            stringArray(value.instructionIds, "instructionIds"),
+          ),
+        });
+      }
+
       if (req.method === "POST" && url.pathname === "/v1/escalations") {
         if (!hasScope(credential, "agent:write")) return forbidden(res, "agent:write");
         const value = record(body);
@@ -269,6 +281,10 @@ function record(value: unknown): Record<string, unknown> {
 function text(value: unknown, field: string): string { if (typeof value !== "string" || !value.trim()) throw new Error(`${field} is required`); return value; }
 function optionalText(value: unknown): string | undefined { return typeof value === "string" && value.trim() ? value : undefined; }
 function boolean(value: unknown, field: string): boolean { if (typeof value !== "boolean") throw new Error(`${field} must be boolean`); return value; }
+function stringArray(value: unknown, field: string): string[] {
+  if (!Array.isArray(value) || value.some((item) => typeof item !== "string" || !item.trim())) throw new Error(`${field} must be an array of non-empty strings`);
+  return value as string[];
+}
 function positive(value: number, name: string): number { if (!Number.isInteger(value) || value < 1) throw new Error(`${name} must be a positive integer`); return value; }
 function nonNegative(value: number, name: string): number { if (!Number.isInteger(value) || value < 0) throw new Error(`${name} must be a non-negative integer`); return value; }
 function json(res: ServerResponse, status: number, value: unknown): void {
