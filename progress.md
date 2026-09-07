@@ -6,84 +6,85 @@ CallYourAgent is a durable Node 24 TypeScript control plane for asynchronous two
 
 The repository includes SQLite persistence, deterministic fake and production CALL-E providers, replayable/idempotent call attempts, polling/webhook convergence, scoped authenticated HTTP APIs, a typed TypeScript client, stdio MCP, branch-scoped blocking, call policy/quiet hours/budgets, privacy-aware audit history, bounded lifecycle recovery, fail-closed ambiguous/stalled handling, API abuse controls, graceful shutdown, hard CALL-E HTTP deadlines, reproducible dependencies, readiness/liveness surfaces, deterministic end-to-end and operator demos, production Docker image, and single-instance persistent-volume Compose deployment.
 
-This run tightened the one-command operator demo's security boundary. The browser-facing demo credential is now a real scoped credential with only `agent:read` + `audit:read`, while the trusted demo process retains the authority required for decision reconciliation, safe checkpoint observation, exact instruction acknowledgement, and branch resume. The browser no longer receives a legacy full-access token.
+This run completed the next owner-surface security increment: standard least-privilege credential roles are now explicit exported code, and the deterministic operator demo now provides a separate owner callback credential instead of requiring either a full-access token or widening the observational browser token.
 
 ## Exact repo state inspected this run
 
-Before making changes, inspected the complete recursive `main` tree at HEAD `31bcd30b9c04fcfe963b469b98a4a4cc0f5da21e`, including source, tests, workflows, deployment assets, and documentation paths.
+Before making changes, inspected the complete recursive `main` tree at HEAD `75b847ff0e0b481a66cb8ac15d98a0bd94b96035`, including source, tests, workflows, deployment assets, and documentation paths.
 
-Read `AGENTS.md`, this file, `README.md`, `docs/ARCHITECTURE.md`, `docs/INTEGRATIONS.md`, `docs/API_SECURITY.md`, `docs/CALL_POLICY.md`, `docs/DEPLOYMENT.md`, and `docs/OPERATOR_CONSOLE.md` before editing. Inspected recent commits through the deterministic operator-demo completion work. Checked repository issues and pull requests; there were no open issues or PRs.
+Read `AGENTS.md`, this file, `README.md`, `docs/ARCHITECTURE.md`, `docs/INTEGRATIONS.md`, `docs/API_SECURITY.md`, `docs/CALL_POLICY.md`, `docs/DEPLOYMENT.md`, `docs/OPERATOR_CONSOLE.md`, and `deploy/README.md` before editing. Inspected recent commits through the least-privilege operator-browser-token work. Checked repository issues and pull requests; there were no open issues or PRs.
 
-Inspected the implementation/test surfaces relevant to this increment: `src/operator-demo.ts`, `src/http-server.ts`, and `tests/operator-demo.test.ts`. Confirmed the HTTP server already had the required credential-scope model, so no new authorization system or demo-only route was necessary.
+Inspected the implementation/test surfaces relevant to this increment, especially `src/http-server.ts`, `src/operator-demo.ts`, `src/operator-ui.ts`, `src/index.ts`, `tests/operator-demo.test.ts`, and the complete tests directory listing. Confirmed the HTTP server already enforced the desired `owner:callback` scope separately from `agent:write` and `calls:reconcile`, so no new authorization mechanism or callback path was needed.
 
-Repository mutation used the connected GitHub API and verification used GitHub Actions. No unsupported local test result is claimed.
+Repository mutation used the connected GitHub API. The automation runtime could not clone the public repository directly because its container had no outbound DNS access, so no unsupported local test result is claimed; verification used GitHub Actions.
 
 ## Changes made this run
 
-### Least-privilege browser credential
+### Standard credential role presets
 
-Updated `startOperatorDemoServer(...)` so `apiToken` is now registered through `apiCredentials` as credential id `operator-demo-browser` with scopes:
+Added `src/credential-roles.ts` with exported least-privilege presets:
 
-- `agent:read`
-- `audit:read`
+- `agent` → `agent:read`, `agent:write`, `audit:read`;
+- `operator-read` → `agent:read`, `audit:read`;
+- `owner` → `agent:read`, `audit:read`, `owner:callback`;
+- `reconciler` → `calls:reconcile`.
 
-The public property and `CYA_OPERATOR_DEMO_TOKEN` environment-variable name are intentionally retained for compatibility, but changing the token string does not widen its privileges.
+The helpers intentionally never return `*`, return fresh scope arrays so callers cannot mutate shared presets, and remain convenience helpers over the existing HTTP authorization model rather than creating a second permission system.
 
-The demo CLI now prints `tokenScopes` and explicitly states that the browser token is read/audit-only.
+Exported these helpers from `src/index.ts` so SDK/adapters and deployment code can use the same role definitions.
 
-### Trusted-process authority remains internal
+Added `tests/credential-roles.test.ts` covering exact role scopes, wildcard exclusion, owner-role isolation from `agent:write` / `calls:reconcile`, and defensive array copying.
 
-The existing `advance()` flow still executes directly inside the trusted demo process over the real `ControlPlane` and deterministic fake provider. It does not route decision reconciliation, checkpointing, acknowledgement, or heartbeat through the browser credential.
+### Separate owner credential in the deterministic operator demo
 
-This preserves the architectural separation:
+Updated `startOperatorDemoServer(...)` so the demo now registers two browser-usable credentials:
 
-- browser/operator observation: privacy-safe read + audit only;
-- trusted agent/demo process: checkpoint, exact acknowledgement, reconciliation, and heartbeat;
-- owner callback permission: separate `owner:callback` credential when a real/manual owner surface needs it.
+1. `operator-demo-browser` using the `operator-read` role (`agent:read` + `audit:read`);
+2. `operator-demo-owner` using the `owner` role (`agent:read` + `audit:read` + `owner:callback`).
 
-No new business-state path, privileged browser endpoint, or alternate state machine was introduced.
+The owner credential is independently configurable through `ownerToken` / `CYA_OPERATOR_DEMO_OWNER_TOKEN`. Read and owner token strings must be different, preventing accidental role collapse.
 
-### Negative HTTP acceptance coverage
+The CLI output now prints the owner callback token and exact owner scopes separately. It explicitly states that neither browser credential has agent-write or reconciliation authority. The trusted demo process still owns decision reconciliation, safe checkpoint pull, exact steering acknowledgement, and branch resume.
 
-Updated `tests/operator-demo.test.ts` so the real HTTP-boundary demo verifies that the browser credential:
+Added `tests/operator-owner-credential.test.ts` proving across the real HTTP boundary that:
 
-1. can read `/v1/runs/:runId/overview`;
-2. can read `/v1/runs/:runId/audit`;
-3. receives `403` for `/checkpoint` because it lacks `agent:write`;
-4. receives `403` for exact instruction acknowledgement;
-5. receives `403` for escalation reconciliation because it lacks `calls:reconcile`;
-6. receives `403` for `POST /v1/callbacks` because it lacks `owner:callback`;
-7. still observes the final resumed state after the trusted in-process `advance()` operation.
+- the owner token can read the privacy-safe run overview;
+- the observational read token still gets `403` for `POST /v1/callbacks`;
+- the owner token can create a callback through the existing normal callback endpoint;
+- the owner token gets `403` for agent checkpoint/mutation;
+- the owner token gets `403` for call reconciliation;
+- accidental reuse of the same token for read and owner roles is rejected before server start.
 
-The test no longer uses the browser credential to read steering text through a checkpoint. Steering remains verifiable in the in-process fixture tests where the trusted agent boundary is being tested.
+### Security documentation
 
-### Documentation
-
-Updated `README.md` and `docs/OPERATOR_CONSOLE.md` to make the new scope boundary explicit and to clarify that the one-command fixture intentionally does not grant callback, reconciliation, checkpoint, or acknowledgement authority to the browser.
+Updated `docs/API_SECURITY.md` to document the exported role presets and make clear they are least-privilege defaults layered on the existing server enforcement boundary, not a replacement authorization system.
 
 Commits from this increment:
 
-- `c051ce2e8f2680414ff51dd0e21a8557f5f5b801` — least-privilege operator demo credential.
-- `d27000c235b4531626c2226fdde56fdb6f0ae2a2` — HTTP acceptance coverage for denied mutation/reconciliation/callback surfaces.
-- `b282da173edba4f9dbdfc356d42255c3cabdec0a` — README security clarification.
-- `e272ce1343e0cfbb5269d83d33bea650439ec49d` — operator-console security documentation.
+- `54511ed4d5c67cb65d6a853076f95506383aa75f` — add credential role presets.
+- `1fcaf593445a05d97690af0bf63939ba05753b9d` — credential-role boundary tests.
+- `557214db52e88433103cb7af7c365138f423490a` — export credential role helpers.
+- `9ff603869aef8fd56c474f33055d16c88b95d145` — document credential role presets.
+- `2040362acbe863f16c39dbb553f10658c6d3970b` — add separately scoped owner demo credential.
+- `ae68b5a63a5c33633dcb0f3c877653e035d75caa` — HTTP acceptance coverage for the owner demo credential boundary.
 
 ## Architecture decisions made this run
 
-1. The browser should receive only the scopes needed to render the operator demo: `agent:read` + `audit:read`.
-2. Demo progression authority belongs in the trusted process, not in the browser, because the second stage already composes normal control-plane operations directly.
-3. A browser read token must not be able to observe queued instruction text through checkpoint APIs; pending steering remains represented only by the privacy-safe count in `RunOverview`.
-4. `owner:callback` remains a distinct capability. A manual owner surface may receive a separately scoped credential, but the deterministic one-command judge fixture does not need it.
-5. Compatibility names (`apiToken`, `CYA_OPERATOR_DEMO_TOKEN`) can remain while semantics become safer; token identity and authorization scope are separate concerns.
-6. No Claude/Codex/ChatGPT mid-token interruption capability is claimed, and deterministic fake-provider completion is not treated as live CALL-E evidence.
+1. Standard integration roles should be expressed once in exported typed code so adapters do not casually reproduce or widen scope lists.
+2. Standard roles must never include wildcard access. The legacy `CYA_API_TOKEN` remains available for trusted compatibility but is not a role preset.
+3. The hackathon operator demo should demonstrate owner → agent callback capability with a credential distinct from the observational token rather than widening the read token.
+4. The owner-facing credential may read overview/audit because the existing operator UI needs those surfaces, but it must not have `agent:write` or `calls:reconcile`.
+5. Trusted decision reconciliation and instruction checkpoint/acknowledgement remain inside the agent/backend process. An owner callback token is not an agent-control token.
+6. Callback creation continues through the same `POST /v1/callbacks` HTTP contract and normal callback rate limit; no demo-only side-effect endpoint was introduced.
+7. No Claude/Codex/ChatGPT mid-token interruption capability is claimed, and deterministic fake-provider completion is not treated as live CALL-E evidence.
 
 ## Verification performed
 
-The code/test-bearing commit `d27000c235b4531626c2226fdde56fdb6f0ae2a2` triggered all repository workflows and all completed successfully:
+The final code/test-bearing commit `ae68b5a63a5c33633dcb0f3c877653e035d75caa` triggered all repository workflows and all completed successfully:
 
-- CI run `34154063987` — successful; locked dependency install, TypeScript typecheck, build, and the full Node test suite including the new least-privilege HTTP acceptance assertions.
-- Container run `34154064007` — successful.
-- Compose deployment run `34154064000` — successful.
+- CI run `34158092545` — successful; locked dependency install, TypeScript typecheck, build, and the full Node test suite including the new credential-role and owner-demo HTTP acceptance coverage.
+- Container run `34158092448` — successful.
+- Compose deployment run `34158092393` — successful.
 
 The repository still has no separate lint script or migration command in `package.json`; the available standard verification remains typecheck/build/test via CI plus Container and Compose workflow checks.
 
@@ -91,9 +92,9 @@ No live CALL-E call was attempted or claimed.
 
 ## CALL-E integration status
 
-- Fake provider: implemented and tested across owner decisions, callbacks, branch-scoped blocking, durable steering, exact acknowledgement, idempotency, policy/lifecycle recovery, auditability, SQLite restart, deterministic product demo, MCP work-loop acceptance, privacy-safe run overview, operator visualization, one-command fixture, real HTTP-boundary fixture acceptance, complete seeded-state progression, and now least-privilege browser access.
+- Fake provider: implemented and tested across owner decisions, callbacks, branch-scoped blocking, durable steering, exact acknowledgement, idempotency, policy/lifecycle recovery, auditability, SQLite restart, deterministic product demo, MCP work-loop acceptance, privacy-safe run overview, operator visualization, one-command fixture, real HTTP-boundary fixture acceptance, complete seeded-state progression, least-privilege observational access, and now a separately scoped owner-callback path.
 - Production CALL-E adapter: implemented with server-only `CALLE_API_KEY`, provider idempotency, structured result handling, polling/webhook convergence, bounded HTTP requests, duplicate-call prevention, exact-key ambiguous replay, and fail-closed stalled handling.
-- HTTP + TypeScript SDK + MCP: implemented over shared control-plane semantics. The operator remains a thin observational/owner surface over the same HTTP API rather than a second state engine.
+- HTTP + TypeScript SDK + MCP: implemented over shared control-plane semantics. Credential role helpers are now exported for adapters, but authorization enforcement still lives in the HTTP server.
 - Live CALL-E success: unverified; no real authorized phone call was made.
 
 ## Current blockers / external prerequisites
@@ -106,8 +107,9 @@ Real Claude Code host acceptance still requires running the documented stdio MCP
 
 ## Highest-value next actions
 
-1. Add a separate optional owner-demo credential path with only `owner:callback` + the minimum read scopes, so the operator UI can demonstrate owner-requested callbacks without ever reusing an agent/reconciliation credential.
-2. Add a small role indicator in `/operator` that can explain when the supplied credential is read-only versus callback-capable without exposing token material; this may require a privacy-safe authenticated capabilities endpoint rather than client-side guessing.
-3. Add a visual explanation card for “unrelated branch kept running” vs “blocked branch resumed” using existing overview/audit state only.
-4. When an actual Claude Code host is available, run the documented stdio MCP host acceptance flow with the deterministic fake provider.
-5. When the user-only CALL-E prerequisites are available, perform a bounded live provider acceptance test and record only the observed result.
+1. Add a privacy-safe authenticated credential-capabilities endpoint (credential id/role-relevant scopes only, never token material) so `/operator` can visibly identify read-only versus callback-capable sessions instead of making the presenter infer capability from which token they pasted.
+2. Wire that endpoint into `/operator` to disable the callback button for a read-only credential and show a concise role/capability badge for an owner token.
+3. Extend the deterministic owner-callback demo so a newly owner-requested callback can be deterministically completed/reconciled and its steering shown as a new pending-count/audit transition without exposing instruction text.
+4. Add a visual explanation card for “unrelated branch kept running” vs “blocked branch resumed” using existing overview/audit state only.
+5. When an actual Claude Code host is available, run the documented stdio MCP host acceptance flow with the deterministic fake provider.
+6. When the user-only CALL-E prerequisites are available, perform a bounded live provider acceptance test and record only the observed result.
