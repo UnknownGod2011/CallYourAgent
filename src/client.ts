@@ -10,6 +10,7 @@ import type {
   OwnerDecisionRequest,
   OwnerInstruction,
 } from "./domain.js";
+import type { RunOverview } from "./run-overview.js";
 
 export interface CallYourAgentClientOptions {
   baseUrl: string;
@@ -92,6 +93,10 @@ export class CallYourAgentClient {
 
   async getRun(runId: string): Promise<AgentRun> {
     return this.request("GET", `/v1/runs/${encodeURIComponent(runId)}`);
+  }
+
+  async getRunOverview(runId: string): Promise<RunOverview> {
+    return this.request("GET", `/v1/runs/${encodeURIComponent(runId)}/overview`);
   }
 
   async getAuditTimeline(runId: string, limit = 100): Promise<AuditEvent[]> {
