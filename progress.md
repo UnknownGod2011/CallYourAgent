@@ -4,90 +4,84 @@
 
 CallYourAgent is a durable Node 24 TypeScript control plane for asynchronous two-way voice coordination between autonomous AI agents and their owners. Agents can raise important owner decisions without freezing unrelated scopes; owners can independently request callbacks for progress/questions/steering; human input is persisted and consumed only at explicit safe checkpoints rather than pretending to interrupt in-flight model generation.
 
-The repository includes SQLite persistence, deterministic fake and production CALL-E providers, replayable/idempotent call attempts, polling/webhook convergence, scoped authenticated HTTP APIs, a typed TypeScript client, stdio MCP, branch-scoped blocking, call policy/quiet hours/budgets, privacy-aware audit history, bounded lifecycle recovery, fail-closed ambiguous/stalled handling, API abuse controls, graceful shutdown, hard CALL-E HTTP deadlines, reproducible dependencies, readiness/liveness surfaces, deterministic end-to-end and operator demos, production Docker image, and single-instance persistent-volume Compose deployment.
+The repository includes SQLite persistence, deterministic fake and production CALL-E providers, replayable/idempotent call attempts, polling/webhook convergence, scoped authenticated HTTP APIs, a typed TypeScript client, stdio MCP, branch-scoped blocking, call policy/quiet hours/budgets, privacy-aware audit history, bounded lifecycle recovery, fail-closed ambiguous/stalled handling, API abuse controls, graceful shutdown, hard CALL-E HTTP deadlines, readiness/liveness surfaces, deterministic end-to-end and operator demos, production Docker image, and single-instance persistent-volume Compose deployment.
 
-This run completed the next owner/operator security increment: an authenticated privacy-safe credential-capabilities contract now lets a client learn the effective permissions of the credential it is already using without exposing bearer material or probing side-effecting endpoints.
+This run completed the next owner/operator security and usability increment: the typed client now exposes authenticated credential capabilities, and `/operator` uses the same capability contract to make callback authority explicit without weakening the existing server-side scope boundary.
 
 ## Exact repo state inspected this run
 
-Before making changes, inspected the complete recursive `main` tree at HEAD `c449189e1a54976b354e307ae2cfc1852f5f7076`. The recursive GitHub tree response reported `truncated: false`, covering root files, GitHub Actions workflows, deployment assets, every docs file, all `src` files, and the complete tests directory.
+Before making changes, inspected the complete recursive `main` tree at HEAD `c431a32a7c82d28512e441e694923d9d7c13a275`. The recursive GitHub tree covered root files, GitHub Actions workflows, deployment assets, every docs file, all `src` files, and the tests directory.
 
 Read `AGENTS.md` in full, this file in full, `README.md` in full, and the architecture/integration/operations documentation before editing: `docs/ARCHITECTURE.md`, `docs/INTEGRATIONS.md`, `docs/API_SECURITY.md`, `docs/CALL_POLICY.md`, `docs/DEPLOYMENT.md`, `docs/OPERATOR_CONSOLE.md`, and `deploy/README.md`.
 
-Inspected recent commits through the owner-callback credential split. Checked repository issues and pull requests; there were no open issues or open PRs.
+Inspected the latest commits through the credential-capabilities increment. Checked repository issues and pull requests; there were no open issues and no open PRs.
 
-Inspected the implementation/test surfaces relevant to this increment, especially `src/http-server.ts`, `src/operator-ui.ts`, `tests/operator-ui.test.ts`, `src/credential-roles.ts`, and `package.json`. Confirmed that authentication and route scope enforcement already live in `createControlPlaneHttpServer`, so capability introspection could be a projection of the existing authenticated credential rather than a new authorization system.
+Inspected implementation/test surfaces relevant to the increment, especially `src/http-server.ts`, `src/client.ts`, `src/operator-ui.ts`, `tests/client.test.ts`, `tests/operator-ui.test.ts`, and the tests directory inventory. Confirmed that `GET /v1/auth/capabilities` is already an authenticated projection of the active HTTP credential and that `POST /v1/callbacks` independently enforces `owner:callback`.
 
-Repository mutation used the connected GitHub API. A direct local clone was not available in the automation container because outbound GitHub DNS resolution was unavailable, so no unsupported local test result is claimed; verification used the repository's GitHub Actions workflows.
+Repository mutation used the connected GitHub API. Verification used GitHub Actions; no unsupported local clone/test result is claimed.
 
 ## Changes made this run
 
-### Authenticated credential-capabilities endpoint
+### Typed capability discovery
 
-Updated `src/http-server.ts` with an authenticated side-effect-free endpoint:
+Updated `src/client.ts` with:
 
-```text
-GET /v1/auth/capabilities
+```ts
+await client.getCredentialCapabilities()
 ```
 
-The response contains:
+The method calls the existing authenticated `GET /v1/auth/capabilities` endpoint through the same bearer-authenticated request path as the rest of the TypeScript SDK. It returns the existing `CredentialCapabilities` contract and adds no client-side authorization semantics.
 
-- `credentialId` — the stable configured credential id;
-- `scopes` — only the effective concrete API scopes available to that credential.
+Added client regression coverage proving the legacy trusted token is projected as the five concrete effective scopes and never as `*`.
 
-The endpoint never returns bearer-token material. For the backwards-compatible legacy full-access `*` token, the response expands wildcard authority into the five concrete capabilities (`agent:read`, `agent:write`, `audit:read`, `owner:callback`, `calls:reconcile`) instead of returning `*`.
+### Capability-aware operator callback controls
 
-Added the exported `CredentialCapabilities` type and a canonical list of concrete API scopes. Existing route-level authorization remains authoritative; this endpoint only describes the already-authenticated credential and cannot widen its privileges.
+Updated `src/operator-ui.ts` so `/operator` now loads credential capabilities alongside the run overview and audit timeline.
 
-### HTTP security regression coverage
+Behavior:
 
-Added `tests/credential-capabilities-http.test.ts` over the real HTTP server boundary. It proves:
+- the callback button starts disabled;
+- a credential badge shows `Read-only` or `Owner callback enabled` based only on the server-reported effective scopes;
+- only a response containing `owner:callback` enables callback creation;
+- changing the token immediately resets capability state and disables the callback button until the new credential is revalidated;
+- load/auth failures also reset to the disabled state;
+- the UI explicitly explains that capability discovery is convenience/clarity only and that the server independently enforces `owner:callback` on `POST /v1/callbacks`.
 
-- unauthenticated capability reads return `401`;
-- a read-only credential reports only `agent:read` + `audit:read`;
-- an owner credential additionally reports `owner:callback`;
-- responses are `Cache-Control: no-store`;
-- bearer-token strings are absent from returned payloads;
-- ungranted write/reconciliation scopes are not leaked into read/owner capability projections;
-- the legacy wildcard credential is represented by concrete effective permissions instead of `*`.
+The browser still receives no `CALLE_API_KEY`, webhook secret, owner instruction text, callback transcript, or decision answer. The existing privacy-safe overview and metadata-only audit timeline remain unchanged.
 
-### Security documentation
+Updated `tests/operator-ui.test.ts` to lock in the new safety behavior: the static shell references `/v1/auth/capabilities`, starts the callback control disabled, checks for `owner:callback`, resets capabilities when the token changes, and still contains no configured server secrets or queued instruction payloads.
 
-Updated `docs/API_SECURITY.md` with the capability endpoint contract and its intended use: owner/operator surfaces can determine whether a supplied credential can request callbacks without guessing from token labels or intentionally hitting a side-effecting endpoint and interpreting `403`.
+Code/test commit:
 
-Commits from this increment:
-
-- `1215ab51c0381174a25af1b215a84ba94e6649dc` — expose authenticated credential capabilities.
-- `31c5f2456cf9570b2d8a79db2be92711f45d83e2` — HTTP regression coverage for the capability boundary.
-- `834aabed8282e666e4ec600ca51b1db5f53ffac8` — document the capability endpoint.
+- `76bda3f55fe277a341744736943311a6d4b8e8cd` — `feat: make operator callback controls capability-aware`
 
 ## Architecture decisions made this run
 
-1. Credential capability discovery belongs at the existing HTTP authentication boundary, not in `ControlPlane`, because it describes transport authorization rather than agent business state.
-2. The endpoint is a read-only projection of existing authorization state; it does not introduce roles, permissions, or a second source of truth.
-3. Token material must never be returned. The stable credential id and effective scopes are sufficient for an owner/operator UI to explain what the current session can do.
-4. Wildcard access is expanded into concrete capabilities rather than echoed as `*`, keeping the browser-facing response explicit and avoiding dependence on internal wildcard semantics.
-5. Capability introspection must not require any run id and must not invoke the control plane or CALL-E provider.
-6. Normal route-level checks remain the enforcement boundary. A UI may disable a button based on capabilities, but the server still independently verifies `owner:callback` before creating a callback.
+1. Capability-aware UI behavior must consume the already-existing authenticated HTTP capability projection; `/operator` must not infer privilege from token names or duplicate the credential-role definitions in browser code.
+2. Capability discovery is advisory UX only. `POST /v1/callbacks` remains the authoritative authorization boundary and still independently requires `owner:callback`.
+3. Callback controls fail closed in the browser: disabled before validation, disabled on token change, and disabled after any capability/run load error.
+4. The typed SDK should expose the same capability contract so future owner/operator adapters do not hand-roll fetch/auth logic.
+5. The capability endpoint remains run-independent and side-effect free; loading it does not touch control-plane business state or CALL-E.
+6. No new state machine, callback path, or browser-side persistence was introduced.
 7. No Claude/Codex/ChatGPT mid-token interruption capability is claimed, and deterministic fake-provider behavior is not treated as live CALL-E evidence.
 
 ## Verification performed
 
-The final code/test-bearing commit `31c5f2456cf9570b2d8a79db2be92711f45d83e2` triggered all repository verification paths and they completed successfully:
+The code/test-bearing commit `76bda3f55fe277a341744736943311a6d4b8e8cd` triggered all repository verification paths and all completed successfully:
 
-- CI run `34161745165` — successful. The `check` job completed locked dependency installation plus `Typecheck and test`; the repository `check` script runs TypeScript typechecking and the full test command, whose test script performs a build before running all compiled Node tests.
-- Container run `34161745179` — successful. Production image build and fake-provider runtime smoke test both completed successfully.
-- Compose deployment run `34161745230` — successful, including the existing single-instance SQLite persistence/restart verification path.
+- CI run `34165296964` — successful. This path performs locked dependency installation plus the repository TypeScript check/test command; the test script builds before executing compiled Node tests.
+- Container run `34165296983` — successful. Production image build and fake-provider runtime smoke path passed.
+- Compose deployment run `34165296974` — successful. The single-instance SQLite deployment/persistence restart path passed.
 
-The repository has no separate lint script or migration command in `package.json`; therefore no lint/migration command is omitted from the available standard project scripts. No local clone-based verification is claimed because the automation container could not resolve GitHub directly.
+The repository has no separate lint script or migration command in `package.json`; therefore no available standard lint/migration command was omitted.
 
 No live CALL-E call was attempted or claimed.
 
 ## CALL-E integration status
 
-- Fake provider: implemented and tested across owner decisions, callbacks, branch-scoped blocking, durable steering, exact acknowledgement, idempotency, policy/lifecycle recovery, auditability, SQLite restart, deterministic product demo, MCP work-loop acceptance, privacy-safe run overview, operator visualization, one-command fixture, real HTTP-boundary fixture acceptance, complete seeded-state progression, least-privilege observational access, separately scoped owner-callback access, and now credential capability introspection at the HTTP auth boundary.
+- Fake provider: implemented and tested across owner decisions, callbacks, branch-scoped blocking, durable steering, exact acknowledgement, idempotency, policy/lifecycle recovery, auditability, SQLite restart, deterministic product demo, MCP work-loop acceptance, privacy-safe run overview, operator visualization, one-command fixture, real HTTP-boundary fixture acceptance, complete seeded-state progression, least-privilege observational access, separately scoped owner-callback access, credential capability introspection, and now capability-aware operator controls.
 - Production CALL-E adapter: implemented with server-only `CALLE_API_KEY`, provider idempotency, structured result handling, polling/webhook convergence, bounded HTTP requests, duplicate-call prevention, exact-key ambiguous replay, and fail-closed stalled handling.
-- HTTP + TypeScript SDK + MCP: implemented over shared control-plane semantics. HTTP now exposes credential capabilities, but the typed client does not yet wrap that endpoint.
+- HTTP + TypeScript SDK + MCP: implemented over shared control-plane semantics. The typed client now wraps credential capabilities as well as run, audit, escalation, checkpoint, acknowledgement, and callback contracts.
 - Live CALL-E success: unverified; no real authorized phone call was made.
 
 ## Current blockers / external prerequisites
@@ -100,9 +94,9 @@ Real Claude Code host acceptance still requires running the documented stdio MCP
 
 ## Highest-value next actions
 
-1. Wire `GET /v1/auth/capabilities` into `/operator`: show a concise credential/capability badge and disable owner-callback controls when `owner:callback` is absent, while retaining server-side enforcement.
-2. Add a typed `CallYourAgentClient.getCredentialCapabilities()` wrapper so owner/operator adapters can use the same contract without hand-written fetch logic.
-3. Extend the deterministic owner-callback demo so a newly owner-requested callback can be deterministically completed/reconciled and its resulting steering appears as a new pending-count/audit transition without exposing instruction text.
-4. Add a visual explanation card for “unrelated branch kept running” versus “blocked branch resumed” using only existing overview/audit state.
+1. Extend the deterministic owner-callback demo so an owner-scoped browser credential can request a *new* callback, then let the trusted demo process deterministically complete/reconcile that exact callback so judges can watch new steering enter the durable queue without exposing its text.
+2. Add focused HTTP acceptance coverage for the capability-aware operator credential split using the deterministic demo server: read token remains observational, owner token reports `owner:callback` and can create a callback, both remain unable to use agent-write/reconciliation authority they do not possess.
+3. Add a visual explanation card for “independent branch kept running” versus “blocked branch resumed” using only existing overview/audit state.
+4. Document `getCredentialCapabilities()` in `docs/INTEGRATIONS.md` and the capability-aware callback state in `docs/OPERATOR_CONSOLE.md` on the next documentation-focused increment.
 5. When an actual Claude Code host is available, run the documented stdio MCP host acceptance flow with the deterministic fake provider.
 6. When the user-only CALL-E prerequisites are available, perform a bounded live provider acceptance test and record only the observed result.
