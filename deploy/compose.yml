@@ -1,0 +1,42 @@
+services:
+  callyouragent:
+    build:
+      context: ..
+      dockerfile: Dockerfile
+    image: callyouragent:local
+    restart: unless-stopped
+    init: true
+    ports:
+      - "127.0.0.1:${CYA_HOST_PORT:-8787}:8787"
+    environment:
+      PORT: "8787"
+      CYA_STORE: sqlite
+      CYA_SQLITE_PATH: /data/callyouragent.db
+      CYA_CALL_PROVIDER: ${CYA_CALL_PROVIDER:-fake}
+      CYA_API_TOKEN: ${CYA_API_TOKEN:?set CYA_API_TOKEN to a high-entropy local token}
+      CYA_API_CREDENTIALS_JSON: ${CYA_API_CREDENTIALS_JSON:-}
+      CYA_LIFECYCLE_SWEEP_INTERVAL_MS: ${CYA_LIFECYCLE_SWEEP_INTERVAL_MS:-5000}
+      CYA_MAX_AUTOMATIC_RECOVERY_ATTEMPTS: ${CYA_MAX_AUTOMATIC_RECOVERY_ATTEMPTS:-3}
+      CYA_RECOVERY_BASE_BACKOFF_MS: ${CYA_RECOVERY_BASE_BACKOFF_MS:-5000}
+      CYA_RECOVERY_MAX_BACKOFF_MS: ${CYA_RECOVERY_MAX_BACKOFF_MS:-60000}
+      CYA_MAX_IN_PROGRESS_CALL_AGE_MS: ${CYA_MAX_IN_PROGRESS_CALL_AGE_MS:-600000}
+      CYA_CALLBACK_RATE_LIMIT_PER_MINUTE: ${CYA_CALLBACK_RATE_LIMIT_PER_MINUTE:-6}
+      CYA_RECONCILE_RATE_LIMIT_PER_MINUTE: ${CYA_RECONCILE_RATE_LIMIT_PER_MINUTE:-60}
+      CALLE_API_KEY: ${CALLE_API_KEY:-}
+      CYA_OWNER_PHONE: ${CYA_OWNER_PHONE:-}
+      CYA_PUBLIC_BASE_URL: ${CYA_PUBLIC_BASE_URL:-}
+      CYA_CALLE_WEBHOOK_TOKEN: ${CYA_CALLE_WEBHOOK_TOKEN:-}
+      CYA_CALLE_HTTP_TIMEOUT_MS: ${CYA_CALLE_HTTP_TIMEOUT_MS:-15000}
+    volumes:
+      - cya-data:/data
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:8787/health').then(r=>{if(!r.ok)process.exit(1)}).catch(()=>process.exit(1))"]
+      interval: 10s
+      timeout: 5s
+      start_period: 10s
+      retries: 6
+    stop_grace_period: 30s
+
+volumes:
+  cya-data:
+    name: ${CYA_VOLUME_NAME:-callyouragent-data}
