@@ -2,7 +2,7 @@ import { ControlPlane } from "./control-plane.js";
 import { FakeCallProvider } from "./call-provider.js";
 import { CallPolicy, type CallPolicyConfig } from "./call-policy.js";
 import { CalleCallProvider } from "./calle-provider.js";
-import { createControlPlaneHttpServer } from "./http-server.js";
+import { createControlPlaneHttpServer, type ApiCredential, type ApiScope } from "./http-server.js";
 import type { EscalationPriority } from "./domain.js";
 import { LifecycleManager, type LifecycleRecoveryConfig } from "./lifecycle.js";
 import { InMemoryControlPlaneStore } from "./store.js";
@@ -11,7 +11,11 @@ import { SqliteControlPlaneStore } from "./sqlite-store.js";
 export function buildRuntimeFromEnv(env: NodeJS.ProcessEnv = process.env) {
   const providerMode = env.CYA_CALL_PROVIDER ?? "fake";
   const storeMode = env.CYA_STORE ?? "sqlite";
-  const apiToken = required(env.CYA_API_TOKEN, "CYA_API_TOKEN");
+  const apiToken = env.CYA_API_TOKEN?.trim() || undefined;
+  const apiCredentials = apiCredentialsFromEnv(env);
+  if (!apiToken && apiCredentials.length === 0) {
+    throw new Error("CYA_API_TOKEN or CYA_API_CREDENTIALS_JSON is required");
+  }
 
   const store = storeMode === "memory"
     ? new InMemoryControlPlaneStore()
@@ -38,10 +42,39 @@ export function buildRuntimeFromEnv(env: NodeJS.ProcessEnv = process.env) {
   const lifecycle = new LifecycleManager(controlPlane, store, undefined, lifecycleRecoveryConfigFromEnv(env));
   const server = createControlPlaneHttpServer(controlPlane, {
     apiToken,
+    apiCredentials,
     calleWebhookToken: env.CYA_CALLE_WEBHOOK_TOKEN,
+    rateLimits: {
+      ownerCallbacksPerWindow: env.CYA_CALLBACK_RATE_LIMIT_PER_MINUTE
+        ? nonNegativeInteger(env.CYA_CALLBACK_RATE_LIMIT_PER_MINUTE, "CYA_CALLBACK_RATE_LIMIT_PER_MINUTE")
+        : undefined,
+      reconciliationsPerWindow: env.CYA_RECONCILE_RATE_LIMIT_PER_MINUTE
+        ? nonNegativeInteger(env.CYA_RECONCILE_RATE_LIMIT_PER_MINUTE, "CYA_RECONCILE_RATE_LIMIT_PER_MINUTE")
+        : undefined,
+    },
   });
 
   return { server, controlPlane, lifecycle, provider, store };
+}
+
+export function apiCredentialsFromEnv(env: NodeJS.ProcessEnv): ApiCredential[] {
+  if (!env.CYA_API_CREDENTIALS_JSON?.trim()) return [];
+  let parsed: unknown;
+  try { parsed = JSON.parse(env.CYA_API_CREDENTIALS_JSON); }
+  catch { throw new Error("CYA_API_CREDENTIALS_JSON must be valid JSON"); }
+  if (!Array.isArray(parsed)) throw new Error("CYA_API_CREDENTIALS_JSON must be a JSON array");
+  return parsed.map((value, index) => {
+    if (typeof value !== "object" || value === null || Array.isArray(value)) {
+      throw new Error(`CYA_API_CREDENTIALS_JSON[${index}] must be an object`);
+    }
+    const record = value as Record<string, unknown>;
+    if (typeof record.id !== "string" || !record.id.trim()) throw new Error(`CYA_API_CREDENTIALS_JSON[${index}].id is required`);
+    if (typeof record.token !== "string" || !record.token.trim()) throw new Error(`CYA_API_CREDENTIALS_JSON[${index}].token is required`);
+    if (!Array.isArray(record.scopes) || record.scopes.length === 0 || record.scopes.some((scope) => !isApiScope(scope))) {
+      throw new Error(`CYA_API_CREDENTIALS_JSON[${index}].scopes contains an invalid API scope`);
+    }
+    return { id: record.id, token: record.token, scopes: record.scopes as ApiScope[] };
+  });
 }
 
 export function callPolicyConfigFromEnv(env: NodeJS.ProcessEnv): CallPolicyConfig {
@@ -91,6 +124,10 @@ export function lifecycleSweepIntervalMsFromEnv(env: NodeJS.ProcessEnv): number 
   return env.CYA_LIFECYCLE_SWEEP_INTERVAL_MS
     ? positiveInteger(env.CYA_LIFECYCLE_SWEEP_INTERVAL_MS, "CYA_LIFECYCLE_SWEEP_INTERVAL_MS")
     : 5_000;
+}
+
+function isApiScope(value: unknown): value is ApiScope {
+  return typeof value === "string" && ["agent:read", "agent:write", "audit:read", "owner:callback", "calls:reconcile", "*"].includes(value);
 }
 
 function required(value: string | undefined, name: string): string {
