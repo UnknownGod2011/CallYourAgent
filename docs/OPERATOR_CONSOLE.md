@@ -38,7 +38,7 @@ npm ci
 npm run demo:operator
 ```
 
-The command builds the project, creates a fresh in-memory control plane with the deterministic fake provider, seeds the demo state through the real `ControlPlane` services, and starts an HTTP server bound to `127.0.0.1:8788` by default. It prints the operator URL, run id, and a local demo bearer token.
+The command builds the project, creates a fresh in-memory control plane with the deterministic fake provider, seeds the demo state through the real `ControlPlane` services, and starts an HTTP server bound to `127.0.0.1:8788` by default. It prints the operator URL, run id, and a browser-facing demo token scoped to **only** `agent:read` + `audit:read`.
 
 The seeded state intentionally has:
 
@@ -48,7 +48,9 @@ The seeded state intentionally has:
 
 The fixture also retries the same escalation and callback idempotency keys and asserts they deduplicate, so the demo path exercises the same duplicate-call protections as normal fake-provider operation. The callback result is reconciled into a real queued instruction, but the instruction text is not added to the operator overview. The instruction remains queued for the agent's next explicit checkpoint.
 
-After loading the printed run id/token in `/operator`, press **Enter in the terminal running `demo:operator`**. The same process then advances the fixture by composing only existing domain operations:
+The printed browser token is deliberately observational. It can load the overview and audit timeline, but the HTTP boundary rejects attempts to use it for `agent:write`, `calls:reconcile`, or `owner:callback`. In particular it cannot checkpoint or acknowledge owner instructions, mutate agent state, reconcile decision/callback calls, or trigger a new owner callback. Regression coverage verifies these denials.
+
+After loading the printed run id/read token in `/operator`, press **Enter in the terminal running `demo:operator`**. The same trusted process then advances the fixture by composing only existing domain operations:
 
 1. the deterministic fake provider supplies terminal evidence for the already-created owner-decision call;
 2. normal escalation reconciliation records the owner decision and releases `production-deploy`;
@@ -56,23 +58,23 @@ After loading the printed run id/token in `/operator`, press **Enter in the term
 4. the agent acknowledges exactly the instruction ids returned by that checkpoint;
 5. the agent reports `production-deploy` as its resumed current scope.
 
-There is intentionally no demo-only HTTP mutation endpoint. The second stage is orchestration over the same `ControlPlane`, fake provider, decision reconciliation, checkpoint, acknowledgement, heartbeat, and audit semantics used by real integrations. Repeated in-process `advance()` calls share one transition promise rather than replaying the demo side effects.
+There is intentionally no demo-only HTTP mutation endpoint. The second stage is orchestration over the same `ControlPlane`, fake provider, decision reconciliation, checkpoint, acknowledgement, heartbeat, and audit semantics used by real integrations. Repeated in-process `advance()` calls share one transition promise rather than replaying the demo side effects. Keeping this authority inside the trusted demo process means the browser does not need an agent-write or reconciliation credential at all.
 
 Refresh `/operator` after pressing Enter. The blocked-scope list and pending-steering count should both be empty, the active scope should be `production-deploy`, and the durable timeline should now include **Decision** and **Steering acknowledged** stages. The browser still never receives the owner decision answer or steering text.
 
-This launcher is intentionally local-only by default and uses an in-memory store. Override the demo port or token with `CYA_OPERATOR_DEMO_PORT` and `CYA_OPERATOR_DEMO_TOKEN` if needed. It is not a production deployment recipe and it does **not** claim live CALL-E success.
+This launcher is intentionally local-only by default and uses an in-memory store. Override the demo port or read token with `CYA_OPERATOR_DEMO_PORT` and `CYA_OPERATOR_DEMO_TOKEN` if needed. The environment variable name is retained for compatibility, but the resulting credential is still only `agent:read` + `audit:read`; supplying a different token string does not widen its scopes. It is not a production deployment recipe and it does **not** claim live CALL-E success.
 
 ## Manual demo workflow
 
 1. Run the control plane with the deterministic fake provider, or use `npm run demo:operator` for the pre-seeded state.
 2. Start an agent/run through MCP or the TypeScript/HTTP SDK when exercising the manual path.
 3. Open `/operator` in a browser.
-4. Enter the run id and a scoped token (or the values printed by `demo:operator`).
+4. Enter the run id and a scoped token (or the read/audit values printed by `demo:operator`).
 5. Let the agent raise a blocking owner decision in one scope while reporting independent work in another scope.
 6. Refresh or enable three-second auto-refresh. The overview should show the independent active scope separately from the unresolved blocked scope(s).
 7. Follow the stage-labelled causal timeline to distinguish the decision request, provider-call progress, owner decision, callback, queued steering, and eventual exact acknowledgement.
 8. If owner steering has been queued, the page shows only the pending count; the instruction text remains available solely through the agent checkpoint contract.
 9. If using the one-command fixture, press Enter in its terminal to perform the deterministic decision-resolution + safe-checkpoint acknowledgement composition, then refresh the page.
-10. If using an owner-scoped token in a manual deployment, request a callback from the page as needed.
+10. If using an owner-scoped token in a manual deployment, request a callback from the page as needed. The one-command fixture does not grant its browser token this scope.
 
 The console is deliberately not presented as evidence of live CALL-E success. In fake mode it visualizes the deterministic control-plane flow; live phone transport remains separately gated by real CALL-E credentials, an authorized destination, and public HTTPS webhook ingress.
