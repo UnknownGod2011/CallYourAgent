@@ -63,13 +63,21 @@ export class LifecycleManager {
         if (escalation.callAttemptId) {
           const attempt = this.control.getCallAttempt(escalation.callAttemptId);
           if (attempt.status === "stalled") continue;
-          if (this.markStalledIfOverdue(attempt, result)) continue;
           if (attempt.status === "ambiguous") {
             const recovery = await this.recoverAmbiguous(attempt, result);
             if (!recovery.readyForReconcile) continue;
           }
         }
+
         await this.control.reconcileEscalation(escalationId);
+
+        // Poll once before declaring a known provider call stale. A call can have
+        // completed while this process was asleep; terminal evidence should win
+        // over a local age threshold whenever it is already available.
+        const reconciled = this.control.getEscalation(escalationId);
+        if (reconciled.callAttemptId && (reconciled.status === "pending" || reconciled.status === "calling")) {
+          this.markStalledIfOverdue(this.control.getCallAttempt(reconciled.callAttemptId), result);
+        }
       } catch (error) {
         result.errors.push({ kind: "escalation", id: escalationId, message: errorMessage(error) });
       }
@@ -84,12 +92,13 @@ export class LifecycleManager {
       try {
         const attempt = this.control.getCallAttempt(callAttemptId);
         if (attempt.status === "stalled") continue;
-        if (this.markStalledIfOverdue(attempt, result)) continue;
         if (attempt.status === "ambiguous") {
           const recovery = await this.recoverAmbiguous(attempt, result);
           if (!recovery.readyForReconcile) continue;
         }
+
         await this.control.reconcileCallback(callAttemptId);
+        this.markStalledIfOverdue(this.control.getCallAttempt(callAttemptId), result);
       } catch (error) {
         result.errors.push({ kind: "callback", id: callAttemptId, message: errorMessage(error) });
       }
