@@ -1,97 +1,104 @@
-# progress.md
+# CallYourAgent progress
 
 ## Current status
 
-CallYourAgent is a durable Node 24 TypeScript control plane for asynchronous two-way voice coordination between autonomous AI agents and their owners. The product model remains unchanged: autonomous agents may request genuinely important owner judgment without freezing unrelated branches/scopes; owners may independently request callbacks for progress/questions/steering; human decisions and instructions become durable structured state consumed at explicit safe checkpoints rather than being represented as impossible mid-generation interruption.
+CallYourAgent is a durable Node 24 TypeScript control plane for asynchronous two-way voice coordination between autonomous AI agents and their owners. Agents can raise important owner decisions without freezing unrelated scopes; owners can independently request callbacks for progress/questions/steering; human input is persisted and consumed only at explicit safe checkpoints rather than pretending to interrupt in-flight model generation.
 
-The repository includes SQLite persistence, deterministic fake and production CALL-E providers, replayable/idempotent call attempts, polling/webhook convergence, scoped authenticated HTTP APIs, a typed TypeScript client, stdio MCP, branch/checkpoint semantics, decision-call policy, privacy-aware audit history, bounded lifecycle recovery, fail-closed ambiguous/stalled handling, API abuse controls, graceful shutdown, hard provider HTTP deadlines, reproducible dependencies, an operator console, production Docker/Compose deployment, restart-persistence verification, an assertion-backed deterministic end-to-end demo, and now a side-effect-free readiness/configuration endpoint distinct from process liveness.
+The repository includes SQLite persistence, deterministic fake and production CALL-E providers, replayable/idempotent call attempts, polling/webhook convergence, scoped authenticated HTTP APIs, a typed TypeScript client, stdio MCP, branch-scoped blocking, call policy/quiet hours/budgets, privacy-aware audit history, bounded lifecycle recovery, fail-closed ambiguous/stalled handling, API abuse controls, graceful shutdown, hard CALL-E HTTP deadlines, reproducible dependencies, readiness/liveness surfaces, a deterministic end-to-end demo, operator console, production Docker image, and single-instance persistent-volume Compose deployment.
+
+This run strengthened the durable owner-instruction contract with explicit exact-ID acknowledgement.
 
 ## Exact repo state inspected this run
 
-Before changing code, inspected the complete recursive `main` Git tree at HEAD `55e27d247852ae2541a513ae3b09dce6db2522a9`. The tree included source, tests, workflows, package metadata, Docker/deployment assets, and all documentation paths.
+Before changing anything, inspected the complete recursive `main` tree at HEAD `d2d4f534b7a2cec9fcc6febb561e9bbd0cde09c4`; the tree covered source, tests, CI workflows, package metadata, Docker/deployment assets, and every documentation path.
 
-Read `AGENTS.md`, this file, `README.md`, `docs/ARCHITECTURE.md`, `docs/INTEGRATIONS.md`, `docs/CALL_POLICY.md`, `docs/API_SECURITY.md`, `docs/DEPLOYMENT.md`, `docs/OPERATOR_CONSOLE.md`, and `deploy/README.md` in full. Inspected recent commits through the deterministic product-demo work. Checked repository issues and pull requests; both collections were empty.
+Read `AGENTS.md`, this file, `README.md`, `docs/ARCHITECTURE.md`, `docs/INTEGRATIONS.md`, `docs/CALL_POLICY.md`, `docs/API_SECURITY.md`, `docs/DEPLOYMENT.md`, `docs/OPERATOR_CONSOLE.md`, and `deploy/README.md` in full. Inspected recent commits through the readiness work. Checked open issues and pull requests; there were none.
 
-Inspected the implementation surfaces relevant to the selected increment: `src/server.ts`, `src/http-server.ts`, and `tests/http-server.test.ts`. The highest-value unblocked item from the previous run was the documented readiness/configuration endpoint.
+Inspected the implementation surfaces relevant to the selected increment: `src/domain.ts`, `src/control-plane.ts`, `src/http-server.ts`, `src/client.ts`, `src/mcp-server.ts`, `tests/control-plane.test.ts`, and `tests/http-server.test.ts`.
 
 ## Changes made this run
 
-### Side-effect-free readiness/configuration endpoint
+### Two-phase instruction delivery and acknowledgement
 
-Added unauthenticated `GET /ready`, deliberately separate from `GET /health`.
+Added `ControlPlane.acknowledgeInstructions(runId, instructionIds)`.
 
-`/health` remains simple process liveness (`{ ok: true }`). `/ready` reports only non-secret deployment facts that were already validated while constructing the selected runtime:
+The preferred worker flow is now:
 
-- `ready`;
-- `providerMode` (`fake` or `calle`);
-- `storeMode` (`memory` or `sqlite`);
-- whether live-call configuration is applicable/configured;
-- whether public-webhook configuration is applicable/configured;
-- `providerNetworkChecked: false`.
+1. call `checkpoint(runId)` without consuming;
+2. incorporate the returned owner instructions at that safe work boundary;
+3. acknowledge exactly those durable instruction ids;
+4. leave instructions that arrived after the checkpoint queued for the next boundary.
 
-The endpoint never calls CALL-E, never probes the network, never creates/reconciles a phone call, and never exposes `CALLE_API_KEY`, bearer credentials, owner phone number, public URL, or webhook token.
+Acknowledgement validates every supplied instruction before mutating state, rejects cross-run ids, deduplicates duplicate ids, and is idempotent for retries. An already-consumed instruction is returned without creating another consumption audit event. The consumption audit explicitly records that acknowledgement followed safe-checkpoint incorporation.
 
-`buildRuntimeFromEnv` now constructs the readiness snapshot only after existing environment validation has succeeded and passes that immutable snapshot into the HTTP adapter. In live mode, “configured” means the required server-side CALL-E key, owner destination, public base URL, and webhook token were present and accepted by startup validation. It explicitly does **not** mean CALL-E is reachable, the phone destination is authorized, public ingress is externally routable, or a real call has succeeded.
+The existing `checkpoint(runId, true)` path remains as a backwards-compatible one-step mode and internally delegates to exact acknowledgement of the checkpoint snapshot. New integrations should prefer the two-phase protocol because it distinguishes “instruction was delivered” from “agent says it incorporated this exact instruction.”
+
+### Shared HTTP, SDK, and MCP surface
+
+Added authenticated `POST /v1/runs/:runId/instructions/ack` under the existing `agent:write` scope with body `{ instructionIds: string[] }`.
+
+Added `CallYourAgentClient.acknowledgeInstructions(...)` to the typed TypeScript client.
+
+Added MCP tool `acknowledge_owner_instructions`. The MCP `checkpoint` tool now recommends the safe two-phase pattern and labels `consume=true` as compatibility behavior rather than the preferred contract.
+
+Updated `docs/INTEGRATIONS.md` for Claude/Claude Code, Codex, and generic agents to use pull -> incorporate -> exact acknowledgement semantics.
 
 ### Regression coverage
 
-Extended `tests/http-server.test.ts` to verify that:
+Added domain tests proving:
 
-- `/health` is unauthenticated and retains its narrow liveness response;
-- `/ready` is unauthenticated;
-- a live-mode readiness snapshot returns the expected selected provider/store configuration;
-- `providerNetworkChecked` remains `false`, preventing the readiness surface from being misread as live CALL-E verification.
+- a later-arriving instruction remains queued when only the prior checkpoint ids are acknowledged;
+- acknowledgement retries/duplicate ids are idempotent and do not duplicate audit events;
+- a cross-run acknowledgement batch fails before any instruction is consumed.
 
-### Deployment documentation
-
-Updated `docs/DEPLOYMENT.md` with the health/readiness distinction and fake-first deployment guidance. The deployment docs now explicitly state:
-
-- `/health` answers whether the process is serving;
-- `/ready` answers whether the selected runtime mode passed local startup configuration validation;
-- neither endpoint proves provider reachability or successful real phone behavior.
+Added HTTP regression coverage proving the new route consumes only the requested ids, leaves later steering queued, and rejects malformed instruction id arrays.
 
 ## Architecture decisions made this run
 
-1. Readiness must remain a pure snapshot of already-validated local configuration. It must not introduce a hidden provider side effect merely because an orchestrator polls an endpoint.
-2. Provider reachability is intentionally represented as unchecked. This avoids turning readiness polling into phone-provider traffic and prevents accidental claims of live verification.
-3. The readiness response is safe to leave unauthenticated because it exposes only coarse provider/store mode and configuration-state enums/booleans, never secret values or user/run state.
-4. Live-mode startup remains fail-fast for required server-side configuration. A runtime that reaches `ready: true` in `calle` mode has complete local configuration, but external reachability/authorization remains a separate operational concern.
-5. MCP, HTTP, SDK, branch-scoped blocking, durable owner instruction semantics, and provider idempotency behavior are unchanged.
+1. Instruction delivery and instruction incorporation are separate facts. A checkpoint may expose durable steering, but consumption should normally be recorded only after the worker confirms exactly what it incorporated.
+2. Exact durable ids are the acknowledgement boundary. This avoids a race where new owner steering arriving after a checkpoint could be accidentally swept into an acknowledgement intended for older work.
+3. Acknowledgement is run-scoped and validates the whole batch before mutation, preventing partial cross-run consumption.
+4. Retries are idempotent and do not produce duplicate `owner_instruction_consumed` audit events.
+5. The compatibility `consume=true` path is preserved to avoid breaking existing integrations, while the typed SDK/MCP documentation directs new integrations to the safer two-phase protocol.
+6. This does not introduce any mid-generation interruption model. Agents still pull and incorporate owner steering only at explicit safe checkpoints.
+7. HTTP, MCP, and platform adapters continue to share the same core control-plane semantics; no platform-specific state machine was added.
 
 ## Verification performed
 
-Code-bearing commits this run:
+Commits created this run:
 
-- `9e79fa71f48d82cf4ed96abd72225ef8e1bd2cb4` — `feat: add side-effect-free readiness endpoint`
-- `3f6f9d9781a50f16149f3b3c455f530557fd57c2` — `feat: expose validated deployment readiness`
-- `f5d97f2b805d08f8dd804ecb3afab6829d6f6d7f` — `test: cover readiness endpoint semantics`
-- `cf03568ff401206f0c8c81e427a142ecc45bc204` — `docs: document readiness semantics`
+- `7acef31846573e1ed7064fabfcc66868d587cc20` — `feat: add exact instruction acknowledgement`
+- `51da0771583b1d6f70d51974d7ac52c3dfa41b5c` — `feat: expose instruction acknowledgement to agents`
+- `a9c93f6bc0599287c34bc98d9e9367a74d47f5c8` — `test: cover exact instruction acknowledgement API`
 
-GitHub Actions standard CI run `34103798817` on code-bearing commit `f5d97f2b805d08f8dd804ecb3afab6829d6f6d7f` completed successfully. This workflow uses the committed dependency lock with `npm ci` and runs the repository `npm run check` pipeline, covering TypeScript typechecking, build, and the compiled Node test suite including the new readiness regression test.
+GitHub Actions for `7acef31846573e1ed7064fabfcc66868d587cc20` all completed successfully: CI run `34109287641`, Container run `34109287562`, and Compose deployment run `34109287575`.
 
-Container and Compose workflows were also triggered for the resulting main-branch states; the existing production-container and restart-persistence architecture was not changed by this increment.
+GitHub Actions for `51da0771583b1d6f70d51974d7ac52c3dfa41b5c` also completed successfully, including CI run `34109523735` and Container run `34109523814`; the full workflow set was triggered by the push.
+
+For final code/test state `a9c93f6bc0599287c34bc98d9e9367a74d47f5c8`, CI run `34109738997` completed successfully, covering the locked dependency install and repository check pipeline (TypeScript typecheck, build, and compiled tests including the new HTTP acknowledgement test). Container run `34109738983` and Compose deployment run `34109739018` were running when this progress entry was written; prior code-bearing states in the same run had already passed both deployment workflows.
+
+A direct local clone was not available in this execution environment because outbound DNS to GitHub failed, so repository mutation and authoritative verification were performed through the connected GitHub API and GitHub Actions rather than fabricating local test results.
 
 No live CALL-E call was attempted or claimed.
 
 ## CALL-E integration status
 
-- Deterministic fake provider: implemented and tested across decision calls, callbacks, branch-scoped blocking, queued steering, safe checkpoint consumption, idempotency, policy/lifecycle handling, auditability, SQLite restart, operator visualization, production container boot, Compose persistence, and the assertion-backed `npm run demo` story.
-- Production CALL-E adapter: implemented with server-only API key, structured result schemas, provider idempotency, asynchronous polling, terminal webhook reconciliation, bounded create/poll requests, duplicate-call prevention, ambiguous replay with the exact original key, and fail-closed stalled handling.
-- HTTP + TypeScript SDK + MCP: implemented.
-- Scoped credentials plus callback/reconciliation rate limits: implemented and tested.
-- Graceful runtime shutdown and persistent-volume deployment: implemented and tested.
-- Liveness/readiness separation: implemented and tested. Readiness is local-configuration evidence only and never a provider probe.
-- Live CALL-E call: **not attempted and not claimed**.
+- Fake provider: implemented and tested for owner decisions, callbacks, branch-scoped blocking, durable queued steering, safe checkpoint consumption, exact instruction acknowledgement, idempotency, policy/lifecycle recovery, auditability, SQLite restart, deterministic demo, operator visualization, container boot, and persistent Compose deployment.
+- Production CALL-E adapter: implemented with server-only `CALLE_API_KEY`, structured result handling, provider idempotency, polling, terminal webhook reconciliation, duplicate-call prevention, bounded HTTP requests, exact-key ambiguous replay, and fail-closed stalled handling.
+- HTTP + typed TypeScript SDK + MCP surfaces: implemented, now including exact instruction acknowledgement.
+- Live CALL-E success: unverified; no real authorized call has been made in this run.
 
-## Current blockers
+## Current blockers / external prerequisites
 
-There is no blocker to continued repository development.
+No repository-development blocker currently prevents further useful work.
 
-Live CALL-E verification still requires a valid CALL-E credential, authorized owner phone destination, and stable public HTTPS deployment/webhook path. Real Claude Code host acceptance still requires an actual Claude Code installation/session. Those external prerequisites do not block further control-plane work.
+Live CALL-E verification still requires user-controlled prerequisites: a valid/authorized CALL-E credential, authorized owner destination, and stable public HTTPS webhook ingress with the configured webhook capability token. These are required before claiming a real phone call succeeds.
+
+Real Claude Code host acceptance still requires running the documented MCP registration and workflow in an actual Claude Code environment. The repository-side stdio MCP contract remains implemented and CI-tested, but host acceptance should not be invented.
 
 ## Highest-value next actions
 
-1. Strengthen owner-instruction delivery semantics with explicit per-instruction acknowledgement/consumption so a worker can acknowledge exactly the instructions it incorporated, without consuming a later-arriving instruction in the same checkpoint window. Preserve the existing simple checkpoint API where possible.
-2. Add read-only unresolved blocking-scope and queued-instruction counts to the operator console/API surface for a clearer hackathon demonstration, without consuming state or creating a second business-state layer.
-3. Exercise the documented Claude Code stdio MCP registration path in a real Claude Code host when such an environment becomes available and record exact acceptance evidence.
-4. Keep broader Codex/ChatGPT adapters thin and capability-honest; add them only where current platform tool/checkpoint semantics genuinely support the shared control plane.
+1. Extend the operator/demo surface to show unresolved blocking scopes and queued instruction counts clearly, while keeping instruction text behind authenticated APIs.
+2. Add a focused SDK/MCP acceptance test for the new acknowledgement tool path so host adapters explicitly exercise pull -> incorporate -> ack semantics end to end.
+3. When a real Claude Code host is available, run the documented stdio MCP registration and perform an acceptance flow using a deterministic fake provider.
+4. When the user-only CALL-E prerequisites are available, perform a carefully bounded live provider acceptance test and record the actual result without weakening duplicate-call/idempotency safeguards.
