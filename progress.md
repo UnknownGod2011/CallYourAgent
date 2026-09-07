@@ -2,101 +2,100 @@
 
 ## Current status
 
-CallYourAgent is a durable Node 24 TypeScript control plane for asynchronous two-way voice coordination between autonomous AI agents and their owners. It has SQLite persistence, deterministic fake and production CALL-E providers, replayable/idempotent call attempts, polling/webhook convergence, scoped authenticated HTTP APIs, a typed TypeScript client, stdio MCP, CI-proven Claude-style branch/checkpoint behavior, decision-call policy, durable privacy-aware audit history, bounded lifecycle recovery, fail-closed ambiguous/stalled call handling, API abuse controls, an owned graceful runtime, hard deadlines around CALL-E HTTP operations, reproducible npm dependencies via `npm ci`, and now a thin built-in operator console over the existing authenticated run/audit/callback APIs.
+CallYourAgent is a durable Node 24 TypeScript control plane for asynchronous two-way voice coordination between autonomous AI agents and their owners. It has SQLite persistence, deterministic fake and production CALL-E providers, replayable/idempotent call attempts, polling/webhook convergence, scoped authenticated HTTP APIs, a typed TypeScript client, stdio MCP, CI-proven Claude-style branch/checkpoint behavior, decision-call policy, durable privacy-aware audit history, bounded lifecycle recovery, fail-closed ambiguous/stalled call handling, API abuse controls, graceful runtime shutdown, hard CALL-E HTTP deadlines, reproducible npm dependencies, a thin operator console, and now a production-oriented container image that is built and smoke-tested in CI.
 
-The core semantics remain unchanged: an agent can escalate genuinely important human judgment without freezing unrelated scopes; the owner can independently request a callback to hear current status and steer the run; owner decisions and instructions become durable structured state and are consumed only at safe checkpoints rather than being represented as mid-generation interruption.
+The core product semantics remain unchanged: an autonomous agent can request genuinely important human judgment without freezing unrelated scopes; the owner can independently request a voice callback to hear current status and steer the run; owner decisions and instructions become durable structured state and are consumed at safe checkpoints rather than being represented as impossible mid-generation interruption.
 
 ## Exact repo state inspected this run
 
-Before making changes, inspected the complete recursive `main` tree at `4118db191c1987246dfaf7e875669ef1deb749ce`, including source, tests, workflow/configuration files, documentation paths, and the newly committed lockfile. Inspected recent commits through the dependency-locking work and checked open issues and pull requests; there were none.
+Before making changes, inspected the complete recursive `main` repository tree at `abf7f7a65eeab0efdc0befcef2a6291327ad42d9`, including source, tests, CI/configuration, package metadata, and all documentation paths. Inspected recent commits through the operator-console work and checked repository issues; there were no current issues.
 
-Read `AGENTS.md`, this file, `README.md`, `docs/ARCHITECTURE.md`, `docs/INTEGRATIONS.md`, `docs/CALL_POLICY.md`, `docs/API_SECURITY.md`, and `docs/DEPLOYMENT.md` in full before modifying the repository. Also inspected `src/http-server.ts`, `src/domain.ts`, and `tests/http-server.test.ts` because the highest-value available next action was the small operator/status surface. A real Claude Code host is not available in this runtime, so no host-level acceptance result was fabricated.
+Read `AGENTS.md`, this file, `README.md`, `docs/ARCHITECTURE.md`, `docs/INTEGRATIONS.md`, `docs/CALL_POLICY.md`, `docs/API_SECURITY.md`, `docs/DEPLOYMENT.md`, and `docs/OPERATOR_CONSOLE.md` in full before modifying the repository. Also inspected `src/http-server.ts`, `src/server.ts`, `tests/http-server.test.ts`, and `package.json` while evaluating the recorded readiness/configuration endpoint as the next increment.
 
-The execution container still cannot resolve `github.com` for a normal local clone. Repository mutation therefore used authenticated GitHub Git-data operations and verification used GitHub Actions CI.
+The execution container still cannot resolve `github.com`, so a normal local clone remains unavailable. Rather than hand-rewrite a large working HTTP/server file through the contents API, this run switched to a safe new-file-only deployment increment and verified it externally through GitHub Actions.
 
 ## Existing foundation preserved
 
 - Agent registration, run state, heartbeats/status, branch-scoped blocking, owner decisions, owner callbacks, durable instruction queues, and safe checkpoint consumption.
 - In-memory and durable `node:sqlite` stores with WAL, explicit transactions, uniqueness constraints, rollback/reload behavior, persisted causal audit ordering, and idempotent close semantics.
 - Fake CALL-E provider and production CALL-E Calls API adapter with server-only credentials, structured results, provider idempotency, polling, terminal webhook support, and hard request deadlines.
-- Persist-before-side-effect call attempts containing exact replayable provider requests/idempotency state.
+- Persist-before-side-effect call attempts containing exact replayable provider requests and idempotency state.
 - Shared polling/webhook terminal transition plus provider-event deduplication.
 - Typed HTTP client, stdio MCP adapter, and Claude-style end-to-end MCP work-loop tests.
 - Priority gates, quiet hours, critical bypass, per-run/per-owner call budgets, escalation expiry, durable policy deferral, bounded ambiguous recovery, and stalled accepted-call review state.
 - Scoped HTTP credentials and per-credential callback/reconciliation rate limits.
-- Owned runtime with non-overlapping lifecycle sweeps plus graceful HTTP/lifecycle/store shutdown.
+- Owned runtime with non-overlapping lifecycle sweeps and graceful HTTP/lifecycle/store shutdown.
 - Reproducible dependency graph enforced by `npm ci` in CI.
+- Built-in `/operator` UI over existing authenticated run/audit/callback APIs.
 
 ## Changes made this run
 
-### Built-in operator console
+### Production container image
 
-Added `src/operator-ui.ts` and exposed it as `GET /operator` from the existing HTTP server. The page is intentionally a presentation layer only; it does not introduce another state store, alternate decision path, or browser-agent behavior.
+Added a multi-stage `Dockerfile` based on Node 24 Bookworm slim. The build stage installs the committed dependency graph with `npm ci`, compiles TypeScript, and prunes development dependencies. The runtime stage contains only the production dependency tree and compiled `dist` output, runs as the non-root `node` user, exposes port 8787, and uses `/data` as the persistent SQLite volume location.
 
-The console accepts a run id and a scoped bearer token in browser memory, then reads the existing authenticated APIs to show:
+The image defaults to `CYA_STORE=sqlite` and `CYA_SQLITE_PATH=/data/callyouragent.db`. It deliberately does not bake any API token, CALL-E credential, phone number, or webhook secret into the image. Provider mode and credentials remain runtime configuration.
 
-- run status;
-- current scope;
-- current agent summary and update time;
-- the durable audit event count;
-- the durable causal timeline, newest first.
+Added a container `HEALTHCHECK` against the existing unauthenticated `/health` liveness endpoint. This is intentionally only process liveness; it does not claim CALL-E provider health or live deployment readiness.
 
-It supports optional three-second auto-refresh so a hackathon demo can visibly show an agent continuing unrelated work while an escalation/call is pending, then later show owner decision/callback events and safe-checkpoint steering consumption.
+### Minimal Docker build context
 
-### Owner callback from the same real API path
+Added `.dockerignore` to exclude local dependencies, build output, Git metadata, SQLite/WAL files, logs, and local environment files while retaining `.env.example` as documentation.
 
-The console can request a callback through the existing `POST /v1/callbacks` route. It requires the normal `owner:callback` scope and therefore does not create a privileged browser-only path. The callback still uses the same control-plane persistence, budgets/rate limits where applicable, call provider abstraction, audit events, and durable instruction queue.
+### Container CI and fake-provider smoke test
 
-### Browser security boundary
+Added `.github/workflows/container.yml`. On pushes to `main` and pull requests, GitHub Actions now:
 
-`GET /operator` serves only static HTML/CSS/JavaScript and no configured token, phone number, CALL-E secret, run data, or audit data. API tokens remain in page memory and are sent only as bearer headers to same-origin API requests. The response uses `Cache-Control: no-store`, a restrictive same-origin Content Security Policy, `Referrer-Policy: no-referrer`, and `X-Content-Type-Options: nosniff`.
+1. builds the production Docker image;
+2. starts the image with the deterministic fake CALL-E provider and a CI-only local bearer token;
+3. polls `/health` from the host;
+4. fails and prints container logs if the runtime does not become healthy.
 
-Added `tests/operator-ui.test.ts` proving the shell is served without embedding configured API/webhook secrets and that protected run data still returns `401` without authentication.
-
-Added `docs/OPERATOR_CONSOLE.md` and linked the console from README.
+This proves the checked-in container can actually build and boot the same compiled server used by the repository rather than treating the Dockerfile as unexecuted deployment documentation.
 
 ## Architecture decisions made this run
 
-1. The demo/operator surface must consume existing run/audit/callback contracts rather than deriving a second business-state layer.
-2. Serving the static shell without authentication is acceptable only because it contains no server state or credentials; every data/action request still crosses the existing bearer/scope boundary.
-3. Bearer credentials must never be placed in query strings, cookies, local storage, or server-rendered HTML by the built-in console.
-4. Owner callback remains an explicitly scoped existing API operation, not a UI-specific privilege.
-5. The console is evidence of control-plane behavior, not evidence of live CALL-E success.
-6. No attempt was made to fake mid-generation interruption; the timeline continues to reflect safe-checkpoint instruction consumption.
+1. Containerization must not create a second runtime path: the image runs the existing `dist/src/server.js` control plane.
+2. Production image configuration remains environment-driven; no CALL-E key, phone number, API token, or webhook secret belongs in the image layers.
+3. The reference container defaults to durable SQLite storage under `/data`, but deployment operators still must attach a persistent volume; declaring a Docker volume is not itself a hosted persistence guarantee.
+4. CI smoke testing uses the deterministic fake provider so verification never spends credits or falsely claims live CALL-E success.
+5. Docker health checks continue to represent liveness only. A future readiness/configuration endpoint must remain separate and must not trigger a provider side effect.
+6. Because direct clone/patch support is unavailable in this runtime, large existing source files were not riskily reconstructed by hand merely to force the previously listed readiness endpoint into this run.
 
 ## Verification performed
 
-- Code-bearing commit `99fcc65cde7967655cd4476e9eb6f05ccc5c8291` (`feat: add operator run console`) added the UI, HTTP route, security headers, and regression test.
-- GitHub Actions CI run `34081665407` completed successfully on September 7, 2026 UTC for that commit.
-- CI used Node 24, locked dependency installation with `npm ci`, and the repository's `npm run check` pipeline. TypeScript typechecking/build and the full test suite, including the new operator-console test, passed.
-- No live CALL-E call was attempted in this run.
+- `Dockerfile` commit: `459b61cd569f6cce1aedba3fa77deac85e26fc3e`.
+- `.dockerignore` commit: `697c167675521c03f4b56c8805c51d171b58c486`.
+- Container workflow commit: `553e556c17cd6ea6649a55580d0cdabc6e48df3f`.
+- Standard GitHub Actions CI run `34085098551` completed successfully for `553e556c17cd6ea6649a55580d0cdabc6e48df3f`, covering locked dependency installation and the repository's existing `npm run check` typecheck/build/test pipeline.
+- New Container workflow run `34085098399` completed successfully for the same commit. The Docker production image build passed and the fake-provider runtime smoke test reached `/health` successfully.
+- No live CALL-E call was attempted or claimed.
 
 ## CALL-E integration status
 
-- Fake provider: implemented and CI-tested end-to-end, including decision calls, callbacks, branch-scoped blocking, queued owner steering, checkpoint consumption, idempotency, policy, lifecycle recovery, auditability, restart-safe state, and now a browser-visible operator timeline over the same APIs.
+- Fake provider: implemented and CI-tested end-to-end, including decision calls, callbacks, branch-scoped blocking, queued owner steering, checkpoint consumption, idempotency, policy, lifecycle recovery, auditability, restart-safe state, operator visualization, and now boot inside the production container image.
 - Production CALL-E adapter: implemented with server-only API key, structured result schemas, provider idempotency, asynchronous polling, webhook URL construction, terminal reconciliation, bounded create/poll HTTP requests, and duplicate-call prevention.
 - Ambiguous create replay with the exact original idempotency key: implemented.
 - Automatic recovery bounds/backoff and core recovery-exhaustion enforcement: implemented and CI-tested.
-- Accepted-call stale timeout: implemented; terminal provider evidence is polled before stalling and CI-tested.
-- Webhook event-id validation/deduplication + durable transaction: implemented.
+- Accepted-call stale timeout: implemented and CI-tested.
+- Webhook event-id validation/deduplication plus durable transaction: implemented.
 - HTTP + TypeScript SDK + MCP path: implemented.
-- Scoped credentials + callback/reconciliation rate limits: implemented and CI-tested.
+- Scoped credentials plus callback/reconciliation rate limits: implemented and CI-tested.
 - Graceful server/lifecycle/store shutdown: implemented and CI-tested.
 - Reproducible dependency graph / `npm ci`: implemented and CI-tested.
-- Operator console: implemented over existing authenticated APIs and CI-tested this run.
+- Production container build + fake boot smoke test: implemented and CI-tested this run.
 - Live CALL-E call: **not attempted and not claimed**. A valid CALL-E credential, authorized owner phone destination, and stable public HTTPS deployment remain external prerequisites.
 
 ## Current blockers
 
 There is no blocker to continued repository development.
 
-Live CALL-E verification still requires a valid CALL-E credential, authorized owner phone number, and public HTTPS deployment. Host-level Claude Code acceptance still requires an actual Claude Code installation/session. The current automation runtime cannot perform a normal networked local clone, but authenticated GitHub repository operations and GitHub Actions remain a working implementation/verification path.
+Live CALL-E verification still requires a valid CALL-E credential, authorized owner phone number, and public HTTPS deployment. Host-level Claude Code acceptance still requires an actual Claude Code installation/session. The automation runtime cannot perform a normal networked local clone, but authenticated GitHub repository operations and GitHub Actions remain usable implementation and verification paths.
 
 ## Highest-value next actions
 
-1. Add a narrowly scoped readiness/configuration endpoint that distinguishes process liveness from deployment readiness without initiating a phone side effect or claiming unverified provider health.
-2. Exercise the documented Claude Code stdio MCP registration path in a real Claude Code host when such a host is available, recording exact acceptance results instead of inferring them from protocol-level tests.
-3. Improve the operator console with a read-only run snapshot endpoint only if needed to show unresolved blocking scopes/queued instruction counts without invoking `checkpoint`; keep it derived from core state and scoped as read-only.
-4. Add an explicit operator-only resolution/recovery path for `stalled` or exhausted-ambiguous calls only if real deployment testing demonstrates a need; keep it separately scoped and audited.
-5. Consider a shared store/rate limiter only when moving beyond the supported single-instance reference deployment.
-6. Add broader Codex/ChatGPT adapters only where current platform capabilities can genuinely support the existing checkpoint/tool semantics; do not duplicate the state machine or claim mid-generation interruption.
+1. Add the narrowly scoped readiness/configuration endpoint previously identified, distinguishing liveness from valid runtime configuration without probing CALL-E or initiating a phone side effect. Prefer doing this when a safe source patch path is available rather than hand-rewriting the large HTTP/server files.
+2. Add an optional deployment recipe/manifest for one persistent-volume hosting target only after preserving the single-instance SQLite boundary explicitly.
+3. Exercise the documented Claude Code stdio MCP registration path in a real Claude Code host when such a host is available and record exact acceptance evidence.
+4. Improve the operator console with a read-only run snapshot only if needed to show unresolved blocking scopes or queued instruction counts without consuming checkpoint state.
+5. Add broader Codex/ChatGPT adapters only where current platform capabilities genuinely support the existing tool/checkpoint semantics; do not duplicate the state machine or claim mid-generation interruption.
