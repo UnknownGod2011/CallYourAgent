@@ -1,0 +1,44 @@
+name: Container
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  build-container:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Build production image
+        run: docker build --tag callyouragent:ci .
+
+      - name: Smoke-test fake provider runtime
+        run: |
+          docker run --detach --rm \
+            --name callyouragent-ci \
+            --publish 127.0.0.1:8787:8787 \
+            --env CYA_CALL_PROVIDER=fake \
+            --env CYA_API_TOKEN=ci-only-local-token \
+            callyouragent:ci
+
+          cleanup() {
+            docker stop callyouragent-ci >/dev/null 2>&1 || true
+          }
+          trap cleanup EXIT
+
+          for attempt in $(seq 1 20); do
+            if curl --fail --silent http://127.0.0.1:8787/health >/dev/null; then
+              exit 0
+            fi
+            sleep 1
+          done
+
+          docker logs callyouragent-ci
+          exit 1
