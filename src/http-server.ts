@@ -14,6 +14,19 @@ export interface ApiCredential {
   scopes: ApiScope[];
 }
 
+export interface CredentialCapabilities {
+  credentialId: string;
+  scopes: Exclude<ApiScope, "*">[];
+}
+
+const CONCRETE_API_SCOPES: Exclude<ApiScope, "*">[] = [
+  "agent:read",
+  "agent:write",
+  "audit:read",
+  "owner:callback",
+  "calls:reconcile",
+];
+
 export interface HttpRateLimitOptions {
   ownerCallbacksPerWindow?: number;
   reconciliationsPerWindow?: number;
@@ -86,6 +99,10 @@ export function createControlPlaneHttpServer(controlPlane: ControlPlane, options
 
       const credential = authenticate(req, credentials);
       if (!credential) return json(res, 401, { error: "unauthorized" });
+
+      if (req.method === "GET" && url.pathname === "/v1/auth/capabilities") {
+        return json(res, 200, credentialCapabilities(credential));
+      }
 
       const body = req.method === "POST" || req.method === "PATCH" ? await readJson(req, maxBodyBytes) : undefined;
 
@@ -235,6 +252,15 @@ function authenticate(req: IncomingMessage, credentials: ApiCredential[]): ApiCr
   if (typeof header !== "string" || !header.startsWith("Bearer ")) return undefined;
   const token = header.slice(7);
   return credentials.find((credential) => safeEqual(token, credential.token));
+}
+
+function credentialCapabilities(credential: ApiCredential): CredentialCapabilities {
+  return {
+    credentialId: credential.id,
+    scopes: credential.scopes.includes("*")
+      ? [...CONCRETE_API_SCOPES]
+      : CONCRETE_API_SCOPES.filter((scope) => credential.scopes.includes(scope)),
+  };
 }
 
 function hasScope(credential: ApiCredential, scope: ApiScope): boolean {
