@@ -43,6 +43,12 @@ An escalation belongs to a branch/scope, not necessarily to the whole agent run.
 - `blocking=false`: agent continues; answer is consumed later at a safe checkpoint.
 - Incoming owner instructions are queued rather than injected mid-token-generation.
 
+## Operator console
+
+A built-in browser console is available at `/operator`. It is a thin shell over the existing authenticated run/audit/callback APIs: it can display the current run summary and durable causal timeline, auto-refresh during a demo, and request an owner callback when the supplied token has `owner:callback`.
+
+The page itself contains no server credentials or run data. Entered bearer tokens stay in page memory and normal API scopes still apply. See [docs/OPERATOR_CONSOLE.md](docs/OPERATOR_CONSOLE.md).
+
 ## Architecture and operations
 
 See:
@@ -51,6 +57,7 @@ See:
 - [docs/CALL_POLICY.md](docs/CALL_POLICY.md)
 - [docs/API_SECURITY.md](docs/API_SECURITY.md)
 - [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md)
+- [docs/OPERATOR_CONSOLE.md](docs/OPERATOR_CONSOLE.md)
 - [progress.md](progress.md)
 
 ## CALL-E
