@@ -3,6 +3,7 @@ import type { Server } from "node:http";
 import type { AddressInfo } from "node:net";
 import { FakeCallProvider } from "./call-provider.js";
 import { ControlPlane } from "./control-plane.js";
+import { credentialForRole } from "./credential-roles.js";
 import { createControlPlaneHttpServer } from "./http-server.js";
 import { getRunOverview } from "./run-overview.js";
 import { InMemoryControlPlaneStore } from "./store.js";
@@ -32,6 +33,8 @@ export interface OperatorDemoServerOptions {
   port?: number;
   /** Browser-facing read/audit token. It intentionally has no mutation scopes. */
   apiToken?: string;
+  /** Optional owner-facing token: read/audit + owner callback only. */
+  ownerToken?: string;
 }
 
 export interface OperatorDemoServer {
@@ -41,6 +44,8 @@ export interface OperatorDemoServer {
   operatorUrl: string;
   /** Browser-facing read/audit token; retained as apiToken for CLI/test compatibility. */
   apiToken: string;
+  /** Owner-facing token that can observe the run and request callbacks, but cannot mutate agent state or reconcile calls. */
+  ownerToken: string;
   advance(): Promise<OperatorDemoAdvanceResult>;
   close(): Promise<void>;
 }
@@ -190,16 +195,18 @@ export async function startOperatorDemoServer(
   }
 
   const apiToken = options.apiToken?.trim() || "cya-local-demo-read-token";
+  const ownerToken = options.ownerToken?.trim() || "cya-local-demo-owner-token";
+  if (apiToken === ownerToken) throw new Error("operator demo read and owner tokens must be different");
+
   const store = new InMemoryControlPlaneStore();
   const provider = new FakeCallProvider();
   const controlPlane = new ControlPlane(store, provider);
   const fixture = await seedOperatorDemoFixture(controlPlane, provider);
   const server = createControlPlaneHttpServer(controlPlane, {
-    apiCredentials: [{
-      id: "operator-demo-browser",
-      token: apiToken,
-      scopes: ["agent:read", "audit:read"],
-    }],
+    apiCredentials: [
+      credentialForRole("operator-demo-browser", apiToken, "operator-read"),
+      credentialForRole("operator-demo-owner", ownerToken, "owner"),
+    ],
     readiness: {
       ready: true,
       providerMode: "fake",
@@ -224,6 +231,7 @@ export async function startOperatorDemoServer(
     baseUrl,
     operatorUrl: `${baseUrl}/operator`,
     apiToken,
+    ownerToken,
     advance: () => {
       advancePromise ??= advanceOperatorDemoFixture(controlPlane, provider, fixture);
       return advancePromise;
@@ -239,7 +247,8 @@ async function runOperatorDemoServer(): Promise<void> {
   const rawPort = process.env.CYA_OPERATOR_DEMO_PORT?.trim();
   const port = rawPort ? Number(rawPort) : 8788;
   const apiToken = process.env.CYA_OPERATOR_DEMO_TOKEN?.trim() || "cya-local-demo-read-token";
-  const demo = await startOperatorDemoServer({ host, port, apiToken });
+  const ownerToken = process.env.CYA_OPERATOR_DEMO_OWNER_TOKEN?.trim() || "cya-local-demo-owner-token";
+  const demo = await startOperatorDemoServer({ host, port, apiToken, ownerToken });
 
   console.log(JSON.stringify({
     ok: true,
@@ -248,13 +257,15 @@ async function runOperatorDemoServer(): Promise<void> {
     runId: demo.fixture.runId,
     apiToken: demo.apiToken,
     tokenScopes: ["agent:read", "audit:read"],
+    ownerCallbackToken: demo.ownerToken,
+    ownerTokenScopes: ["agent:read", "audit:read", "owner:callback"],
     expectedIndicators: {
       activeScope: demo.fixture.activeScope,
       blockedScopes: demo.fixture.unresolvedBlockingScopes,
       pendingSteering: demo.fixture.queuedInstructionCount,
     },
-    nextAction: "Open /operator, load the printed run/read token, then press Enter here to resolve the decision and safely acknowledge steering.",
-    note: "Local hackathon fixture only. Browser token is read/audit-only. This does not claim a live CALL-E phone call.",
+    nextAction: "Use the read token to observe. Use the separate owner token only when demonstrating owner-requested callback. Then press Enter here to resolve the seeded decision and safely acknowledge steering.",
+    note: "Local hackathon fixture only. Neither browser token has agent-write or reconciliation authority. This does not claim a live CALL-E phone call.",
   }, null, 2));
 
   process.stdin.setEncoding("utf8");
