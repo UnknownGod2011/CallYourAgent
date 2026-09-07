@@ -2,17 +2,17 @@
 
 ## Current status
 
-CallYourAgent is a durable Node 24 TypeScript control plane for asynchronous two-way voice coordination between autonomous AI agents and their owners. It has SQLite persistence, deterministic fake and production CALL-E providers, replayable/idempotent call attempts, polling/webhook convergence, scoped authenticated HTTP APIs, a typed TypeScript client, stdio MCP, CI-proven Claude-style branch/checkpoint behavior, decision-call policy, durable privacy-aware audit history, bounded lifecycle recovery, fail-closed ambiguous/stalled call handling, API abuse controls, graceful runtime shutdown, hard CALL-E HTTP deadlines, reproducible npm dependencies, a thin operator console, and now a production-oriented container image that is built and smoke-tested in CI.
+CallYourAgent is a durable Node 24 TypeScript control plane for asynchronous two-way voice coordination between autonomous AI agents and their owners. It has SQLite persistence, deterministic fake and production CALL-E providers, replayable/idempotent call attempts, polling/webhook convergence, scoped authenticated HTTP APIs, a typed TypeScript client, stdio MCP, branch/checkpoint semantics, decision-call policy, durable privacy-aware audit history, bounded lifecycle recovery, fail-closed ambiguous/stalled call handling, API abuse controls, graceful runtime shutdown, hard CALL-E HTTP deadlines, reproducible npm dependencies, a thin operator console, a production container image, and now a reproducible single-instance Docker Compose deployment with a named persistent SQLite volume and CI verification across restart.
 
 The core product semantics remain unchanged: an autonomous agent can request genuinely important human judgment without freezing unrelated scopes; the owner can independently request a voice callback to hear current status and steer the run; owner decisions and instructions become durable structured state and are consumed at safe checkpoints rather than being represented as impossible mid-generation interruption.
 
 ## Exact repo state inspected this run
 
-Before making changes, inspected the complete recursive `main` repository tree at `abf7f7a65eeab0efdc0befcef2a6291327ad42d9`, including source, tests, CI/configuration, package metadata, and all documentation paths. Inspected recent commits through the operator-console work and checked repository issues; there were no current issues.
+Before making any change, inspected the complete recursive `main` repository tree at `2482f171ea444c6a869248d219ebf0eea8e062de`, including source, tests, CI/configuration, package metadata, Docker artifacts, and all documentation paths.
 
-Read `AGENTS.md`, this file, `README.md`, `docs/ARCHITECTURE.md`, `docs/INTEGRATIONS.md`, `docs/CALL_POLICY.md`, `docs/API_SECURITY.md`, `docs/DEPLOYMENT.md`, and `docs/OPERATOR_CONSOLE.md` in full before modifying the repository. Also inspected `src/http-server.ts`, `src/server.ts`, `tests/http-server.test.ts`, and `package.json` while evaluating the recorded readiness/configuration endpoint as the next increment.
+Read `AGENTS.md`, this file, `README.md`, `docs/ARCHITECTURE.md`, `docs/INTEGRATIONS.md`, `docs/CALL_POLICY.md`, `docs/API_SECURITY.md`, `docs/DEPLOYMENT.md`, and `docs/OPERATOR_CONSOLE.md` in full. Inspected recent commits through the production-container work. Checked repository issues and pull requests; there were none.
 
-The execution container still cannot resolve `github.com`, so a normal local clone remains unavailable. Rather than hand-rewrite a large working HTTP/server file through the contents API, this run switched to a safe new-file-only deployment increment and verified it externally through GitHub Actions.
+Also inspected `src/http-server.ts`, `src/server.ts`, `tests/http-server.test.ts`, `Dockerfile`, and `.github/workflows/container.yml` while evaluating the next increment. The runtime still cannot resolve `github.com` for a normal local clone, so repository mutations used authenticated GitHub Git-data operations and verification used GitHub Actions.
 
 ## Existing foundation preserved
 
@@ -27,53 +27,66 @@ The execution container still cannot resolve `github.com`, so a normal local clo
 - Owned runtime with non-overlapping lifecycle sweeps and graceful HTTP/lifecycle/store shutdown.
 - Reproducible dependency graph enforced by `npm ci` in CI.
 - Built-in `/operator` UI over existing authenticated run/audit/callback APIs.
+- Production-oriented non-root Docker image with fake-provider container smoke testing.
 
 ## Changes made this run
 
-### Production container image
+### Reproducible single-instance Compose deployment
 
-Added a multi-stage `Dockerfile` based on Node 24 Bookworm slim. The build stage installs the committed dependency graph with `npm ci`, compiles TypeScript, and prunes development dependencies. The runtime stage contains only the production dependency tree and compiled `dist` output, runs as the non-root `node` user, exposes port 8787, and uses `/data` as the persistent SQLite volume location.
+Added `deploy/compose.yml` as the supported local/reference deployment recipe for the existing single-instance SQLite architecture. It builds the checked-in production `Dockerfile`, runs one CallYourAgent process, binds the HTTP service to loopback by default, and mounts the entire `/data` directory from a named Docker volume.
 
-The image defaults to `CYA_STORE=sqlite` and `CYA_SQLITE_PATH=/data/callyouragent.db`. It deliberately does not bake any API token, CALL-E credential, phone number, or webhook secret into the image. Provider mode and credentials remain runtime configuration.
+Persisting the directory rather than a single database file preserves SQLite WAL sibling files and matches the durable-store assumptions already documented by the project.
 
-Added a container `HEALTHCHECK` against the existing unauthenticated `/health` liveness endpoint. This is intentionally only process liveness; it does not claim CALL-E provider health or live deployment readiness.
+The Compose recipe keeps CALL-E credentials and API credentials runtime-only. Fake provider mode remains the default. Live CALL-E values are optional environment inputs and do not enter image layers.
 
-### Minimal Docker build context
+The service uses a 30-second stop grace period so the existing graceful HTTP/lifecycle/store shutdown path has time to drain. The deployment remains explicitly single-instance; this change does not pretend SQLite or the process-local limiter is horizontally scalable.
 
-Added `.dockerignore` to exclude local dependencies, build output, Git metadata, SQLite/WAL files, logs, and local environment files while retaining `.env.example` as documentation.
+### Deployment instructions
 
-### Container CI and fake-provider smoke test
+Added `deploy/README.md` with fake-first startup, restart, safe shutdown, volume-retention guidance, live CALL-E prerequisites, loopback/TLS boundaries, webhook query-token log redaction, scoped-credential guidance, and the explicit single-instance limitation.
 
-Added `.github/workflows/container.yml`. On pushes to `main` and pull requests, GitHub Actions now:
+The instructions distinguish `/health` liveness from live provider verification and do not claim a real CALL-E call.
 
-1. builds the production Docker image;
-2. starts the image with the deterministic fake CALL-E provider and a CI-only local bearer token;
-3. polls `/health` from the host;
-4. fails and prints container logs if the runtime does not become healthy.
+### Compose CI
 
-This proves the checked-in container can actually build and boot the same compiled server used by the repository rather than treating the Dockerfile as unexecuted deployment documentation.
+Added `.github/workflows/compose.yml`. On pushes to `main` and pull requests it:
+
+1. validates the Compose model with `docker compose config --quiet`;
+2. builds and boots CallYourAgent in deterministic fake-provider mode;
+3. waits for `/health`;
+4. verifies the configured named Docker volume exists;
+5. restarts the same service and verifies it becomes healthy again;
+6. tears down the CI deployment and volume.
+
+This is deployment-path verification, not a second application runtime or fake business-state implementation.
 
 ## Architecture decisions made this run
 
-1. Containerization must not create a second runtime path: the image runs the existing `dist/src/server.js` control plane.
-2. Production image configuration remains environment-driven; no CALL-E key, phone number, API token, or webhook secret belongs in the image layers.
-3. The reference container defaults to durable SQLite storage under `/data`, but deployment operators still must attach a persistent volume; declaring a Docker volume is not itself a hosted persistence guarantee.
-4. CI smoke testing uses the deterministic fake provider so verification never spends credits or falsely claims live CALL-E success.
-5. Docker health checks continue to represent liveness only. A future readiness/configuration endpoint must remain separate and must not trigger a provider side effect.
-6. Because direct clone/patch support is unavailable in this runtime, large existing source files were not riskily reconstructed by hand merely to force the previously listed readiness endpoint into this run.
+1. The reference deployment remains one Node process + one SQLite volume. Compose must make this boundary obvious rather than implying horizontal scalability.
+2. Persistence is mounted at the `/data` directory level because WAL state lives beside the main database file.
+3. Fake provider mode is the deployment default so bring-up and CI never spend phone credits or fabricate live success.
+4. Host publishing defaults to `127.0.0.1`; public HTTPS ingress remains an explicit operator responsibility for live CALL-E webhooks.
+5. Deployment orchestration must use the existing production Docker image and existing control-plane runtime, not a parallel demo server.
+6. Container restart verification is useful evidence that the deployment recipe preserves the durable-volume topology, while deeper domain restart persistence remains covered by the existing SQLite tests.
+7. The previously identified readiness/configuration endpoint remains valuable and should stay separate from `/health`; this run did not risk reconstructing large working HTTP/server source files merely to force that change through a connector without patch semantics.
 
 ## Verification performed
 
-- `Dockerfile` commit: `459b61cd569f6cce1aedba3fa77deac85e26fc3e`.
-- `.dockerignore` commit: `697c167675521c03f4b56c8805c51d171b58c486`.
-- Container workflow commit: `553e556c17cd6ea6649a55580d0cdabc6e48df3f`.
-- Standard GitHub Actions CI run `34085098551` completed successfully for `553e556c17cd6ea6649a55580d0cdabc6e48df3f`, covering locked dependency installation and the repository's existing `npm run check` typecheck/build/test pipeline.
-- New Container workflow run `34085098399` completed successfully for the same commit. The Docker production image build passed and the fake-provider runtime smoke test reached `/health` successfully.
-- No live CALL-E call was attempted or claimed.
+Code/deployment commit: `eb8ceb306ee0ee3c90af6a6b0a22f13505d14324` (`deploy: add persistent compose reference`).
+
+GitHub Actions on that commit:
+
+- Compose deployment run `34089093398`: passed. Compose configuration validation, fake-provider build/boot, health wait, named-volume inspection, service restart, second health wait, and cleanup all succeeded.
+- Standard CI run `34089093377`: passed, covering locked `npm ci` plus the repository's existing `npm run check` typecheck/build/test pipeline.
+- Existing Container run `34089093357`: passed, preserving the production Docker image build and fake-provider container smoke test.
+
+A normal local clone/test run was not possible because this automation container still cannot resolve `github.com`; external GitHub Actions provided the executable verification path instead.
+
+No live CALL-E call was attempted or claimed.
 
 ## CALL-E integration status
 
-- Fake provider: implemented and CI-tested end-to-end, including decision calls, callbacks, branch-scoped blocking, queued owner steering, checkpoint consumption, idempotency, policy, lifecycle recovery, auditability, restart-safe state, operator visualization, and now boot inside the production container image.
+- Fake provider: implemented and CI-tested end-to-end, including decision calls, callbacks, branch-scoped blocking, queued owner steering, checkpoint consumption, idempotency, policy, lifecycle recovery, auditability, restart-safe state, operator visualization, production container boot, and now Compose deployment/restart verification.
 - Production CALL-E adapter: implemented with server-only API key, structured result schemas, provider idempotency, asynchronous polling, webhook URL construction, terminal reconciliation, bounded create/poll HTTP requests, and duplicate-call prevention.
 - Ambiguous create replay with the exact original idempotency key: implemented.
 - Automatic recovery bounds/backoff and core recovery-exhaustion enforcement: implemented and CI-tested.
@@ -83,7 +96,7 @@ This proves the checked-in container can actually build and boot the same compil
 - Scoped credentials plus callback/reconciliation rate limits: implemented and CI-tested.
 - Graceful server/lifecycle/store shutdown: implemented and CI-tested.
 - Reproducible dependency graph / `npm ci`: implemented and CI-tested.
-- Production container build + fake boot smoke test: implemented and CI-tested this run.
+- Production container + Compose persistent-volume deployment path: implemented and CI-tested.
 - Live CALL-E call: **not attempted and not claimed**. A valid CALL-E credential, authorized owner phone destination, and stable public HTTPS deployment remain external prerequisites.
 
 ## Current blockers
@@ -94,8 +107,8 @@ Live CALL-E verification still requires a valid CALL-E credential, authorized ow
 
 ## Highest-value next actions
 
-1. Add the narrowly scoped readiness/configuration endpoint previously identified, distinguishing liveness from valid runtime configuration without probing CALL-E or initiating a phone side effect. Prefer doing this when a safe source patch path is available rather than hand-rewriting the large HTTP/server files.
-2. Add an optional deployment recipe/manifest for one persistent-volume hosting target only after preserving the single-instance SQLite boundary explicitly.
-3. Exercise the documented Claude Code stdio MCP registration path in a real Claude Code host when such a host is available and record exact acceptance evidence.
+1. Add the narrowly scoped readiness/configuration endpoint already identified, distinguishing liveness from valid runtime configuration without probing CALL-E or initiating a phone side effect. Prefer a safe source-patch path rather than manually reconstructing large working files.
+2. Exercise the documented Claude Code stdio MCP registration path in a real Claude Code host when such a host becomes available and record exact acceptance evidence.
+3. Strengthen the Compose smoke test from restart-safe boot to a small API-created durable run/state round trip across restart if that can be done without duplicating existing domain tests.
 4. Improve the operator console with a read-only run snapshot only if needed to show unresolved blocking scopes or queued instruction counts without consuming checkpoint state.
 5. Add broader Codex/ChatGPT adapters only where current platform capabilities genuinely support the existing tool/checkpoint semantics; do not duplicate the state machine or claim mid-generation interruption.
