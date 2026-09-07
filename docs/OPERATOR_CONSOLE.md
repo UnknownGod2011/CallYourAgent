@@ -27,12 +27,33 @@ The response uses `Cache-Control: no-store`, a restrictive same-origin Content S
 
 For least privilege, use a read token containing `agent:read` + `audit:read` for observation. Use a separate owner token with `owner:callback` only when the callback button is needed. The legacy `CYA_API_TOKEN` remains full-access and is therefore less appropriate for an exposed deployment.
 
-## Demo workflow
+## One-command hackathon fixture
 
-1. Run the control plane with the deterministic fake provider.
-2. Start an agent/run through MCP or the TypeScript/HTTP SDK.
+For a reproducible local browser demo, run from the repository root:
+
+```bash
+npm ci
+npm run demo:operator
+```
+
+The command builds the project, creates a fresh in-memory control plane with the deterministic fake provider, seeds the demo state through the real `ControlPlane` services, and starts an HTTP server bound to `127.0.0.1:8788` by default. It prints the operator URL, run id, and a local demo bearer token.
+
+The seeded state intentionally has:
+
+- active/current scope: `documentation`;
+- unresolved blocking scope: `production-deploy`;
+- pending owner steering count: `1`.
+
+The fixture also retries the same escalation and callback idempotency keys and asserts they deduplicate, so the demo path exercises the same duplicate-call protections as normal fake-provider operation. The callback result is reconciled into a real queued instruction, but the instruction text is not added to the operator overview. The instruction remains queued for the agent's next explicit checkpoint.
+
+This launcher is intentionally local-only by default and uses an in-memory store. Override the demo port or token with `CYA_OPERATOR_DEMO_PORT` and `CYA_OPERATOR_DEMO_TOKEN` if needed. It is not a production deployment recipe and it does **not** claim live CALL-E success.
+
+## Manual demo workflow
+
+1. Run the control plane with the deterministic fake provider, or use `npm run demo:operator` for the pre-seeded state.
+2. Start an agent/run through MCP or the TypeScript/HTTP SDK when exercising the manual path.
 3. Open `/operator` in a browser.
-4. Enter the run id and a scoped token.
+4. Enter the run id and a scoped token (or the values printed by `demo:operator`).
 5. Let the agent raise a blocking owner decision in one scope while reporting independent work in another scope.
 6. Refresh or enable three-second auto-refresh. The overview should show the independent active scope separately from the unresolved blocked scope(s).
 7. If owner steering has been queued, the page shows only the pending count; the instruction text remains available solely through the agent checkpoint contract.

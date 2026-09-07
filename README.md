@@ -39,6 +39,14 @@ npm run demo
 
 The command fails if a core invariant regresses. It proves that a non-blocking decision leaves unrelated work running, a blocking decision pauses only its scope and later resumes, an owner callback receives the current agent status, callback steering becomes queued structured state, and that steering is consumed only at a safe checkpoint. The emitted JSON includes the resulting run/call ids and durable audit-event sequence. It does **not** claim a live CALL-E phone call.
 
+For a judge-friendly browser demo, run:
+
+```bash
+npm run demo:operator
+```
+
+This starts a localhost-only fake-provider server and prints the `/operator` URL, run id, and local demo bearer token. The seeded run deliberately shows `documentation` still active while `production-deploy` is blocked and one owner steering instruction is pending. The console receives only the pending count, never the steering text. Stop the demo with Ctrl+C. This is deterministic fake-provider orchestration over the real control-plane semantics, not evidence of a live CALL-E call.
+
 ## Initial integration targets
 
 - Claude / Claude Code via MCP + adapter/hooks where supported.
