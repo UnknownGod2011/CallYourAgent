@@ -13,7 +13,7 @@ import type {
   OwnerDecisionRequest,
   OwnerInstruction,
 } from "./domain.js";
-import type { CallProvider } from "./call-provider.js";
+import type { CallProvider, CallProviderObservation } from "./call-provider.js";
 import { CallPolicy } from "./call-policy.js";
 import type { ControlPlaneStore } from "./store.js";
 
@@ -114,9 +114,12 @@ export class ControlPlane {
     let attempt = this.requireCallAttempt(escalation.callAttemptId);
     if (attempt.status === "ambiguous") attempt = await this.recoverCallAttempt(attempt.id);
     if (!attempt.providerCallId) return this.requireEscalation(escalationId);
-    const outcome = await this.calls.getOutcome(attempt.providerCallId);
-    if (!outcome) return this.requireEscalation(escalationId);
-    this.applyTerminalOutcome(attempt, outcome);
+    const observation = await this.calls.observe(attempt.providerCallId);
+    if (observation.status === "queued" || observation.status === "in_progress") {
+      this.applyActiveObservation(attempt, observation);
+      return this.requireEscalation(escalationId);
+    }
+    this.applyTerminalOutcome(attempt, observation);
     return this.requireEscalation(escalationId);
   }
 
@@ -143,9 +146,11 @@ export class ControlPlane {
     if (["completed", "failed"].includes(attempt.status)) return attempt;
     if (attempt.status === "ambiguous") attempt = await this.recoverCallAttempt(attempt.id);
     if (!attempt.providerCallId) return attempt;
-    const outcome = await this.calls.getOutcome(attempt.providerCallId);
-    if (!outcome) return attempt;
-    return this.applyTerminalOutcome(attempt, outcome);
+    const observation = await this.calls.observe(attempt.providerCallId);
+    if (observation.status === "queued" || observation.status === "in_progress") {
+      return this.applyActiveObservation(attempt, observation);
+    }
+    return this.applyTerminalOutcome(attempt, observation);
   }
 
   ingestProviderWebhook(input: ProviderWebhookInput): ProviderWebhookResult {
@@ -251,6 +256,30 @@ export class ControlPlane {
     const attempt = await this.startCall("owner_decision", escalation.id, `Decision needed from the agent owner. Question: ${escalation.question}${escalation.context ? `\nContext: ${escalation.context}` : ""}`, `decision:${escalation.idempotencyKey}`, { runId: escalation.runId, escalationId: escalation.id, scopeId: escalation.scopeId });
     const next: Escalation = { ...escalation, status: "calling", callAttemptId: attempt.id, deferredReason: undefined, updatedAt: this.isoNow() };
     this.store.escalations.set(next.id, next);
+    return next;
+  }
+
+  private applyActiveObservation(
+    attempt: CallAttempt,
+    observation: Extract<CallProviderObservation, { status: "queued" | "in_progress" }>,
+  ): CallAttempt {
+    if (attempt.providerCallId !== observation.providerCallId) {
+      throw new Error(`Provider observation id mismatch for call attempt ${attempt.id}`);
+    }
+    if (attempt.status !== "queued" && attempt.status !== "in_progress") return attempt;
+    if (attempt.status === observation.status) return attempt;
+    if (attempt.status === "in_progress" && observation.status === "queued") return attempt;
+
+    const next: CallAttempt = { ...attempt, status: "in_progress", updatedAt: this.isoNow() };
+    this.store.callAttempts.set(next.id, next);
+    this.audit("call_attempt_progressed", "provider", "Phone provider reported call in progress", {
+      runId: this.runIdForAttempt(next), callAttemptId: next.id,
+    }, {
+      purpose: next.purpose,
+      provider: next.provider,
+      priorStatus: attempt.status,
+      status: next.status,
+    });
     return next;
   }
 
