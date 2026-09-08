@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import type { CallOutcome } from "./domain.js";
 
 export interface StartCallInput {
@@ -60,6 +61,11 @@ interface FakeCallState {
   observations: number;
 }
 
+function fakeProviderCallId(idempotencyKey: string): string {
+  const digest = createHash("sha256").update(idempotencyKey, "utf8").digest("hex").slice(0, 24);
+  return `fake_call_${digest}`;
+}
+
 export class FakeCallProvider implements CallProvider {
   readonly name = "fake";
   private readonly calls = new Map<string, FakeCallState>();
@@ -81,7 +87,7 @@ export class FakeCallProvider implements CallProvider {
     const existing = this.byIdempotencyKey.get(input.idempotencyKey);
     if (existing) return { ...existing };
 
-    const providerCallId = `fake_call_${this.calls.size + 1}`;
+    const providerCallId = fakeProviderCallId(input.idempotencyKey);
     const result: StartCallResult = { providerCallId, status: this.initialStatus };
     this.byIdempotencyKey.set(input.idempotencyKey, result);
     this.calls.set(providerCallId, {
