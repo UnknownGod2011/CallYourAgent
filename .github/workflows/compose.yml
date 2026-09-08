@@ -81,6 +81,7 @@ jobs:
       - name: Verify stdio MCP against deployed control plane
         env:
           CYA_BASE_URL: http://127.0.0.1:8787
+          CYA_RESTART_CONTROL_PLANE: "true"
         run: |
           npm run build --silent
           node dist/tests/mcp-stdio-deployment-acceptance.js
