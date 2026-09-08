@@ -3,6 +3,7 @@ import { test } from "node:test";
 import {
   credentialForRole,
   scopesForCredentialRole,
+  standardCredentialBundle,
   type ApiCredentialRole,
 } from "../src/credential-roles.js";
 
@@ -45,4 +46,23 @@ test("scope arrays are copied so one integration cannot mutate the shared role p
   first.push("agent:write");
 
   assert.deepEqual(scopesForCredentialRole("operator-read"), ["agent:read", "audit:read"]);
+});
+
+test("standard deployment bundle preserves the four least-privilege role boundaries", () => {
+  const tokens = ["agent-token", "owner-token", "operator-token", "reconciler-token"];
+  const bundle = standardCredentialBundle(() => tokens.shift()!);
+
+  assert.deepEqual(bundle, [
+    { id: "agent", token: "agent-token", scopes: expected.agent },
+    { id: "owner", token: "owner-token", scopes: expected.owner },
+    { id: "operator-read", token: "operator-token", scopes: expected["operator-read"] },
+    { id: "reconciler", token: "reconciler-token", scopes: expected.reconciler },
+  ]);
+  assert.equal(bundle.find((credential) => credential.id === "owner")!.scopes.includes("decision:read"), false);
+  assert.equal(bundle.find((credential) => credential.id === "operator-read")!.scopes.includes("calls:reconcile"), false);
+});
+
+test("standard deployment bundle rejects empty or duplicate generated tokens", () => {
+  assert.throws(() => standardCredentialBundle(() => ""), /empty token/);
+  assert.throws(() => standardCredentialBundle(() => "same-token"), /unique tokens/);
 });
