@@ -61,7 +61,11 @@ Code/test commits made this run:
 
 ## Verification performed
 
-The code/test-bearing commit `8c7af852fc77993d5638f331f58e2a0054ea48a4` triggered all three repository workflows. CI run `34175423493` completed successfully, covering locked dependency installation, TypeScript typecheck, build, and the Node test suite. Compose deployment run `34175423480` and Container run `34175423498` were also triggered for the same commit; they were still running/queued when this progress entry was written, so no unsupported success claim is made here.
+The code/test-bearing commit `8c7af852fc77993d5638f331f58e2a0054ea48a4` triggered all three repository workflows and all completed successfully:
+
+- CI run `34175423493` — `completed` / `success`; locked dependency installation, TypeScript typecheck, build, and Node test suite passed.
+- Compose deployment run `34175423480` — `completed` / `success`; the supported single-instance SQLite deployment/persistence verification passed.
+- Container run `34175423498` — `completed` / `success`; production image build and fake-provider runtime smoke verification passed.
 
 `package.json` has no separate lint script and no migration/schema command. The normal verification path remains typecheck/build/test via CI plus container and Compose deployment workflows.
 
