@@ -2,6 +2,7 @@ import { timingSafeEqual } from "node:crypto";
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
 import { URL } from "node:url";
 import { parseCalleTerminalWebhook } from "./calle-webhook.js";
+import { toOwnerCallbackView } from "./callback-view.js";
 import type { ControlPlane } from "./control-plane.js";
 import { operatorConsoleHtml } from "./operator-ui.js";
 import { getRunOverview } from "./run-overview.js";
@@ -205,15 +206,16 @@ export function createControlPlaneHttpServer(controlPlane: ControlPlane, options
         if (!hasScope(credential, "owner:callback")) return forbidden(res, "owner:callback");
         if (!consumeRateLimit(rateLimits, credential.id, "callback", callbackLimit, rateWindowMs, res)) return;
         const value = record(body);
-        return json(res, 201, await controlPlane.requestOwnerCallback({
+        const attempt = await controlPlane.requestOwnerCallback({
           runId: text(value.runId, "runId"), idempotencyKey: text(value.idempotencyKey, "idempotencyKey"), prompt: optionalText(value.prompt),
-        }));
+        });
+        return json(res, 201, toOwnerCallbackView(attempt));
       }
 
       const callbackMatch = url.pathname.match(/^\/v1\/callbacks\/([^/]+)$/);
       if (req.method === "GET" && callbackMatch) {
         if (!hasScope(credential, "agent:read")) return forbidden(res, "agent:read");
-        return json(res, 200, controlPlane.getCallAttempt(decodeURIComponent(callbackMatch[1]!)));
+        return json(res, 200, toOwnerCallbackView(controlPlane.getCallAttempt(decodeURIComponent(callbackMatch[1]!))));
       }
 
       const reconcileCallbackMatch = url.pathname.match(/^\/v1\/callbacks\/([^/]+)\/reconcile$/);
