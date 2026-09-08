@@ -102,6 +102,7 @@ async function main(): Promise<void> {
       "start_run",
       "report_status",
       "request_owner_decision",
+      "get_escalation_lifecycle_status",
       "get_escalation_status",
       "checkpoint",
       "acknowledge_owner_instructions",
@@ -174,6 +175,21 @@ async function main(): Promise<void> {
     assert.deepEqual(blockedCheckpoint.unresolvedBlockingScopes, ["release-approval"]);
     assert.deepEqual(blockedCheckpoint.queuedInstructions, []);
 
+    const lifecycleBeforeRestartResult = await client.callTool({
+      name: "get_escalation_lifecycle_status",
+      arguments: { escalationId: escalation.id },
+    });
+    assert.notEqual(lifecycleBeforeRestartResult.isError, true);
+    const lifecycleBeforeRestart = parseToolText(lifecycleBeforeRestartResult) as {
+      status: string;
+      callStatus?: string;
+    };
+    assert.equal(lifecycleBeforeRestart.status, "calling");
+    assert.ok(
+      lifecycleBeforeRestart.callStatus === "queued" || lifecycleBeforeRestart.callStatus === "in_progress",
+      `expected active decision call before restart, got ${String(lifecycleBeforeRestart.callStatus)}`,
+    );
+
     const deniedCallback = await client.callTool({
       name: "request_owner_callback",
       arguments: {
@@ -184,6 +200,39 @@ async function main(): Promise<void> {
     assert.equal(deniedCallback.isError, true);
     const deniedCallbackBody = parseToolText(deniedCallback) as { status?: number };
     assert.equal(deniedCallbackBody.status, 403);
+
+    const decisionRestarted = await restartControlPlaneIfRequested(baseUrl);
+
+    if (decisionRestarted) {
+      const lifecycleAfterRestartResult = await client.callTool({
+        name: "get_escalation_lifecycle_status",
+        arguments: { escalationId: escalation.id },
+      });
+      assert.notEqual(lifecycleAfterRestartResult.isError, true);
+      const lifecycleAfterRestart = parseToolText(lifecycleAfterRestartResult) as {
+        status: string;
+        callStatus?: string;
+      };
+      assert.equal(lifecycleAfterRestart.status, "calling");
+      assert.ok(
+        lifecycleAfterRestart.callStatus === "queued" || lifecycleAfterRestart.callStatus === "in_progress",
+        `expected restored active decision call after restart, got ${String(lifecycleAfterRestart.callStatus)}`,
+      );
+
+      const stillBlockedResult = await client.callTool({
+        name: "checkpoint",
+        arguments: { runId: run.id, consume: false },
+      });
+      assert.notEqual(stillBlockedResult.isError, true);
+      const stillBlocked = parseToolText(stillBlockedResult) as {
+        run: { currentScope?: string };
+        unresolvedBlockingScopes: string[];
+        queuedInstructions: unknown[];
+      };
+      assert.equal(stillBlocked.run.currentScope, "documentation");
+      assert.deepEqual(stillBlocked.unresolvedBlockingScopes, ["release-approval"]);
+      assert.deepEqual(stillBlocked.queuedInstructions, []);
+    }
 
     const reconciledDecision = await jsonRequest(
       baseUrl,
@@ -205,6 +254,19 @@ async function main(): Promise<void> {
     assert.equal(decisionState.escalation.status, "resolved");
     assert.equal(decisionState.decision?.answer, "Proceed with the requested scope.");
     assert.equal(decisionState.decision?.structured?.decision, "proceed");
+
+    const repeatedDecision = await client.callTool({
+      name: "get_escalation_status",
+      arguments: { escalationId: escalation.id },
+    });
+    assert.notEqual(repeatedDecision.isError, true);
+    const repeatedDecisionState = parseToolText(repeatedDecision) as {
+      escalation: { status: string };
+      decision?: { id?: string; answer?: string };
+    };
+    assert.equal(repeatedDecisionState.escalation.status, "resolved");
+    assert.equal(repeatedDecisionState.decision?.id, decisionState.decision && "id" in decisionState.decision ? decisionState.decision.id : repeatedDecisionState.decision?.id);
+    assert.equal(repeatedDecisionState.decision?.answer, "Proceed with the requested scope.");
 
     const releasedCheckpointResult = await client.callTool({
       name: "checkpoint",
@@ -237,7 +299,7 @@ async function main(): Promise<void> {
     );
     assert.equal(reconciledCallback.status, 200);
 
-    const restarted = await restartControlPlaneIfRequested(baseUrl);
+    const steeringRestarted = await restartControlPlaneIfRequested(baseUrl);
 
     const steeringCheckpointResult = await client.callTool({
       name: "checkpoint",
@@ -290,7 +352,7 @@ async function main(): Promise<void> {
       arguments: { runId: run.id, limit: 100 },
     });
     assert.notEqual(auditResult.isError, true);
-    const auditEvents = parseToolText(auditResult) as Array<{ type: string }>;
+    const auditEvents = parseToolText(auditResult) as Array<{ type: string; escalationId?: string }>;
     const eventTypes = new Set(auditEvents.map((event) => event.type));
     for (const expected of [
       "escalation_created",
@@ -302,6 +364,11 @@ async function main(): Promise<void> {
       assert.ok(eventTypes.has(expected), `missing audit event ${expected}`);
     }
     assert.equal(
+      auditEvents.filter((event) => event.type === "owner_decision_recorded" && event.escalationId === escalation.id).length,
+      1,
+      "restart/retry must not duplicate the MCP-raised owner decision",
+    );
+    assert.equal(
       auditEvents.filter((event) => event.type === "owner_instruction_consumed").length,
       1,
       "repeated exact acknowledgement must not duplicate consumption audit state",
@@ -309,7 +376,8 @@ async function main(): Promise<void> {
 
     process.stdout.write(JSON.stringify({
       ok: true,
-      restartedControlPlane: restarted,
+      restartedDuringDecision: decisionRestarted,
+      restartedAfterCallback: steeringRestarted,
       runId: run.id,
       escalationId: escalation.id,
       callbackId: callback.id,
