@@ -250,8 +250,8 @@ async function main(): Promise<void> {
       arguments: { runId: run.id, limit: 100 },
     });
     assert.notEqual(auditResult.isError, true);
-    const audit = parseToolText(auditResult) as { events: Array<{ type: string }> };
-    const eventTypes = new Set(audit.events.map((event) => event.type));
+    const auditEvents = parseToolText(auditResult) as Array<{ type: string }>;
+    const eventTypes = new Set(auditEvents.map((event) => event.type));
     for (const expected of [
       "escalation_created",
       "owner_decision_recorded",
