@@ -95,7 +95,7 @@ export class CalleCallProvider implements CallProvider {
     });
 
     if (!response.ok) {
-      throw new Error(`CALL-E create failed (${response.status}): ${await safeText(response)}`);
+      throw providerHttpError("create", response);
     }
 
     const call = await parseCall(response);
@@ -117,7 +117,7 @@ export class CalleCallProvider implements CallProvider {
     });
 
     if (!response.ok) {
-      throw new Error(`CALL-E get failed (${response.status}): ${await safeText(response)}`);
+      throw providerHttpError("get", response);
     }
 
     const call = await parseCall(response);
@@ -179,10 +179,14 @@ function isStatus(value: unknown): value is CalleStatus {
   return value === "queued" || value === "in_progress" || value === "completed" || value === "failed" || value === "canceled";
 }
 
-async function safeText(response: Response): Promise<string> {
-  try {
-    return (await response.text()).slice(0, 500);
-  } catch {
-    return "unreadable response";
-  }
+function providerHttpError(operation: "create" | "get", response: Response): Error {
+  const requestId = privacySafeRequestId(response.headers.get("x-request-id"));
+  const suffix = requestId ? ` [request-id: ${requestId}]` : "";
+  return new Error(`CALL-E ${operation} failed (${response.status})${suffix}`);
+}
+
+function privacySafeRequestId(value: string | null): string | undefined {
+  const trimmed = value?.trim();
+  if (!trimmed || !/^[A-Za-z0-9._:-]{1,128}$/.test(trimmed)) return undefined;
+  return trimmed;
 }

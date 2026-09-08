@@ -70,6 +70,60 @@ test("CALL-E provider returns null while active and maps terminal failure", asyn
   assert.equal(failed?.structured?.failureCode, "unreachable");
 });
 
+test("CALL-E create HTTP errors never copy provider response bodies into application errors", async () => {
+  const apiKey = "super-secret-api-key";
+  const ownerPhone = "+15551234567";
+  const webhookUrl = "https://cya.example.invalid/webhooks/calle?token=secret-webhook-token";
+  const task = "Private owner-decision context that must not reach logs";
+  const echoedBody = JSON.stringify({ apiKey, ownerPhone, webhookUrl, task });
+  const fetchImpl = (async () => new Response(echoedBody, {
+    status: 400,
+    headers: { "x-request-id": "req_safe-123" },
+  })) as typeof fetch;
+  const provider = new CalleCallProvider({ apiKey, ownerPhone, webhookUrl, fetchImpl });
+
+  await assert.rejects(
+    provider.start({
+      idempotencyKey: "decision:redaction",
+      purpose: "owner_decision",
+      task,
+      metadata: { runId: "run_private" },
+    }),
+    (error: unknown) => {
+      assert.ok(error instanceof Error);
+      assert.equal(error.message, "CALL-E create failed (400) [request-id: req_safe-123]");
+      for (const secret of [apiKey, ownerPhone, webhookUrl, task, "secret-webhook-token"]) {
+        assert.equal(error.message.includes(secret), false);
+      }
+      return true;
+    },
+  );
+});
+
+test("CALL-E get HTTP errors ignore unsafe request ids and provider response bodies", async () => {
+  const echoedSensitiveBody = "owner phone +15557654321 and private callback transcript";
+  const fetchImpl = (async () => new Response(echoedSensitiveBody, {
+    status: 503,
+    headers: { "x-request-id": "unsafe request id with spaces" },
+  })) as typeof fetch;
+  const provider = new CalleCallProvider({
+    apiKey: "another-secret-key",
+    ownerPhone: "+15557654321",
+    fetchImpl,
+  });
+
+  await assert.rejects(
+    provider.getOutcome("call_private"),
+    (error: unknown) => {
+      assert.ok(error instanceof Error);
+      assert.equal(error.message, "CALL-E get failed (503)");
+      assert.equal(error.message.includes(echoedSensitiveBody), false);
+      assert.equal(error.message.includes("+15557654321"), false);
+      return true;
+    },
+  );
+});
+
 test("CALL-E provider aborts a hung create request at the configured deadline", async () => {
   const fetchImpl = hangingFetch();
   const provider = new CalleCallProvider({
