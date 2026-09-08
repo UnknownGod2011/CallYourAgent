@@ -76,7 +76,11 @@ test("Claude-style work loop keeps independent work moving and exactly acknowled
     })) as Record<string, unknown>;
     assert.equal(unrelatedStatus.currentScope, "documentation");
 
-    provider.complete("fake_call_1", {
+    const decisionEscalation = controlPlane.getEscalation(escalation.id as string);
+    assert.ok(decisionEscalation.callAttemptId);
+    const decisionAttempt = controlPlane.getCallAttempt(decisionEscalation.callAttemptId);
+    assert.ok(decisionAttempt.providerCallId);
+    provider.complete(decisionAttempt.providerCallId, {
       status: "completed",
       answer: "Use provider B",
       structured: { choice: "provider-b", approved: true },
@@ -119,7 +123,9 @@ test("Claude-style work loop keeps independent work moving and exactly acknowled
       },
     })) as Record<string, unknown>;
 
-    provider.complete("fake_call_2", {
+    const callbackAttempt = controlPlane.getCallAttempt(callback.id as string);
+    assert.ok(callbackAttempt.providerCallId);
+    provider.complete(callbackAttempt.providerCallId, {
       status: "completed",
       instructions: [
         "Finish the checkout integration, but do not start the analytics dashboard yet.",
