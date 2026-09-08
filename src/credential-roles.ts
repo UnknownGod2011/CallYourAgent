@@ -9,6 +9,13 @@ const ROLE_SCOPES: Record<ApiCredentialRole, readonly ApiScope[]> = {
   reconciler: ["calls:reconcile"],
 };
 
+const STANDARD_ROLE_IDS: readonly [ApiCredentialRole, string][] = [
+  ["agent", "agent"],
+  ["owner", "owner"],
+  ["operator-read", "operator-read"],
+  ["reconciler", "reconciler"],
+];
+
 /**
  * Returns a fresh least-privilege scope list for a standard CallYourAgent role.
  *
@@ -35,4 +42,22 @@ export function credentialForRole(
     token,
     scopes: scopesForCredentialRole(role),
   };
+}
+
+/**
+ * Builds the recommended four-credential deployment split from a token factory.
+ * A factory is injected so tests can stay deterministic while the CLI can use
+ * cryptographically random values. The returned ids are stable and tokens are
+ * rejected if the supplied factory accidentally repeats a value.
+ */
+export function standardCredentialBundle(tokenFactory: () => string): ApiCredential[] {
+  const credentials = STANDARD_ROLE_IDS.map(([role, id]) => {
+    const token = tokenFactory();
+    if (!token.trim()) throw new Error("Credential token factory returned an empty token");
+    return credentialForRole(id, token, role);
+  });
+  if (new Set(credentials.map((credential) => credential.token)).size !== credentials.length) {
+    throw new Error("Credential token factory must return unique tokens");
+  }
+  return credentials;
 }
