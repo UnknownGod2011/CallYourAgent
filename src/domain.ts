@@ -124,13 +124,18 @@ export interface CallAttempt {
   updatedAt: IsoDate;
 }
 
-export interface CallOutcome {
-  status: "completed" | "failed" | "ambiguous";
+export interface CallOutcomePayload {
   providerCallId?: string;
   answer?: string;
   instructions?: string[];
   structured?: Record<string, unknown>;
 }
+
+export type CallOutcome = CallOutcomePayload & (
+  | { status: "completed" }
+  | { status: "failed" }
+  | { status: "ambiguous" }
+);
 
 export interface AuditEvent {
   id: Id;
