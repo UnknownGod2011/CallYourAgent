@@ -1,5 +1,5 @@
 import type { CallOutcome } from "./domain.js";
-import type { CallProvider, StartCallInput, StartCallResult } from "./call-provider.js";
+import type { CallProvider, CallProviderObservation, StartCallInput, StartCallResult } from "./call-provider.js";
 
 type FetchLike = typeof fetch;
 
@@ -103,7 +103,7 @@ export class CalleCallProvider implements CallProvider {
     };
   }
 
-  async getOutcome(providerCallId: string): Promise<CallOutcome | null> {
+  async observe(providerCallId: string): Promise<CallProviderObservation> {
     const response = await this.fetchImpl(`${this.baseUrl}/v1/calls/${encodeURIComponent(providerCallId)}`, {
       method: "GET",
       headers: { Authorization: `Bearer ${this.options.apiKey}` },
@@ -115,7 +115,9 @@ export class CalleCallProvider implements CallProvider {
     }
 
     const call = await parseCall(response);
-    if (call.status === "queued" || call.status === "in_progress") return null;
+    if (call.status === "queued" || call.status === "in_progress") {
+      return { providerCallId: call.id, status: call.status };
+    }
     if (call.status === "failed" || call.status === "canceled") {
       return {
         status: "failed",
@@ -140,6 +142,11 @@ export class CalleCallProvider implements CallProvider {
       instructions,
       structured,
     };
+  }
+
+  async getOutcome(providerCallId: string): Promise<CallOutcome | null> {
+    const observation = await this.observe(providerCallId);
+    return observation.status === "queued" || observation.status === "in_progress" ? null : observation;
   }
 }
 
