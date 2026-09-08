@@ -65,6 +65,7 @@ The current MCP tools are:
 - `report_status`
 - `get_audit_timeline`
 - `request_owner_decision`
+- `get_escalation_lifecycle_status`
 - `get_escalation_status`
 - `checkpoint`
 - `acknowledge_owner_instructions`
@@ -72,7 +73,13 @@ The current MCP tools are:
 - `reconcile_escalation`
 - `reconcile_callback`
 
+`get_escalation_lifecycle_status` mirrors the privacy-safe `GET /v1/escalations/:id/status` HTTP contract. It requires only `agent:read` and returns operational lifecycle metadata without the escalation question/context, provider correlation, or owner decision answer. Owner/operator integrations should use this tool when they only need to observe whether an escalation is pending, calling, resolved, expired, or failed.
+
+`get_escalation_status` is deliberately different: it is the decision-consumption surface for the agent that raised the escalation and requires both `agent:read` and `decision:read`. It may return the owner's durable answer and structured result. Do not grant an owner/operator credential `decision:read` merely so it can inspect lifecycle state.
+
 `get_audit_timeline` is read-only. It exposes operational events and safe metadata, not full call transcripts, escalation context, owner decision answers, or owner instruction text.
+
+MCP tool discovery is not an authorization boundary. A server may advertise tools that the configured bearer credential cannot execute; the HTTP control plane remains authoritative and returns a scoped authorization error. This keeps the MCP adapter thin and prevents a second platform-specific permission system from diverging from the HTTP/SDK contract.
 
 Build and run the stdio adapter:
 
@@ -104,10 +111,11 @@ The intended workflow is checkpoint-based rather than fake mid-generation interr
 2. `report_status` between meaningful work units;
 3. call `request_owner_decision` only for genuinely important human judgment;
 4. continue unrelated scopes when the escalation is non-blocking or branch-scoped;
-5. call `checkpoint` between work units without consuming instructions;
-6. incorporate the returned queued instructions at that safe boundary, then call `acknowledge_owner_instructions` with exactly those ids;
-7. when the owner independently requests a callback, CALL-E captures steering as queued instructions, which the same checkpoint/acknowledgement loop consumes safely;
-8. optionally inspect `get_audit_timeline` to explain prior deferrals/call transitions without changing agent state.
+5. use `get_escalation_status` when the agent needs to consume a durable owner answer; use `get_escalation_lifecycle_status` for privacy-safe observation where the answer is not needed;
+6. call `checkpoint` between work units without consuming instructions;
+7. incorporate the returned queued instructions at that safe boundary, then call `acknowledge_owner_instructions` with exactly those ids;
+8. when the owner independently requests a callback, CALL-E captures steering as queued instructions, which the same checkpoint/acknowledgement loop consumes safely;
+9. optionally inspect `get_audit_timeline` to explain prior deferrals/call transitions without changing agent state.
 
 This proves the product semantics without requiring Claude Code to support undocumented mid-token interruption.
 
