@@ -34,6 +34,7 @@ test("run overview exposes blocking scopes and queued count without owner instru
   assert.equal(overview.run.currentScope, "implementation");
   assert.deepEqual(overview.unresolvedBlockingScopes, ["production-deploy"]);
   assert.equal(overview.queuedInstructionCount, 2);
+  assert.equal(overview.latestOwnerCallback, null);
 
   const serialized = JSON.stringify(overview);
   assert.doesNotMatch(serialized, /safer rollback strategy/);
@@ -42,4 +43,30 @@ test("run overview exposes blocking scopes and queued count without owner instru
   const checkpoint = controlPlane.checkpoint(run.id);
   assert.equal(checkpoint.queuedInstructions.length, 2);
   assert.ok(checkpoint.queuedInstructions.every((instruction) => instruction.status === "queued"));
+});
+
+test("run overview projects latest owner callback status without callback task content", async () => {
+  const provider = new FakeCallProvider();
+  const controlPlane = new ControlPlane(new InMemoryControlPlaneStore(), provider);
+  const agent = controlPlane.registerAgent({ name: "worker", platform: "test", ownerId: "owner-1" });
+  const run = controlPlane.startRun(agent.id, "Investigating production regression", "production-deploy");
+
+  const callback = await controlPlane.requestOwnerCallback({
+    runId: run.id,
+    prompt: "Brief me on the sensitive customer rollback plan",
+    idempotencyKey: "overview-callback",
+  });
+
+  const overview = getRunOverview(controlPlane, run.id);
+  assert.deepEqual(overview.latestOwnerCallback, {
+    id: callback.id,
+    status: callback.status,
+    createdAt: callback.createdAt,
+    updatedAt: callback.updatedAt,
+  });
+
+  const serialized = JSON.stringify(overview);
+  assert.doesNotMatch(serialized, /sensitive customer rollback plan/);
+  assert.doesNotMatch(serialized, /Current agent status/);
+  assert.doesNotMatch(serialized, /request/);
 });
