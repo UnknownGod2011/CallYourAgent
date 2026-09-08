@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { execFileSync } from "node:child_process";
 import { Client } from "@modelcontextprotocol/client";
 import { StdioClientTransport } from "@modelcontextprotocol/client/stdio";
 
@@ -40,6 +41,32 @@ async function jsonRequest(
     status: response.status,
     body: text ? JSON.parse(text) : undefined,
   };
+}
+
+async function waitForReady(baseUrl: string): Promise<void> {
+  let lastError: unknown;
+  for (let attempt = 0; attempt < 60; attempt += 1) {
+    try {
+      const response = await fetch(new URL("/ready", baseUrl));
+      if (response.ok) return;
+      lastError = new Error(`readiness returned HTTP ${response.status}`);
+    } catch (error) {
+      lastError = error;
+    }
+    await new Promise((resolve) => setTimeout(resolve, 500));
+  }
+  throw new Error(`control plane did not become ready after restart: ${String(lastError)}`);
+}
+
+async function restartControlPlaneIfRequested(baseUrl: string): Promise<boolean> {
+  if (process.env.CYA_RESTART_CONTROL_PLANE?.trim() !== "true") return false;
+  execFileSync(
+    "docker",
+    ["compose", "-f", "deploy/compose.yml", "restart", "callyouragent"],
+    { cwd: process.cwd(), stdio: "inherit" },
+  );
+  await waitForReady(baseUrl);
+  return true;
 }
 
 async function main(): Promise<void> {
@@ -210,10 +237,13 @@ async function main(): Promise<void> {
     );
     assert.equal(reconciledCallback.status, 200);
 
+    const restarted = await restartControlPlaneIfRequested(baseUrl);
+
     const steeringCheckpointResult = await client.callTool({
       name: "checkpoint",
       arguments: { runId: run.id, consume: false },
     });
+    assert.notEqual(steeringCheckpointResult.isError, true);
     const steeringCheckpoint = parseToolText(steeringCheckpointResult) as {
       unresolvedBlockingScopes: string[];
       queuedInstructions: Array<{ id: string; text: string; status: string }>;
@@ -233,6 +263,16 @@ async function main(): Promise<void> {
     assert.equal(acknowledged.length, 1);
     assert.equal(acknowledged[0]?.id, instruction.id);
     assert.equal(acknowledged[0]?.status, "consumed");
+
+    const repeatedAckResult = await client.callTool({
+      name: "acknowledge_owner_instructions",
+      arguments: { runId: run.id, instructionIds: [instruction.id] },
+    });
+    assert.notEqual(repeatedAckResult.isError, true);
+    const repeatedAcknowledged = parseToolText(repeatedAckResult) as Array<{ id: string; status: string }>;
+    assert.equal(repeatedAcknowledged.length, 1);
+    assert.equal(repeatedAcknowledged[0]?.id, instruction.id);
+    assert.equal(repeatedAcknowledged[0]?.status, "consumed");
 
     const finalCheckpointResult = await client.callTool({
       name: "checkpoint",
@@ -261,9 +301,15 @@ async function main(): Promise<void> {
     ]) {
       assert.ok(eventTypes.has(expected), `missing audit event ${expected}`);
     }
+    assert.equal(
+      auditEvents.filter((event) => event.type === "owner_instruction_consumed").length,
+      1,
+      "repeated exact acknowledgement must not duplicate consumption audit state",
+    );
 
     process.stdout.write(JSON.stringify({
       ok: true,
+      restartedControlPlane: restarted,
       runId: run.id,
       escalationId: escalation.id,
       callbackId: callback.id,
