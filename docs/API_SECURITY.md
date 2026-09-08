@@ -8,7 +8,7 @@ CallYourAgent's HTTP boundary separates ordinary agent work from operations that
 
 Supported scopes are:
 
-- `agent:read` — read runs, escalation metadata, and privacy-safe callback state;
+- `agent:read` — read runs, privacy-safe escalation lifecycle metadata, and privacy-safe callback state;
 - `agent:write` — register agents, start/report runs, checkpoint, and request owner decisions;
 - `decision:read` — read the owner's durable decision answer and structured result for an escalation; this route also requires `agent:read`;
 - `audit:read` — read the privacy-aware run audit timeline;
@@ -40,6 +40,14 @@ GET /v1/auth/capabilities
 The response contains only the stable credential id and its effective concrete scopes. It never returns bearer-token material. A legacy trusted `*` credential is projected as the six concrete capabilities rather than exposing the wildcard itself. This keeps owner/operator surfaces from needing to infer privileges from token labels or from probing side-effecting endpoints.
 
 The endpoint is authenticated, side-effect free, and returned with `Cache-Control: no-store`. It does not grant access to any run data on its own; normal route-level scope checks remain authoritative.
+
+## Escalation lifecycle privacy
+
+`GET /v1/escalations/:id/status` is the privacy-safe individual escalation observation endpoint. It requires only `agent:read` and returns an `EscalationLifecycleView` containing lifecycle fields needed by an owner/operator surface: escalation/run/scope ids, blocking flag, priority, escalation status, privacy-safe call status, optional policy deferral reason, and timestamps.
+
+It deliberately does **not** return the escalation question, context, idempotency key, call-attempt id, decision id, provider call id, replayable phone task, provider metadata, or the owner's decision answer/structured result. The TypeScript client exposes the same boundary as `getEscalationLifecycleStatus`.
+
+This route exists so observational credentials never need to be granted `decision:read` merely to inspect whether one escalation is pending, calling, resolved, expired, or failed. The richer decision-result route remains separately authorized.
 
 ## Owner decision response privacy
 
