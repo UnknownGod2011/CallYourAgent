@@ -55,11 +55,12 @@ test("SQLite-backed owner/read credential split and privacy-safe callback overvi
       idempotencyKey: "sqlite-owner-callback-restart",
       prompt: "Give me the current release status and capture my private steering.",
     });
-    assert.ok(callback.providerCallId);
+    const persistedCallback = firstStore.callAttempts.get(callback.id);
+    assert.ok(persistedCallback?.providerCallId);
 
-    provider.complete(callback.providerCallId!, {
+    provider.complete(persistedCallback.providerCallId!, {
       status: "completed",
-      providerCallId: callback.providerCallId,
+      providerCallId: persistedCallback.providerCallId,
       instructions: ["Keep this private: roll out to five percent first"],
     });
     await reconciler.reconcileCallback(callback.id);
