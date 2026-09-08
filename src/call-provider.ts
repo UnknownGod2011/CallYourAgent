@@ -12,10 +12,9 @@ export interface StartCallResult {
   status: "queued" | "in_progress" | "completed";
 }
 
-export interface ActiveCallObservation {
-  providerCallId: string;
-  status: "queued" | "in_progress";
-}
+export type ActiveCallObservation =
+  | { providerCallId: string; status: "queued" }
+  | { providerCallId: string; status: "in_progress" };
 
 export type CallProviderObservation = ActiveCallObservation | CallOutcome;
 
@@ -75,7 +74,9 @@ export class FakeCallProvider implements CallProvider {
     const call = this.calls.get(providerCallId);
     if (!call) throw new Error(`Unknown fake call: ${providerCallId}`);
     if (call.outcome) return { ...call.outcome };
-    return { providerCallId: call.id, status: call.status };
+    return call.status === "queued"
+      ? { providerCallId: call.id, status: "queued" }
+      : { providerCallId: call.id, status: "in_progress" };
   }
 
   async getOutcome(providerCallId: string): Promise<CallOutcome | null> {
