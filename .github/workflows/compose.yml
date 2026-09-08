@@ -111,11 +111,43 @@ jobs:
           escalation_id=$(jq -er '.id' <<<"$escalation_json")
           echo "CYA_CI_ESCALATION_ID=$escalation_id" >> "$GITHUB_ENV"
 
+          lifecycle=$(curl --fail --silent \
+            --header "Authorization: Bearer $CYA_OPERATOR_TOKEN" \
+            "http://127.0.0.1:8787/v1/escalations/$escalation_id/status")
+          jq -e '.status == "calling" and (.callStatus == "queued" or .callStatus == "in_progress")' <<<"$lifecycle" >/dev/null
+
           checkpoint=$(curl --fail --silent \
             --header "Authorization: Bearer $CYA_AGENT_TOKEN" \
             --header "Content-Type: application/json" \
             --data '{}' \
             "http://127.0.0.1:8787/v1/runs/$run_id/checkpoint")
+          jq -e '.run.currentScope == "documentation" and .unresolvedBlockingScopes == ["release-approval"] and (.queuedInstructions | length) == 0' <<<"$checkpoint" >/dev/null
+
+      - name: Restart while owner decision call is still active
+        run: |
+          docker volume inspect "$CYA_VOLUME_NAME" >/dev/null
+          docker compose -f deploy/compose.yml restart callyouragent
+          for attempt in $(seq 1 30); do
+            if curl --fail --silent http://127.0.0.1:8787/health >/dev/null; then
+              break
+            fi
+            if [ "$attempt" = "30" ]; then
+              docker compose -f deploy/compose.yml logs
+              exit 1
+            fi
+            sleep 1
+          done
+
+          lifecycle=$(curl --fail --silent \
+            --header "Authorization: Bearer $CYA_OPERATOR_TOKEN" \
+            "http://127.0.0.1:8787/v1/escalations/$CYA_CI_ESCALATION_ID/status")
+          jq -e '.status == "calling" and (.callStatus == "queued" or .callStatus == "in_progress")' <<<"$lifecycle" >/dev/null
+
+          checkpoint=$(curl --fail --silent \
+            --header "Authorization: Bearer $CYA_AGENT_TOKEN" \
+            --header "Content-Type: application/json" \
+            --data '{}' \
+            "http://127.0.0.1:8787/v1/runs/$CYA_CI_RUN_ID/checkpoint")
           jq -e '.run.currentScope == "documentation" and .unresolvedBlockingScopes == ["release-approval"] and (.queuedInstructions | length) == 0' <<<"$checkpoint" >/dev/null
 
       - name: Reconcile owner decision and prove only blocked branch releases
@@ -148,7 +180,16 @@ jobs:
             "http://127.0.0.1:8787/v1/runs/$CYA_CI_RUN_ID/checkpoint")
           jq -e '.run.currentScope == "documentation" and (.unresolvedBlockingScopes | length) == 0' <<<"$checkpoint" >/dev/null
 
-      - name: Owner requests context-aware callback and reconciler queues steering
+          audit_json=$(curl --fail --silent \
+            --header "Authorization: Bearer $CYA_OPERATOR_TOKEN" \
+            "http://127.0.0.1:8787/v1/runs/$CYA_CI_RUN_ID/audit?limit=500")
+          jq -e --arg escalationId "$CYA_CI_ESCALATION_ID" '
+            ([.events[] | select(.escalationId == $escalationId and .type == "call_attempt_created")] | length) == 1 and
+            ([.events[] | select(.escalationId == $escalationId and .type == "owner_decision_recorded")] | length) == 1 and
+            ([.events[] | select(.type == "call_attempt_started" and .details.purpose == "owner_decision")] | length) == 1
+          ' <<<"$audit_json" >/dev/null
+
+      - name: Owner requests context-aware callback
         run: |
           status=$(curl --silent --output /dev/null --write-out '%{http_code}' \
             --header "Authorization: Bearer $CYA_AGENT_TOKEN" \
@@ -164,6 +205,7 @@ jobs:
             http://127.0.0.1:8787/v1/callbacks)
           callback_id=$(jq -er '.id' <<<"$callback_json")
           echo "CYA_CI_CALLBACK_ID=$callback_id" >> "$GITHUB_ENV"
+          jq -e '.status == "queued" or .status == "in_progress"' <<<"$callback_json" >/dev/null
 
           status=$(curl --silent --output /dev/null --write-out '%{http_code}' \
             --request POST \
@@ -171,11 +213,65 @@ jobs:
             "http://127.0.0.1:8787/v1/callbacks/$callback_id/reconcile")
           test "$status" = "403"
 
+      - name: Restart while owner callback call is still active
+        run: |
+          docker volume inspect "$CYA_VOLUME_NAME" >/dev/null
+          docker compose -f deploy/compose.yml restart callyouragent
+          for attempt in $(seq 1 30); do
+            if curl --fail --silent http://127.0.0.1:8787/health >/dev/null; then
+              break
+            fi
+            if [ "$attempt" = "30" ]; then
+              docker compose -f deploy/compose.yml logs
+              exit 1
+            fi
+            sleep 1
+          done
+
+          callback=$(curl --fail --silent \
+            --header "Authorization: Bearer $CYA_OWNER_TOKEN" \
+            "http://127.0.0.1:8787/v1/callbacks/$CYA_CI_CALLBACK_ID")
+          jq -e '.status == "queued" or .status == "in_progress"' <<<"$callback" >/dev/null
+
+          checkpoint=$(curl --fail --silent \
+            --header "Authorization: Bearer $CYA_AGENT_TOKEN" \
+            --header "Content-Type: application/json" \
+            --data '{}' \
+            "http://127.0.0.1:8787/v1/runs/$CYA_CI_RUN_ID/checkpoint")
+          jq -e '(.queuedInstructions | length) == 0 and (.unresolvedBlockingScopes | length) == 0' <<<"$checkpoint" >/dev/null
+
+      - name: Reconciler completes restored callback and queues steering exactly once
+        run: |
           reconciled=$(curl --fail --silent \
             --request POST \
             --header "Authorization: Bearer $CYA_RECONCILER_TOKEN" \
-            "http://127.0.0.1:8787/v1/callbacks/$callback_id/reconcile")
+            "http://127.0.0.1:8787/v1/callbacks/$CYA_CI_CALLBACK_ID/reconcile")
           jq -e '.status == "completed"' <<<"$reconciled" >/dev/null
+
+          retry=$(curl --fail --silent \
+            --request POST \
+            --header "Authorization: Bearer $CYA_RECONCILER_TOKEN" \
+            "http://127.0.0.1:8787/v1/callbacks/$CYA_CI_CALLBACK_ID/reconcile")
+          jq -e '.status == "completed"' <<<"$retry" >/dev/null
+
+          checkpoint=$(curl --fail --silent \
+            --header "Authorization: Bearer $CYA_AGENT_TOKEN" \
+            --header "Content-Type: application/json" \
+            --data '{}' \
+            "http://127.0.0.1:8787/v1/runs/$CYA_CI_RUN_ID/checkpoint")
+          jq -e '(.queuedInstructions | length) == 1 and .queuedInstructions[0].status == "queued"' <<<"$checkpoint" >/dev/null
+          instruction_id=$(jq -er '.queuedInstructions[0].id' <<<"$checkpoint")
+          echo "CYA_CI_INSTRUCTION_ID=$instruction_id" >> "$GITHUB_ENV"
+
+          audit_json=$(curl --fail --silent \
+            --header "Authorization: Bearer $CYA_OPERATOR_TOKEN" \
+            "http://127.0.0.1:8787/v1/runs/$CYA_CI_RUN_ID/audit?limit=500")
+          jq -e --arg callbackId "$CYA_CI_CALLBACK_ID" --arg instructionId "$instruction_id" '
+            ([.events[] | select(.callAttemptId == $callbackId and .type == "call_attempt_created")] | length) == 1 and
+            ([.events[] | select(.callAttemptId == $callbackId and .type == "call_attempt_started")] | length) == 1 and
+            ([.events[] | select(.callAttemptId == $callbackId and .type == "call_attempt_completed")] | length) == 1 and
+            ([.events[] | select(.instructionId == $instructionId and .type == "owner_instruction_queued")] | length) == 1
+          ' <<<"$audit_json" >/dev/null
 
       - name: Restart after callback steering is durable
         run: |
@@ -202,7 +298,7 @@ jobs:
             --header "Content-Type: application/json" \
             --data '{}' \
             "http://127.0.0.1:8787/v1/runs/$CYA_CI_RUN_ID/checkpoint")
-          jq -e '(.unresolvedBlockingScopes | length) == 0 and (.queuedInstructions | length) == 1 and .queuedInstructions[0].status == "queued" and .queuedInstructions[0].text == "Continue the current plan and report progress at the next safe checkpoint."' <<<"$checkpoint" >/dev/null
+          jq -e --arg instructionId "$CYA_CI_INSTRUCTION_ID" '(.unresolvedBlockingScopes | length) == 0 and (.queuedInstructions | length) == 1 and .queuedInstructions[0].id == $instructionId and .queuedInstructions[0].status == "queued" and .queuedInstructions[0].text == "Continue the current plan and report progress at the next safe checkpoint."' <<<"$checkpoint" >/dev/null
           instruction_id=$(jq -er '.queuedInstructions[0].id' <<<"$checkpoint")
 
           ack=$(curl --fail --silent \
@@ -211,6 +307,13 @@ jobs:
             --data "$(jq -nc --arg instructionId "$instruction_id" '{instructionIds:[$instructionId]}')" \
             "http://127.0.0.1:8787/v1/runs/$CYA_CI_RUN_ID/instructions/ack")
           jq -e --arg instructionId "$instruction_id" '.instructions | length == 1 and .[0].id == $instructionId and .[0].status == "consumed"' <<<"$ack" >/dev/null
+
+          retry_ack=$(curl --fail --silent \
+            --header "Authorization: Bearer $CYA_AGENT_TOKEN" \
+            --header "Content-Type: application/json" \
+            --data "$(jq -nc --arg instructionId "$instruction_id" '{instructionIds:[$instructionId]}')" \
+            "http://127.0.0.1:8787/v1/runs/$CYA_CI_RUN_ID/instructions/ack")
+          jq -e --arg instructionId "$instruction_id" '.instructions | length == 1 and .[0].id == $instructionId and .[0].status == "consumed"' <<<"$retry_ack" >/dev/null
 
           after=$(curl --fail --silent \
             --header "Authorization: Bearer $CYA_AGENT_TOKEN" \
@@ -226,8 +329,12 @@ jobs:
 
           audit_json=$(curl --fail --silent \
             --header "Authorization: Bearer $CYA_OPERATOR_TOKEN" \
-            "http://127.0.0.1:8787/v1/runs/$CYA_CI_RUN_ID/audit")
-          jq -e '.events | length >= 8' <<<"$audit_json" >/dev/null
+            "http://127.0.0.1:8787/v1/runs/$CYA_CI_RUN_ID/audit?limit=500")
+          jq -e --arg instructionId "$instruction_id" '
+            (.events | length) >= 8 and
+            ([.events[] | select(.instructionId == $instructionId and .type == "owner_instruction_queued")] | length) == 1 and
+            ([.events[] | select(.instructionId == $instructionId and .type == "owner_instruction_consumed")] | length) == 1
+          ' <<<"$audit_json" >/dev/null
 
           status=$(curl --silent --output /dev/null --write-out '%{http_code}' \
             --header "Authorization: Bearer $CYA_RECONCILER_TOKEN" \
