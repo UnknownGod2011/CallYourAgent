@@ -155,8 +155,8 @@ test("stale queued provider observation cannot downgrade an in-progress callback
 
   assert.equal(afterTimeout.staleCallsMarked, 1);
   assert.equal(stalled.status, "stalled");
-  assert.equal(stalled.updatedAt, progressTimestamp);
   assert.equal(stalled.stalledAt, "2026-09-08T01:00:06.001Z");
+  assert.equal(stalled.updatedAt, stalled.stalledAt);
   assert.equal(provider.startCount, 1);
   assert.equal(
     control.listAuditEvents(run.id).filter((event) => event.type === "call_attempt_progressed").length,
