@@ -94,8 +94,16 @@ export function createCallYourAgentMcpServer(config: McpServerConfig): McpServer
     catch (error) { return asToolError(error); }
   });
 
+  server.registerTool("get_escalation_lifecycle_status", {
+    description: "Read privacy-safe escalation lifecycle metadata without receiving the owner's decision answer. Suitable for owner/operator observation credentials with agent:read.",
+    inputSchema: z.object({ escalationId: z.string().min(1) }),
+  }, async ({ escalationId }) => {
+    try { return asToolResult(await client.getEscalationLifecycleStatus(escalationId)); }
+    catch (error) { return asToolError(error); }
+  });
+
   server.registerTool("get_escalation_status", {
-    description: "Read the current escalation and any structured owner decision. This is safe to poll at work boundaries.",
+    description: "Read the current escalation and any structured owner decision. Requires decision:read in addition to agent:read and is intended for the agent consuming the answer at a work boundary.",
     inputSchema: z.object({ escalationId: z.string().min(1) }),
   }, async ({ escalationId }) => {
     try { return asToolResult(await client.getEscalationStatus(escalationId)); }
