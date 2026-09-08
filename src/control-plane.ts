@@ -114,6 +114,7 @@ export class ControlPlane {
     let attempt = this.requireCallAttempt(escalation.callAttemptId);
     if (attempt.status === "ambiguous") attempt = await this.recoverCallAttempt(attempt.id);
     if (!attempt.providerCallId) return this.requireEscalation(escalationId);
+    await this.rehydrateProviderCallIfSupported(attempt);
     const observation = await this.calls.observe(attempt.providerCallId);
     if (observation.status === "queued" || observation.status === "in_progress") {
       this.applyActiveObservation(attempt, observation);
@@ -146,6 +147,7 @@ export class ControlPlane {
     if (["completed", "failed"].includes(attempt.status)) return attempt;
     if (attempt.status === "ambiguous") attempt = await this.recoverCallAttempt(attempt.id);
     if (!attempt.providerCallId) return attempt;
+    await this.rehydrateProviderCallIfSupported(attempt);
     const observation = await this.calls.observe(attempt.providerCallId);
     if (observation.status === "queued" || observation.status === "in_progress") {
       return this.applyActiveObservation(attempt, observation);
@@ -304,6 +306,19 @@ export class ControlPlane {
     }
     if (outcome.status === "completed") for (const text of outcome.instructions ?? []) this.enqueueInstruction(attempt.correlationId, text, "callback");
     return finished;
+  }
+
+  private async rehydrateProviderCallIfSupported(attempt: CallAttempt): Promise<void> {
+    if (!this.calls.rehydrate || !attempt.providerCallId) return;
+    if (attempt.status !== "queued" && attempt.status !== "in_progress") return;
+    await this.calls.rehydrate({
+      providerCallId: attempt.providerCallId,
+      status: attempt.status,
+      idempotencyKey: attempt.idempotencyKey,
+      purpose: attempt.purpose,
+      task: attempt.request.task,
+      metadata: { ...attempt.request.metadata },
+    });
   }
 
   private async startCall(purpose: CallAttempt["purpose"], correlationId: string, task: string, idempotencyKey: string, metadata: Record<string, string>): Promise<CallAttempt> {
