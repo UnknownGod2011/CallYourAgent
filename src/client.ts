@@ -11,6 +11,7 @@ import type {
   OwnerInstruction,
 } from "./domain.js";
 import type { OwnerCallbackView } from "./callback-view.js";
+import type { EscalationLifecycleView } from "./escalation-view.js";
 import type { CredentialCapabilities } from "./http-server.js";
 import type { RunOverview } from "./run-overview.js";
 
@@ -132,6 +133,10 @@ export class CallYourAgentClient {
 
   async requestOwnerDecision(input: OwnerDecisionRequest): Promise<Escalation> {
     return this.request("POST", "/v1/escalations", input);
+  }
+
+  async getEscalationLifecycleStatus(escalationId: string): Promise<EscalationLifecycleView> {
+    return this.request("GET", `/v1/escalations/${encodeURIComponent(escalationId)}/status`);
   }
 
   async getEscalationStatus(escalationId: string): Promise<EscalationStatusResult> {
