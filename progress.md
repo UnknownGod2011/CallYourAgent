@@ -6,13 +6,13 @@ CallYourAgent is a durable Node 24 TypeScript control plane for asynchronous two
 
 The repository includes SQLite persistence, deterministic fake and production CALL-E providers, replayable/idempotent call attempts, typed active-provider observations, polling/webhook convergence, scoped authenticated HTTP APIs, a typed TypeScript client, stdio MCP, branch-scoped blocking, call policy/quiet hours/budgets, privacy-aware audit history, bounded lifecycle recovery, fail-closed ambiguous/stalled handling, API abuse controls, graceful shutdown, bounded CALL-E HTTP requests, readiness/liveness surfaces, deterministic end-to-end and operator demos, a production Docker image, and a single-instance persistent-volume Compose deployment.
 
-This run hardened deployment credential ergonomics so an exposed deployment can generate the recommended agent, owner, read-only operator, and reconciler credentials from the same canonical least-privilege role definitions used by the application, rather than hand-copying scope arrays and risking accidental `decision:read` or `calls:reconcile` exposure to browser-facing clients.
+This run closed the deployment-authorization acceptance gap left by the previous credential-generator work. The generated standard four-role credential bundle is now exercised end-to-end through `CYA_API_CREDENTIALS_JSON`, the real runtime environment parser, an actually listening fake-provider HTTP server, capability discovery, successful least-privilege operations, and explicit cross-role denials.
 
 ## Exact repo state inspected this run
 
-The run started from `main` HEAD `acf2ff2257453f91daf7e89341ebda7cf00b9157`.
+The run started from `main` HEAD `0872cbfedd6284beef2881c876aa68ad05b5bae7`.
 
-Before making changes, inspected the complete recursive repository tree and current architecture, including root configuration, GitHub Actions workflows, deployment assets, every documentation file, all source modules, and all tests. Inspected recent commit history through the scoped MCP escalation-boundary work. Checked repository issues and pull requests; there were no current issues or pull requests.
+Before making changes, inspected the complete recursive repository tree and current architecture, including root configuration, all GitHub Actions workflows, deployment assets, every documentation file, all source modules, and all tests. Inspected recent commit history through the scoped credential generator/deployment hardening work. Checked repository issues and pull requests; there were no current open issues or pull requests.
 
 Read in full before implementation:
 
@@ -27,85 +27,54 @@ Read in full before implementation:
 - `docs/OPERATOR_CONSOLE.md`
 - `deploy/README.md`
 
-Also inspected the relevant implementation/configuration and verification surfaces, including `.env.example`, `src/server.ts`, `src/credential-roles.ts`, `package.json`, and `tests/credential-roles.test.ts`.
+Also inspected the relevant runtime/authentication implementation and existing verification surfaces, including `src/server.ts`, `src/http-server.ts`, `src/credential-roles.ts`, `tests/server-runtime.test.ts`, and `tests/credential-capabilities-http.test.ts`.
 
-The previous run's highest-value next action was to strengthen scoped `CYA_API_CREDENTIALS_JSON` deployment examples so the agent, owner, read-only operator, and reconciler credentials can be configured without accidentally granting sensitive decision-read or provider-reconciliation authority to browser-facing surfaces. Inspection confirmed the canonical role presets were already correct and tested, but deployment setup still relied on users manually composing JSON scope arrays; `.env.example` also omitted `decision:read` from its supported-scope comment.
+The previous run's highest-value next action was to connect the generated four-role bundle to the actual runtime boundary: generate credentials, pass them through `CYA_API_CREDENTIALS_JSON`, boot the fake-provider server, inspect effective capabilities, and prove cross-role denials through HTTP. Inspection confirmed the role presets, env parser, and route-level authorization each had focused tests, but no acceptance covered their composition as one deployed runtime.
 
 ## Changes made this run
 
-### Canonical standard credential bundle
+### Generated credential runtime HTTP acceptance
 
-Extended `src/credential-roles.ts` with `standardCredentialBundle(tokenFactory)`.
+Added `tests/generated-credential-runtime-http.test.ts`.
 
-The helper builds exactly four stable credential roles using the existing canonical `credentialForRole` / `scopesForCredentialRole` definitions:
+The test deterministically builds the same standard four-role bundle exposed by the credential generator, serializes it into `CYA_API_CREDENTIALS_JSON`, and starts the actual runtime with:
 
-- `agent` -> `agent:read`, `agent:write`, `decision:read`, `audit:read`;
-- `owner` -> `agent:read`, `audit:read`, `owner:callback`;
-- `operator-read` -> `agent:read`, `audit:read`;
-- `reconciler` -> `calls:reconcile`.
+- `CYA_CALL_PROVIDER=fake`;
+- `CYA_STORE=memory`;
+- no legacy `CYA_API_TOKEN`;
+- an ephemeral TCP port.
 
-It rejects empty generated tokens and duplicate generated tokens. It deliberately does not introduce a second scope map for deployment, so changes to the tested role definitions cannot silently diverge from generated deployment credentials.
+It then exercises the real authenticated HTTP boundary and proves:
 
-### Copy-safe credential generator CLI
+1. every generated credential survives env parsing and reports exactly its expected effective scopes through `GET /v1/auth/capabilities` without returning token material;
+2. the `agent` credential can create an agent and run;
+3. the standard `owner` and `operator-read` credentials can read run state;
+4. the owner credential cannot perform `agent:write` operations;
+5. the operator credential cannot request an owner callback;
+6. the agent credential also cannot use the owner-callback surface merely because it can write agent state;
+7. the owner credential can request a callback through the real callback route;
+8. the owner credential cannot reconcile that callback;
+9. the reconciler credential cannot read ordinary run state or audit history;
+10. the reconciler credential can reconcile the already-created callback;
+11. the operator credential can read the privacy-aware audit timeline.
 
-Added `src/generate-credentials.ts` and the package script:
+The test shuts the owned runtime down in `finally`, so the acceptance also uses the normal runtime lifecycle rather than constructing a detached HTTP adapter fixture.
 
-```text
-npm run --silent credentials:generate
-```
-
-The generator uses Node's `crypto.randomBytes` and emits a single JSON array suitable for the existing `CYA_API_CREDENTIALS_JSON` environment variable. Each standard invocation creates four independent 32-byte random bearer tokens. The exported generator rejects token sizes below 16 bytes.
-
-The generator only prints the credential bundle; it does not persist secrets, alter runtime state, contact CALL-E, or create phone side effects.
-
-### Regression coverage
-
-Extended `tests/credential-roles.test.ts` to prove the generated standard bundle preserves all four exact least-privilege role boundaries and rejects empty/duplicate token factories.
-
-Added `tests/generate-credentials.test.ts` to prove the real generator emits:
-
-- the exact four stable role ids;
-- four unique high-entropy token strings;
-- no wildcard scopes;
-- `decision:read` only where the standard agent needs it;
-- no `decision:read` or `calls:reconcile` on the owner credential;
-- only `calls:reconcile` on the reconciler credential;
-- rejection of an explicitly weak token-size request.
-
-### Deployment/configuration guidance
-
-Updated `.env.example` so its supported-scope comment now includes `decision:read` and points users to the standard generator instead of encouraging hand-authored JSON.
-
-Updated `docs/DEPLOYMENT.md`, `docs/API_SECURITY.md`, and `deploy/README.md` with a copy-safe setup path such as:
-
-```bash
-npm ci
-export CYA_API_CREDENTIALS_JSON="$(npm run --silent credentials:generate)"
-```
-
-The docs explicitly require generated output to be treated as secret material, kept out of browser/client bundles and source control, and regenerated if exposed. They preserve the backwards-compatible full-access `CYA_API_TOKEN` for tightly trusted/local bring-up while recommending scoped credentials for exposed deployments.
+No production authorization behavior was widened or rewritten in this run. The value of the increment is executable proof that the generator, JSON env parser, runtime bootstrap, capability projection, and route-level scope checks agree in one real server process.
 
 ## Verification performed
 
 The automation environment did not provide a local repository checkout suitable for running Node tooling directly, so no local build/test claim was fabricated. Executable verification was performed through the repository's existing GitHub Actions workflows.
 
-The code/test-bearing state at commit `d0db4449250c01305f5a617baec46ceb19c78dae` passed every available verification path:
+The code/test-bearing state at commit `6c701de62034d707b7e36bda40220eac0071ba85` passed every available verification path:
 
-- CI run `34224142694` — success. The repository's Node 24 locked-install/typecheck/build/test workflow completed successfully, including the new credential-bundle and generator tests.
-- Container run `34224142764` — success. Production image build and deterministic fake-provider runtime smoke completed successfully.
-- Compose deployment run `34224142673` — success. Compose validation, fake-provider boot/health, durable authenticated API state, named-volume restart, post-restart persistence verification, and cleanup completed successfully.
+- CI run `34229604827` — success. Node 24 setup, locked dependency install, and the repository's combined TypeScript typecheck/build/test step completed successfully, including the new generated-credential runtime HTTP acceptance.
+- Container run `34229604891` — success. Production image build and deterministic fake-provider runtime smoke completed successfully.
+- Compose deployment run `34229604809` — success. Compose validation, fake-provider boot/health, durable authenticated API state creation, named-volume restart, post-restart persistence verification, and cleanup all completed successfully.
 
-Implementation/documentation commits in this run before this progress update:
+Implementation commit before this progress update:
 
-- `cf5c56c4875809f0c78b006f8f48ce959be95ded` — `feat: generate standard scoped credential bundle`
-- `99b65cc96b86ec39178b8a7fbaeb0d146346d2dc` — `feat: add scoped credential generator CLI`
-- `01ea9b31fdff31eb86222e6ff945e0462dc1c19b` — `test: cover standard credential bundle`
-- `dd1510587c6c73f57713cce537b67a19904274d1` — `chore: expose scoped credential generator`
-- `21b11656fa72d763df137b8338c40f487f9e8c13` — `docs: make scoped credential setup copy-safe`
-- `d0db4449250c01305f5a617baec46ceb19c78dae` — `test: validate generated deployment credentials`
-- `659ea91b602a2d9e654ff8f5b96485d5c1973074` — `docs: add copy-safe scoped credential deployment`
-- `b359148d5d7f8fdf73f77b0f1ba4ee9424b06ae8` — `docs: use generated scoped credentials in compose deployment`
-- `dd5ff9703e5079ebdec58166818e4771af1f72e3` — `docs: document standard credential generator`
+- `6c701de62034d707b7e36bda40220eac0071ba85` — `test: verify generated credentials through runtime HTTP boundary`
 
 `package.json` still has no separate lint script and no standalone migration/schema-check command. The available executable verification remains CI typecheck/build/test plus Container and Compose deployment workflows.
 
@@ -113,20 +82,21 @@ No live CALL-E phone call was attempted or claimed.
 
 ## Architecture decisions made this run
 
-1. Standard deployment credentials should be generated from the same canonical role presets used by application code/tests, not from a duplicated deployment-only scope map.
-2. Least privilege should be an executable setup path, not only prose. A copy-safe generator reduces the chance that a real deployment widens owner/operator authority for convenience.
-3. `decision:read` remains agent-consumption authority. The standard owner and operator credentials intentionally do not receive it merely to render lifecycle state.
-4. `calls:reconcile` remains isolated to the reconciler role. Browser-facing credentials do not receive provider reconciliation authority.
-5. The credential generator is only a secret-generation/configuration helper. HTTP authorization remains authoritative in `createControlPlaneHttpServer`; no new permission system was introduced.
-6. The backwards-compatible wildcard/full-access token remains available for tightly trusted local use, but is not the recommended exposed deployment boundary.
-7. No branch-scoped blocking, owner-decision persistence, callback steering, CALL-E reconciliation, idempotency, or safe-checkpoint semantics changed in this run.
-8. Human steering still becomes durable queued state and is consumed only at explicit safe checkpoints; no mid-generation interruption capability is claimed.
+1. Least-privilege deployment roles must be verified as a composed runtime path, not only as independent role, parser, and HTTP-unit tests.
+2. `CYA_API_CREDENTIALS_JSON` is now acceptance-tested as the real exposed-deployment credential input; the legacy wildcard token is intentionally absent from the new acceptance.
+3. The HTTP control plane remains the authorization source of truth. Capability discovery is descriptive only and never substitutes for route-level checks.
+4. The standard agent role has agent read/write plus durable decision-read authority, but does not inherit owner-callback authority.
+5. The standard owner role can observe state and request a callback, but cannot mutate agent state or reconcile provider calls.
+6. The read-only operator can observe run/audit state but cannot initiate phone side effects.
+7. The reconciler can reconcile provider calls but cannot read run or audit state merely because it is a trusted backend worker.
+8. No branch-scoped blocking, owner-decision persistence, callback steering, CALL-E reconciliation semantics, idempotency, or safe-checkpoint behavior changed in this run.
+9. Human steering still becomes durable queued state and is consumed only at explicit safe checkpoints; no mid-generation interruption capability is claimed.
 
 ## CALL-E integration status
 
-- Fake provider: deterministic and tested for decisions, callbacks, branch-scoped blocking, durable steering, idempotency, ambiguous recovery, active-state progress, stale downgrade rejection, bounded stale detection, restart durability, auditability, HTTP/TypeScript/MCP integration, operator demos, credential/privacy boundaries, and the generated least-privilege deployment-role definitions added this run.
+- Fake provider: deterministic and tested for decisions, callbacks, branch-scoped blocking, durable steering, idempotency, ambiguous recovery, active-state progress, stale downgrade rejection, bounded stale detection, restart durability, auditability, HTTP/TypeScript/MCP integration, operator demos, privacy boundaries, least-privilege role generation, and now generated-role runtime/env authorization composition.
 - Production CALL-E adapter: implemented with server-only `CALLE_API_KEY`, idempotent create, structured result schemas, active-state observation, terminal polling/webhook convergence, bounded requests, exact-key ambiguous recovery, duplicate prevention, and fail-closed stalled handling.
-- HTTP + TypeScript SDK + MCP continue to share the same control-plane services and durable state machine. Credential generation changes deployment setup only; they do not bypass HTTP authorization.
+- HTTP + TypeScript SDK + MCP continue to share the same control-plane services and durable state machine. The new acceptance validates deployment credential wiring without bypassing that architecture.
 - Live CALL-E success remains unverified; no real authorized phone call was made.
 
 ## Current blockers / external prerequisites
@@ -139,7 +109,7 @@ Real Claude Code host acceptance still requires running the documented stdio MCP
 
 ## Highest-value next actions
 
-1. Add an end-to-end runtime acceptance that feeds a generated four-role bundle through `CYA_API_CREDENTIALS_JSON`, boots the fake-provider runtime, verifies `/v1/auth/capabilities` for each generated credential, and proves owner/operator/reconciler cross-role denials through the real HTTP boundary. This would connect generator -> env parser -> runtime authorization without duplicating existing unit coverage.
+1. Upgrade the Compose deployment smoke so the deployed container itself boots from a scoped `CYA_API_CREDENTIALS_JSON` bundle rather than relying only on the backwards-compatible full-access token, and prove after SQLite restart that separate agent/operator/owner/reconciler credentials retain their intended capabilities and denials. This would extend today's in-process runtime acceptance to the actual reference deployment recipe.
 2. Keep capability-aware MCP/operator UX as presentation only; do not move authorization out of the HTTP control plane.
 3. When an actual Claude Code host is available, run the documented stdio MCP host acceptance path with the deterministic fake provider and verify tool discovery plus checkpoint behavior from the real host.
 4. When user-only CALL-E prerequisites are available, perform one bounded live provider acceptance test and record only observed results.
