@@ -3,6 +3,7 @@ import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
+import { FakeCallProvider } from "../src/call-provider.js";
 import { SqliteControlPlaneStore } from "../src/sqlite-store.js";
 import { startRuntimeFromEnv } from "../src/server.js";
 
@@ -28,6 +29,40 @@ test("runtime starts on an ephemeral port and shutdown is idempotent", async () 
 
   await Promise.all([runtime.shutdown(), runtime.shutdown()]);
   assert.equal(runtime.server.listening, false);
+});
+
+test("runtime wires fake auto completion from a validated fake-only environment setting", async () => {
+  const runtime = await startRuntimeFromEnv(baseEnv({ CYA_FAKE_AUTO_COMPLETE_AFTER_OBSERVATIONS: "1" }));
+  try {
+    assert.ok(runtime.provider instanceof FakeCallProvider);
+    const started = await runtime.provider.start({
+      idempotencyKey: "runtime-fake-auto-complete",
+      purpose: "owner_callback",
+      task: "Call owner",
+      metadata: {},
+    });
+    const observation = await runtime.provider.observe(started.providerCallId);
+    assert.equal(observation.status, "completed");
+  } finally {
+    await runtime.shutdown();
+  }
+});
+
+test("fake auto completion environment setting rejects invalid values", async () => {
+  await assert.rejects(
+    startRuntimeFromEnv(baseEnv({ CYA_FAKE_AUTO_COMPLETE_AFTER_OBSERVATIONS: "0" })),
+    /CYA_FAKE_AUTO_COMPLETE_AFTER_OBSERVATIONS must be a positive integer/,
+  );
+});
+
+test("fake auto completion setting cannot leak into live CALL-E mode", async () => {
+  await assert.rejects(
+    startRuntimeFromEnv(baseEnv({
+      CYA_CALL_PROVIDER: "calle",
+      CYA_FAKE_AUTO_COMPLETE_AFTER_OBSERVATIONS: "1",
+    })),
+    /only valid when CYA_CALL_PROVIDER=fake/,
+  );
 });
 
 test("graceful shutdown closes the durable SQLite store after HTTP drains", async () => {
