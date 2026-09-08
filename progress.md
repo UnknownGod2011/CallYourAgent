@@ -6,75 +6,89 @@ CallYourAgent is a durable Node 24 TypeScript control plane for asynchronous two
 
 The repository includes SQLite persistence, deterministic fake and production CALL-E providers, replayable/idempotent call attempts, polling/webhook convergence, scoped authenticated HTTP APIs, a typed TypeScript client, stdio MCP, branch-scoped blocking, call policy/quiet hours/budgets, privacy-aware audit history, bounded lifecycle recovery, fail-closed ambiguous/stalled handling, API abuse controls, graceful shutdown, bounded CALL-E HTTP requests, readiness/liveness surfaces, deterministic end-to-end and operator demos, a production Docker image, and a single-instance persistent-volume Compose deployment.
 
-This run added a SQLite-backed HTTP acceptance that verifies the least-privilege read/owner/reconciler credential split and privacy-safe callback overview survive a real store close/reopen. It also proves callback idempotency mapping survives restart so retrying the same owner callback does not create another durable call attempt.
+This run hardened the owner/browser callback boundary. Callback creation and ordinary callback reads now expose only a minimal operational `OwnerCallbackView`; the exact phone task, provider correlation, idempotency material, and recovery state remain durable inside the trusted control plane for safe reconciliation/recovery.
 
 ## Exact repo state inspected this run
 
-Before making changes, inspected the complete recursive `main` tree at HEAD `ba6753da2e966b02519e860be217b8b86856d998`. The recursive Git tree reported `truncated: false` and covered root files, all GitHub workflows, deployment assets, every documentation file, every `src` file, and every test file.
+Before making changes, inspected the recursive `main` repository tree at HEAD `4312af5bec9e5099e1be9eb6d91a2c61de68d948`, covering root files, GitHub workflows, deployment assets, documentation, source, and tests. Inspected recent commits and checked issues/pull requests; there were no open issues and no relevant open PRs.
 
-Read `AGENTS.md`, this file, `README.md`, `docs/ARCHITECTURE.md`, `docs/INTEGRATIONS.md`, `docs/API_SECURITY.md`, `docs/CALL_POLICY.md`, `docs/DEPLOYMENT.md`, `docs/OPERATOR_CONSOLE.md`, and `deploy/README.md` in full before editing. Inspected recent commits through the operator callback-lifecycle HTTP acceptance. Checked repository issues and pull requests; there were no open issues and no open PRs.
+Read `AGENTS.md`, this file, `README.md`, `docs/ARCHITECTURE.md`, `docs/INTEGRATIONS.md`, `docs/API_SECURITY.md`, `docs/CALL_POLICY.md`, `docs/DEPLOYMENT.md`, `docs/OPERATOR_CONSOLE.md`, and `deploy/README.md` before editing.
 
-Inspected the relevant implementation/test surfaces before changing anything: `src/http-server.ts`, `src/client.ts`, `src/mcp-server.ts`, `src/sqlite-store.ts`, `tests/run-overview-http.test.ts`, `tests/sqlite-store.test.ts`, `tests/operator-owner-credential.test.ts`, and `tests/operator-callback-lifecycle-http.test.ts`.
+Inspected the callback/security implementation and tests in `src/http-server.ts`, `src/client.ts`, `src/domain.ts`, `src/control-plane.ts`, `src/mcp-server.ts`, `src/index.ts`, `src/operator-demo.ts`, `tests/http-server.test.ts`, `tests/client.test.ts`, `tests/run-overview-http.test.ts`, `tests/sqlite-owner-callback-http-restart.test.ts`, and `tests/operator-owner-credential.test.ts`, plus the complete tests directory listing.
 
-The previous run had already established the deterministic fake-provider callback lifecycle over the real owner HTTP boundary. The missing high-value durability gap was proving that the browser-safe read model and credential split remain correct after durable SQLite restart rather than only in an in-memory fixture.
+The previous run had already established SQLite restart durability for owner callbacks and identified the next privacy gap: `POST /v1/callbacks` and `GET /v1/callbacks/:id` returned the full persisted `CallAttempt`, including a replayable `request.task` that can contain current agent status/scope and the owner's prompt.
 
 ## Changes made this run
 
-### SQLite-backed owner callback HTTP restart acceptance
+### Privacy-safe owner callback DTO
 
-Added `tests/sqlite-owner-callback-http-restart.test.ts`.
+Added `src/callback-view.ts` with exported `OwnerCallbackView` and `toOwnerCallbackView`.
 
-The test uses the real `SqliteControlPlaneStore`, `ControlPlane`, HTTP server, typed client, deterministic `FakeCallProvider`, and four least-privilege credentials:
+The ordinary owner/read representation contains only:
 
-- agent: `agent:read`, `agent:write`, `audit:read`;
-- operator-read: `agent:read`, `audit:read`;
-- owner: `agent:read`, `audit:read`, `owner:callback`;
-- reconciler: `calls:reconcile`.
+- callback `id`;
+- `runId`;
+- operational `status`;
+- `createdAt`;
+- `updatedAt`.
 
-It creates an agent/run over HTTP, requests an owner callback over the owner credential, completes the exact fake-provider call, reconciles it with the separate reconciler credential, and verifies one private steering instruction is durably queued.
+It deliberately omits provider name/provider call id, provider request task and metadata, idempotency key, last error, and automatic-recovery/stalled fields.
 
-It then closes the HTTP server and SQLite store, reopens the same database into a new `ControlPlane` and HTTP server, and proves:
+### HTTP and typed-client boundary
 
-- both read-only and owner credentials still see the same persisted run and latest completed callback through the privacy-safe overview;
-- the overview exposes only `queuedInstructionCount` plus the narrow latest-callback projection, not callback prompt/task content or owner instruction text;
-- the read credential still cannot request callbacks (`403`);
-- the owner credential still cannot checkpoint/consume steering (`403`);
-- the owner credential still cannot reconcile provider calls (`403`);
-- replaying the same owner callback idempotency key after restart returns the same completed callback id;
-- only one durable callback call attempt exists after the replay, proving the SQLite idempotency map prevents a duplicate phone side effect.
+Changed `POST /v1/callbacks` and `GET /v1/callbacks/:id` to project the internally persisted `CallAttempt` through `OwnerCallbackView` before serialization.
 
-No production state machine or browser authorization rule was changed in this run.
+The TypeScript SDK now returns `OwnerCallbackView` from `requestOwnerCallback` and `getCallback`. `reconcileCallback` remains a separate `calls:reconcile`-protected operation and continues to work with the richer internal call-attempt state required by trusted reconciliation.
 
-Code/test commit made this run:
+Exported the callback-view contract from `src/index.ts`.
 
-- `c4163dfd10c8d2e1b4fbfd12af821c8346ad378e` — `test: cover owner callback privacy across SQLite restart`
+### Regression coverage
+
+Added `tests/callback-privacy-http.test.ts` to prove through the real HTTP/client boundary that:
+
+- callback creation/read return exactly the five safe fields;
+- a callback task containing sensitive run summary/scope and owner prompt remains persisted internally for recovery;
+- that task/prompt, provider call id, request metadata, and idempotency key do not appear in owner-facing serialized responses;
+- retrying the same callback idempotency key still returns the same callback and creates only one durable owner-callback attempt.
+
+Updated existing client, run-overview, SQLite restart, and operator-owner tests so provider completion assertions use trusted internal fixture/store state rather than depending on a browser-visible `providerCallId`.
+
+The operator acceptance now explicitly asserts the fresh browser callback response contains only the privacy-safe fields and does not contain the current scope, owner prompt, `request`, or `providerCallId`, while the trusted demo process still completes/reconciles that exact durable callback and queues/consumes steering normally.
+
+### Documentation
+
+Updated `docs/API_SECURITY.md` with the stable owner callback response privacy contract and rationale. Updated `docs/OPERATOR_CONSOLE.md` so the judge/demo flow correctly states that the browser receives only the narrow callback view while replay/recovery material remains server-side.
+
+Relevant commits in this run were the callback-view/API/client/test hardening sequence through `79fe87720a3a3b77e485eb4aaa8db582cce834a4`, followed by documentation commits `9ac5e5e9ba5430d193f306be7c874b83a7649639` and `89d946ac4736529e8e8e03b9e246fd8454154474`.
 
 ## Architecture decisions made this run
 
-1. Persistence acceptance must cross the real HTTP boundary, not only inspect SQLite maps directly, because credential scopes and privacy-safe response shaping are part of the product contract.
-2. The owner surface remains intentionally unable to consume instructions or reconcile calls. Those authorities stay with the agent and trusted backend/reconciler roles respectively.
-3. Restart safety must include callback idempotency, not only data readability. A callback retry after process restart must resolve through the durable idempotency mapping and must not create another call attempt.
-4. The operator overview remains a privacy-safe projection. Persisting richer replayable call state internally does not justify exposing callback tasks, prompts, transcripts, or instruction text to the browser.
-5. Fake-provider completion remains deterministic and server-side. No live CALL-E behavior is inferred from this acceptance.
-6. Human steering remains queued durable state consumed only at an explicit agent checkpoint; no mid-generation interruption semantics were added.
+1. `CallAttempt` remains the durable internal recovery object. Its exact phone task/idempotency/provider state is necessary for ambiguous-create replay, polling/webhook convergence, and duplicate-call prevention, but that does not make it an appropriate browser DTO.
+2. Owner/read surfaces need operational callback identity and lifecycle status, not provider correlation or replay material. The minimal `OwnerCallbackView` is therefore a stable HTTP/SDK contract separate from persistence shape.
+3. Reconciliation authority remains separately scoped with `calls:reconcile`; narrowing owner/read responses does not remove trusted backend access to the state needed for recovery.
+4. Tests that need provider ids should obtain them from trusted control-plane/store fixtures, not force those identifiers back into public owner-facing responses merely for test convenience.
+5. Callback idempotency semantics are unchanged. Privacy projection happens only after the control plane has performed the normal durable request/deduplication operation.
+6. Human steering semantics remain unchanged: callback results become durable queued instructions and are consumed only at explicit safe checkpoints. No in-flight model/token interruption behavior was introduced.
 
 ## Verification performed
 
-The code/test-bearing commit `c4163dfd10c8d2e1b4fbfd12af821c8346ad378e` triggered all three repository verification workflows and all completed successfully:
+The first CI pass after changing the SDK types correctly exposed stale tests that still expected the now-private callback `purpose`/`providerCallId`; those tests were updated to use the new public contract or trusted fixture state. A later CI pass found one remaining operator acceptance that inspected `callback.request.task` through the browser response; it was fixed to assert the new privacy boundary while relying on the existing control-plane callback-context tests and trusted demo reconciliation for internal behavior.
 
-- CI run `34182222410` — `completed` / `success`; checkout, Node 24 setup, locked dependency installation, repository typecheck/build/test command, and the full Node test suite passed including the new SQLite HTTP restart acceptance.
-- Container run `34182222352` — `completed` / `success`; production image build and fake-provider runtime smoke test passed.
-- Compose deployment run `34182222391` — `completed` / `success`; Compose validation, fake-provider deployment boot/health, durable API-state creation, named-volume restart, and post-restart API/audit persistence verification passed.
+Final code/docs state `89d946ac4736529e8e8e03b9e246fd8454154474` passed all repository verification paths:
 
-`package.json` has no separate lint script and no standalone migration/schema command. The repository's available verification path remains the CI typecheck/build/test flow plus Container and Compose deployment workflows.
+- CI run `34186047819` — `completed` / `success`; locked dependency installation, TypeScript typecheck, build, and full Node test suite passed. The suite includes the new callback privacy tests plus the updated operator, SQLite restart, SDK, MCP, lifecycle, policy, and HTTP acceptances.
+- Container run `34186047782` — `completed` / `success`; production image build and fake-provider runtime smoke passed.
+- Compose deployment run `34186047747` — `completed` / `success`; Compose validation, fake-provider boot/health, durable API-state creation, named-volume restart, and post-restart persistence checks all passed.
+
+`package.json` has no separate lint script and no standalone migration/schema command. The repository's available verification path remains CI typecheck/build/test plus Container and Compose deployment workflows.
 
 No live CALL-E phone call was attempted or claimed.
 
 ## CALL-E integration status
 
-- Fake provider: implemented and tested across owner decisions, callbacks, branch-scoped blocking, durable steering, exact acknowledgement, idempotency, lifecycle recovery, auditability, deterministic demos, HTTP/MCP integration, credential separation, branch-safe visualization, privacy-safe callback-status presentation, HTTP-boundary callback lifecycle acceptance, and now SQLite restart persistence for the owner/read credential split and callback idempotency.
+- Fake provider: implemented and tested across owner decisions, callbacks, branch-scoped blocking, durable steering, exact acknowledgement, idempotency, lifecycle recovery, auditability, deterministic demos, HTTP/MCP integration, credential separation, branch-safe visualization, privacy-safe callback status, SQLite restart persistence, and now privacy-safe callback creation/read responses.
 - Production CALL-E adapter: implemented with server-only `CALLE_API_KEY`, idempotent create requests, structured outcomes, polling/webhook convergence, bounded requests, duplicate-call prevention, exact-key ambiguous replay, and fail-closed stalled handling.
-- HTTP + TypeScript SDK + MCP: implemented over shared control-plane semantics. Operator remains a thin read/callback surface over the same backend.
+- HTTP + TypeScript SDK + MCP: implemented over shared control-plane semantics. Owner/operator callback reads now use the narrow DTO; trusted reconciliation remains separate.
 - Live CALL-E success: unverified; no real authorized phone call was made.
 
 ## Current blockers / external prerequisites
@@ -87,9 +101,9 @@ Real Claude Code host acceptance still requires running the documented stdio MCP
 
 ## Highest-value next actions
 
-1. Narrow owner-facing callback HTTP responses so `POST /v1/callbacks` does not return the persisted replayable `CallAttempt.request.task`/briefing to a browser-facing owner credential; define a stable minimal callback DTO and keep rich replay state server-side.
-2. Review `GET /v1/callbacks/:id` for the same privacy boundary so an owner/read credential cannot simply recover the rich persisted phone task after creation. Preserve any richer representation only for trusted server-side/reconciler needs.
-3. Update README and `docs/OPERATOR_CONSOLE.md` to explicitly call out the privacy-safe latest-callback status card and tested `queued -> completed -> steering queued -> steering acknowledged` fake-provider story.
-4. Add focused coverage for a provider that truthfully returns `in_progress`, ensuring the same privacy-safe overview/operator read model projects that state without changing fake-provider semantics.
+1. Add focused fake/test-provider coverage for a provider that truthfully reports `in_progress`, proving owner callback DTO, run overview, audit, and operator status all project that state without exposing provider/replay material.
+2. Review the owner-decision read boundary (`GET /v1/escalations/:id`) for equivalent least-privilege concerns: it currently intentionally returns the structured owner decision to agent readers, so document/verify which contexts may see answer text rather than narrowing it blindly.
+3. Consider a trusted internal/admin callback diagnostic surface only if real operations require it; do not broaden the ordinary owner/read DTO to solve operator troubleshooting.
+4. Continue improving the one-command judge flow and README only where it communicates already-tested semantics rather than adding demo-only state.
 5. When an actual Claude Code host is available, run the documented stdio MCP host acceptance flow with the deterministic fake provider.
 6. When user-only CALL-E prerequisites are available, perform a bounded live provider acceptance test and record only the observed result.
