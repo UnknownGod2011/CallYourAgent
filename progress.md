@@ -6,71 +6,88 @@ CallYourAgent is a durable Node 24 TypeScript control plane for asynchronous two
 
 The repository includes SQLite persistence, deterministic fake and production CALL-E providers, replayable/idempotent call attempts, typed active-provider observations, polling/webhook convergence, scoped authenticated HTTP APIs, a typed TypeScript client, stdio MCP, branch-scoped blocking, call policy/quiet hours/budgets, privacy-aware audit history, bounded lifecycle recovery, fail-closed ambiguous/stalled handling, API abuse controls, graceful shutdown, bounded CALL-E HTTP requests, readiness/liveness surfaces, deterministic end-to-end and operator demos, a production Docker image, and a single-instance persistent-volume Compose deployment.
 
-This run closed the stale-provider-observation regression gap: once a durable call has advanced from `queued` to `in_progress`, an out-of-order later provider observation reporting `queued` is now explicitly proven to be a no-op. It cannot downgrade local state, refresh the timeout anchor, duplicate progress audit events, or create another phone side effect; the original in-progress call still ages into the normal fail-closed `stalled` state.
+This run hardened the owner-decision privacy boundary. The durable owner answer/structured result returned by `GET /v1/escalations/:id` is no longer implied by generic `agent:read`: the endpoint now additionally requires an explicit `decision:read` scope. The standard agent role receives it because the agent that raised an escalation must consume the durable answer and resume the affected scope; standard owner/operator-read credentials intentionally do not.
 
 ## Exact repo state inspected this run
 
-Before making any change, inspected the complete recursive `main` Git tree at HEAD `80a35ef5435b066048e3d75d27a9f3042abd82ea`; the recursive tree covered root configuration, GitHub Actions workflows, deployment assets, all documentation, all source files, and all test files.
+The run started from `main` HEAD `c84980efd41d69bbb33290a5a2c2e3dd8df30961`. Inspected the complete recursive Git tree and current architecture, covering root configuration, all GitHub Actions workflows, deployment assets, every documentation path, source modules, and tests. Inspected recent commits through the stale-provider downgrade acceptance and checked repository issues and pull requests; there were no relevant open issues or pull requests.
 
-Read `AGENTS.md`, this file, `README.md`, `docs/ARCHITECTURE.md`, `docs/INTEGRATIONS.md`, `docs/API_SECURITY.md`, `docs/CALL_POLICY.md`, `docs/DEPLOYMENT.md`, `docs/OPERATOR_CONSOLE.md`, and `deploy/README.md` in full before editing.
+Read `AGENTS.md`, this file, `README.md`, `docs/ARCHITECTURE.md`, `docs/INTEGRATIONS.md`, and `docs/API_SECURITY.md` before the authorization code change. During the same repository review, also read `docs/CALL_POLICY.md`, `docs/DEPLOYMENT.md`, `docs/OPERATOR_CONSOLE.md`, and `deploy/README.md` in full before the final documentation/progress changes. Inspected the relevant implementation and regression surfaces: `src/http-server.ts`, `src/server.ts`, `src/credential-roles.ts`, `src/domain.ts`, `src/call-provider.ts`, `tests/credential-roles.test.ts`, `tests/credential-capabilities-http.test.ts`, `tests/callback-privacy-http.test.ts`, `tests/http-server.test.ts`, `tests/client.test.ts`, and `package.json`.
 
-Inspected recent commits through the SQLite provider-progress restart acceptance. Checked relevant repository issues and pull requests; there were no open issues and no pull requests.
-
-Inspected the relevant implementation/tests before changing behavior: `src/call-provider.ts`, the reconciliation/active-observation paths in `src/control-plane.ts`, `tests/provider-observation.test.ts`, and the repository verification scripts in `package.json`.
-
-The prior run had explicitly identified the highest-value next action: prove that once local state is `in_progress`, a stale provider `queued` observation cannot rewind state, reset call age, or duplicate audit evidence.
+The prior run's highest-value next action was specifically to review `GET /v1/escalations/:id` and decide which credential roles should be allowed to receive the owner's decision answer/structured result. Inspection confirmed that the route required only `agent:read`, while both the standard owner and operator-read role presets also carried `agent:read`; those browser/observational credentials could therefore retrieve the full durable owner answer despite not needing it.
 
 ## Changes made this run
 
-### Stale provider active-state downgrade acceptance
+### Explicit owner-decision read authorization
 
-Extended `tests/provider-observation.test.ts` with a purpose-built mutable observation provider implementing the real `CallProvider` interface. The provider starts one callback as `queued`, can later report `in_progress`, and can intentionally regress its observation back to stale `queued` without creating a second call.
+Added `decision:read` as a concrete HTTP API scope and wired it through runtime environment validation and authenticated capability discovery.
 
-The new acceptance proves this sequence:
+`GET /v1/escalations/:id` now requires both:
 
-1. create an owner callback through the normal `ControlPlane.requestOwnerCallback` path and verify exactly one provider create side effect;
-2. advance the provider observation to `in_progress` and reconcile through the normal callback boundary;
-3. persist the one genuine `queued -> in_progress` transition and its meaningful `updatedAt` timeout anchor;
-4. verify exactly one `call_attempt_progressed` audit event;
-5. advance time, make the provider report stale `queued`, and reconcile the same callback again;
-6. verify local status remains `in_progress`, the timeout anchor is unchanged, no additional provider create occurs, and no duplicate progress audit event appears;
-7. run lifecycle reconciliation before timeout and verify the call remains active with the original progress timestamp;
-8. advance beyond the original progress-based age limit and verify the same attempt enters `stalled`, with exactly one stalled audit event and still no replacement phone side effect.
+1. `agent:read`, for access to agent/escalation state; and
+2. `decision:read`, for access to the persisted `OwnerDecision.answer` and optional structured result.
 
-No production code path needed modification: `ControlPlane.applyActiveObservation` already implements the intended forward-only active-state rule. This run turns that rule into explicit regression coverage against an out-of-order provider response.
+This is intentionally conjunctive. A credential with only `decision:read` is insufficient, so the new scope cannot become a standalone decision-data exfiltration capability.
+
+Updated the standard credential roles:
+
+- `agent` -> `agent:read`, `agent:write`, `decision:read`, `audit:read`;
+- `operator-read` -> `agent:read`, `audit:read`;
+- `owner` -> `agent:read`, `audit:read`, `owner:callback`;
+- `reconciler` -> `calls:reconcile`.
+
+The legacy trusted `*` credential remains backwards-compatible full access and capability discovery projects it as the six concrete scopes rather than returning `*`.
+
+### HTTP privacy regression coverage
+
+Added `tests/owner-decision-authorization-http.test.ts`. Through the real HTTP boundary it creates and resolves a blocking owner decision, then proves:
+
+- a standard-style operator credential with `agent:read` cannot retrieve the answer;
+- a standard-style owner callback credential with `agent:read` cannot retrieve the answer;
+- a `decision:read`-only credential is also rejected because it lacks `agent:read`;
+- an agent credential carrying both scopes receives the resolved durable answer and structured result needed to resume safely.
+
+Updated credential-role and capability tests to lock the new least-privilege split. The new authorization test deliberately leaves branch/scope blocking, provider reconciliation, and checkpoint semantics untouched.
+
+### Documentation alignment
+
+Expanded `docs/API_SECURITY.md` with the exact `decision:read` contract, role rationale, dual-scope requirement, and migration note for custom scoped agent credentials that previously relied on `agent:read`/`agent:write` alone.
+
+Updated `docs/DEPLOYMENT.md` so its recommended internet-exposed agent/MCP credential includes `decision:read`, while owner/operator read surfaces remain intentionally narrower.
 
 ## Verification performed
 
-Initial test commit: `6f24da13aab54153c652c398bfc8d1c90b05e991` (`test: reject stale provider active-state downgrade`).
+Primary security implementation commit: `91e8c4805ac7f7897731cf71007d5b5cd6768382` (`security: isolate owner decision read scope`).
 
-The first CI run (`34202280848`) correctly failed only in the new test. The acceptance had incorrectly expected `updatedAt` to remain at the in-progress timestamp *after* lifecycle intentionally transitions the call to `stalled`. The production lifecycle correctly sets `updatedAt` when the meaningful stalled transition occurs. The test was fixed rather than changing production behavior.
+Its first CI run `34208421320` failed in exactly one stale test expectation: `tests/client.test.ts` still expected the legacy wildcard capability projection to contain the previous five concrete scopes. Typecheck/build succeeded and the new owner-decision authorization acceptance itself passed. The production authorization boundary was not weakened.
 
-Fix commit: `42b48931e9b91a4ba6f38c943201cbe5a8b705cf` (`fix: assert stale observation timeout anchor before stall`).
+Fixed that stale client capability assertion in commit `9e39a4c0976006c8d7f582d2f70440006830d645` (`test: include decision read in legacy capabilities`). All available verification paths then passed on that corrected code state:
 
-All available repository verification paths passed on that corrected code state:
+- CI run `34208623075` — success. Node 24 setup, locked dependency install, TypeScript typecheck, build, and the complete Node test suite passed; the suite reported 77 tests with all passing, including the new owner-decision authorization acceptance.
+- Container run `34208622923` — success. Production image build and deterministic fake-provider runtime smoke passed.
+- Compose deployment run `34208622953` — success. Compose validation, fake-provider boot/health, durable API-state creation, named-volume restart, post-restart persistence verification, and cleanup passed.
 
-- CI run `34202381230` / job `101983928818` — success. Node 24 setup, locked dependency install, TypeScript typecheck, build, and complete Node test suite passed, including the new stale-provider downgrade acceptance.
-- Container run `34202381511` — success. Production image build and deterministic fake-provider runtime smoke passed.
-- Compose deployment run `34202381389` — success. Compose validation, fake-provider boot/health, durable API-state creation, named-volume restart, post-restart persistence verification, and cleanup passed.
+Documentation-alignment commit: `57c20a3f1c29cb9c24dc372e5165a4e4e5a00750` (`docs: align agent credential decision scope`).
 
-`package.json` has no separate lint script and no standalone migration/schema-check command. The repository's available verification remains CI typecheck/build/test plus Container and Compose deployment workflows.
+`package.json` has no separate lint script and no standalone migration/schema-check command. The repository's available executable verification remains CI typecheck/build/test plus Container and Compose deployment workflows.
 
 No live CALL-E phone call was attempted or claimed.
 
 ## Architecture decisions made this run
 
-1. Provider active-state observations are monotonic from the control plane's perspective: `queued -> in_progress` is meaningful forward progress, while `in_progress -> queued` is stale/out-of-order evidence and must be ignored.
-2. Ignoring stale provider evidence means a strict state no-op: no status rewrite, no timeout-anchor refresh, no duplicate progress audit event, and no replacement provider create.
-3. A provider observation is not itself authorization to extend call lifetime. Only a genuine meaningful transition updates the active-call age anchor.
-4. The later `in_progress -> stalled` lifecycle transition is itself meaningful local state and therefore legitimately receives a new `updatedAt`; the invariant being protected is that stale `queued` cannot move that timeout anchor before the stall transition.
-5. The stale-provider acceptance uses the public `CallProvider` interface and normal reconciliation path rather than mutating control-plane storage directly, so it protects the actual provider/control-plane boundary.
-6. Human-answer/instruction semantics are unchanged: owner steering remains durable queued state consumed only at explicit safe checkpoints, with no claim of mid-generation interruption.
+1. A durable owner decision answer is agent-consumption state, not generic observational run metadata. `agent:read` therefore must not implicitly grant access to it.
+2. `decision:read` is intentionally additive to `agent:read`; the sensitive route requires both rather than replacing the ordinary agent-state authorization boundary.
+3. The standard agent role receives `decision:read` because the agent that raised the escalation must be able to consume the answer and safely resume only the affected scope.
+4. Standard owner and read-only operator browser credentials intentionally do not receive `decision:read`. They can observe privacy-safe run/branch/audit state and request owner callbacks where authorized without retrieving the decision answer.
+5. Provider reconciliation authority remains separate. `calls:reconcile` neither implies agent read access nor decision-answer access.
+6. Legacy `*` remains supported for trusted/local compatibility, but scoped credentials are the recommended exposed-deployment path.
+7. This security split changes only HTTP authorization. It does not alter CALL-E provider state, branch-scoped blocking, durable decision persistence, callback steering, or the rule that human instructions are consumed only at explicit safe checkpoints.
 
 ## CALL-E integration status
 
-- Fake provider: deterministic and tested for decisions, callbacks, branch-scoped blocking, durable steering, idempotency, ambiguous recovery, immediate/later `in_progress`, repeated same-state polling, stale active-state downgrade rejection, bounded stale detection, provider-progress persistence across SQLite restart, auditability, HTTP/MCP integration, operator demos, and persistence/restart behavior.
+- Fake provider: deterministic and tested for decisions, callbacks, branch-scoped blocking, durable steering, idempotency, ambiguous recovery, immediate/later `in_progress`, repeated same-state polling, stale active-state downgrade rejection, bounded stale detection, provider-progress persistence across SQLite restart, auditability, HTTP/MCP integration, operator demos, persistence/restart behavior, and the newly hardened decision-read credential boundary.
 - Production CALL-E adapter: implemented with server-only `CALLE_API_KEY`, idempotent create, structured result schemas, create-time and later active-state observation, terminal polling/webhook convergence, bounded requests, exact-key ambiguous recovery, duplicate prevention, and fail-closed stalled handling.
-- HTTP + TypeScript SDK + MCP: share the same control-plane services and durable state machine. No browser-side provider reconciliation or replay material was introduced.
+- HTTP + TypeScript SDK + MCP: share the same control-plane services and durable state machine. Scoped agent credentials that use `get_escalation_status`/`GET /v1/escalations/:id` now require `decision:read`; browser-facing owner/operator presets do not receive it.
 - Live CALL-E success: unverified; no real authorized phone call was made.
 
 ## Current blockers / external prerequisites
@@ -85,8 +102,8 @@ Executable verification for this run was taken from the repository's GitHub Acti
 
 ## Highest-value next actions
 
-1. Review owner-decision read authorization (`GET /v1/escalations/:id`) and document/test exactly which credential roles are intentionally allowed to receive the decision answer/structured result; keep owner-facing privacy boundaries least-privilege.
-2. Add a stale-provider active-state acceptance for the agent -> owner decision path as well if the current shared helper coverage is judged insufficient, while avoiding duplicate tests of the same `applyActiveObservation` invariant.
-3. Consider deployment-path coverage for an active call attempt if the Compose fixture can do so without introducing test-only provider mutation APIs; keep the domain restart tests authoritative for provider-progress semantics.
+1. Consider splitting escalation observation into a privacy-safe escalation-status view and a separately authorized decision-result view, so owner/operator surfaces can inspect an individual escalation's lifecycle without ever being eligible to receive its answer; keep the current run overview as the safe browser default.
+2. Add an explicit scoped MCP/TypeScript integration acceptance using the standard `agent` role to prove `request_owner_decision -> get_escalation_status` works with `decision:read`, while an owner/operator scoped client receives a clear authorization failure rather than widening its permissions.
+3. Audit remaining deployment/config examples for custom `CYA_API_CREDENTIALS_JSON` snippets and ensure any agent credential intended to read decision results includes `decision:read` while owner/reconciler credentials remain narrow.
 4. When an actual Claude Code host is available, run the documented stdio MCP host acceptance path with the deterministic fake provider.
 5. When user-only CALL-E prerequisites are available, perform one bounded live provider acceptance test and record only observed results.
