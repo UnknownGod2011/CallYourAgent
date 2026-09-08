@@ -10,6 +10,7 @@ import type {
   OwnerDecisionRequest,
   OwnerInstruction,
 } from "./domain.js";
+import type { OwnerCallbackView } from "./callback-view.js";
 import type { CredentialCapabilities } from "./http-server.js";
 import type { RunOverview } from "./run-overview.js";
 
@@ -141,11 +142,11 @@ export class CallYourAgentClient {
     return this.request("POST", `/v1/escalations/${encodeURIComponent(escalationId)}/reconcile`, {});
   }
 
-  async requestOwnerCallback(input: RequestCallbackInput): Promise<CallAttempt> {
+  async requestOwnerCallback(input: RequestCallbackInput): Promise<OwnerCallbackView> {
     return this.request("POST", "/v1/callbacks", input);
   }
 
-  async getCallback(callbackId: string): Promise<CallAttempt> {
+  async getCallback(callbackId: string): Promise<OwnerCallbackView> {
     return this.request("GET", `/v1/callbacks/${encodeURIComponent(callbackId)}`);
   }
 
