@@ -12,9 +12,19 @@ export interface StartCallResult {
   status: "queued" | "in_progress" | "completed";
 }
 
+export type CallProviderObservation =
+  | { providerCallId: string; status: "queued" | "in_progress" }
+  | CallOutcome;
+
 export interface CallProvider {
   readonly name: string;
   start(input: StartCallInput): Promise<StartCallResult>;
+  observe(providerCallId: string): Promise<CallProviderObservation>;
+  /**
+   * Compatibility helper for integrations that only care about terminal evidence.
+   * New reconciliation code should prefer `observe` so active provider progress is
+   * not collapsed into `null`.
+   */
   getOutcome(providerCallId: string): Promise<CallOutcome | null>;
 }
 
@@ -27,9 +37,15 @@ export interface FakeCallProviderOptions {
   initialStatus?: "queued" | "in_progress";
 }
 
+interface FakeCallState {
+  id: string;
+  status: "queued" | "in_progress";
+  outcome: CallOutcome | null;
+}
+
 export class FakeCallProvider implements CallProvider {
   readonly name = "fake";
-  private readonly calls = new Map<string, { id: string; outcome: CallOutcome | null }>();
+  private readonly calls = new Map<string, FakeCallState>();
   private readonly byIdempotencyKey = new Map<string, StartCallResult>();
   private readonly initialStatus: "queued" | "in_progress";
 
@@ -44,12 +60,27 @@ export class FakeCallProvider implements CallProvider {
     const providerCallId = `fake_call_${this.calls.size + 1}`;
     const result: StartCallResult = { providerCallId, status: this.initialStatus };
     this.byIdempotencyKey.set(input.idempotencyKey, result);
-    this.calls.set(providerCallId, { id: providerCallId, outcome: null });
+    this.calls.set(providerCallId, { id: providerCallId, status: this.initialStatus, outcome: null });
     return { ...result };
   }
 
+  async observe(providerCallId: string): Promise<CallProviderObservation> {
+    const call = this.calls.get(providerCallId);
+    if (!call) throw new Error(`Unknown fake call: ${providerCallId}`);
+    if (call.outcome) return { ...call.outcome };
+    return { providerCallId: call.id, status: call.status };
+  }
+
   async getOutcome(providerCallId: string): Promise<CallOutcome | null> {
-    return this.calls.get(providerCallId)?.outcome ?? null;
+    const observation = await this.observe(providerCallId);
+    return observation.status === "queued" || observation.status === "in_progress" ? null : observation;
+  }
+
+  progress(providerCallId: string): void {
+    const call = this.calls.get(providerCallId);
+    if (!call) throw new Error(`Unknown fake call: ${providerCallId}`);
+    if (call.outcome) throw new Error(`Fake call is already terminal: ${providerCallId}`);
+    call.status = "in_progress";
   }
 
   complete(providerCallId: string, outcome: CallOutcome): void {
