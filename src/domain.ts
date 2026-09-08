@@ -17,6 +17,7 @@ export type AuditEventType =
   | "escalation_expired"
   | "call_attempt_created"
   | "call_attempt_started"
+  | "call_attempt_progressed"
   | "call_attempt_ambiguous"
   | "call_attempt_stalled"
   | "call_attempt_completed"
