@@ -14,7 +14,8 @@ afterEach(async () => {
 
 test("run overview is authenticated, privacy-safe, and non-consuming through HTTP and typed client", async () => {
   const provider = new FakeCallProvider();
-  const controlPlane = new ControlPlane(new InMemoryControlPlaneStore(), provider);
+  const store = new InMemoryControlPlaneStore();
+  const controlPlane = new ControlPlane(store, provider);
   const server = createControlPlaneHttpServer(controlPlane, {
     apiCredentials: [
       { id: "agent", token: "agent-read-write", scopes: ["agent:read", "agent:write"] },
@@ -39,10 +40,11 @@ test("run overview is authenticated, privacy-safe, and non-consuming through HTT
   });
 
   const callback = await ownerClient.requestOwnerCallback({ runId: run.id, idempotencyKey: "overview-callback" });
-  assert.ok(callback.providerCallId);
-  provider.complete(callback.providerCallId!, {
+  const persistedCallback = store.callAttempts.get(callback.id);
+  assert.ok(persistedCallback?.providerCallId);
+  provider.complete(persistedCallback.providerCallId!, {
     status: "completed",
-    providerCallId: callback.providerCallId,
+    providerCallId: persistedCallback.providerCallId,
     instructions: ["Keep the canary at ten percent", "Do not expose the secret launch note"],
   });
   await ownerClient.reconcileCallback(callback.id);
