@@ -63,7 +63,7 @@ A stalled attempt is a fail-closed review state:
 - a late provider webhook can still resolve the original attempt through the normal shared terminal transition;
 - an explicit reconciliation can safely poll the already-known provider call id and resolve it if terminal evidence later exists.
 
-The timeout is configured by `CYA_MAX_IN_PROGRESS_CALL_AGE_MS` and defaults to 600000 ms (10 minutes). This timeout is based on the attempt's latest accepted/recovered `updatedAt`, so successful ambiguous-create recovery receives a fresh in-progress window.
+The timeout is configured by `CYA_MAX_IN_PROGRESS_CALL_AGE_MS` and defaults to 600000 ms (10 minutes). It is measured from the latest meaningful accepted/progress transition recorded in `CallAttempt.updatedAt`: a successful ambiguous-create recovery receives a fresh window, and a genuine provider observation advancing `queued` to `in_progress` receives one fresh window as dialing begins. Repeated identical `queued`/`in_progress` observations do not update `updatedAt`, and an `in_progress` attempt cannot be downgraded by a later stale `queued` poll. Provider polling therefore cannot keep an active call alive indefinitely merely by returning the same state.
 
 ## Owner-requested callbacks
 
@@ -79,12 +79,12 @@ The decision policy gate intentionally applies only to autonomous **agent -> own
 - Backoff state and automatic-recovery exhaustion live on the durable `CallAttempt` and therefore survive SQLite restart.
 - Exhausted ambiguity stays ambiguous rather than pretending the provider definitely failed.
 - Ordinary reconciliation cannot bypass an exhausted recovery budget.
+- A genuine `queued -> in_progress` provider observation is persisted and audited once; repeated same-state polls do not refresh the timeout.
 - Accepted calls that exceed the in-progress timeout become `stalled` without any replacement phone side effect.
 - A late terminal webhook or explicit poll can still resolve the original stalled provider call.
 - Background reconciliation does not consume owner instructions; agents still consume them only at safe checkpoints.
 
 ## Next policy work
 
-- Add API-level callback rate limiting and credential scopes.
 - Design an explicit operator-only manual recovery override, with separate authorization and audit, only if real deployments require it.
 - Consider provider-specific expected-call-duration tuning after live CALL-E verification instead of weakening the generic fail-closed timeout semantics.
