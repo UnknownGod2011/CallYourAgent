@@ -183,10 +183,15 @@ jobs:
           audit_json=$(curl --fail --silent \
             --header "Authorization: Bearer $CYA_OPERATOR_TOKEN" \
             "http://127.0.0.1:8787/v1/runs/$CYA_CI_RUN_ID/audit?limit=500")
-          jq -e --arg escalationId "$CYA_CI_ESCALATION_ID" '
-            ([.events[] | select(.escalationId == $escalationId and .type == "call_attempt_created")] | length) == 1 and
+          decision_call_attempt_id=$(jq -er --arg escalationId "$CYA_CI_ESCALATION_ID" '
+            [.events[] | select(.escalationId == $escalationId and .type == "owner_decision_recorded")] as $events |
+            if ($events | length) == 1 then $events[0].callAttemptId else error("expected exactly one owner decision event") end
+          ' <<<"$audit_json")
+          jq -e --arg escalationId "$CYA_CI_ESCALATION_ID" --arg callAttemptId "$decision_call_attempt_id" '
             ([.events[] | select(.escalationId == $escalationId and .type == "owner_decision_recorded")] | length) == 1 and
-            ([.events[] | select(.type == "call_attempt_started" and .details.purpose == "owner_decision")] | length) == 1
+            ([.events[] | select(.callAttemptId == $callAttemptId and .type == "call_attempt_created")] | length) == 1 and
+            ([.events[] | select(.callAttemptId == $callAttemptId and .type == "call_attempt_started")] | length) == 1 and
+            ([.events[] | select(.callAttemptId == $callAttemptId and .type == "call_attempt_completed")] | length) == 1
           ' <<<"$audit_json" >/dev/null
 
       - name: Owner requests context-aware callback
