@@ -4,13 +4,13 @@
 
 CallYourAgent is a durable Node 24 TypeScript control plane for asynchronous two-way voice coordination between autonomous AI agents and their owners. Agents can escalate important decisions without freezing unrelated scopes; owners can independently request callbacks for progress/questions/steering; human input is persisted as structured state and consumed only at explicit safe checkpoints rather than pretending to interrupt in-flight model generation.
 
-The repository currently includes deterministic fake and production CALL-E providers, SQLite persistence, replayable/idempotent call attempts, polling/webhook convergence, branch-scoped blocking, owner decision persistence, durable per-run instruction queues, exact instruction acknowledgement, call policy/quiet hours/budgets, lifecycle recovery, fail-closed ambiguous/stalled handling, privacy-aware audit history, scoped HTTP authentication, a typed TypeScript client, stdio MCP, a deterministic end-to-end demo, operator console, and a single-instance persistent-volume Compose reference deployment.
+The repository currently includes deterministic fake and production CALL-E providers, SQLite persistence, replayable/idempotent call attempts, polling/webhook convergence, branch-scoped blocking, owner decision persistence, durable per-run instruction queues, exact instruction acknowledgement, call policy/quiet hours/budgets, bounded lifecycle recovery, fail-closed ambiguous/stalled handling, privacy-aware audit history, scoped HTTP authentication, a typed TypeScript client, real stdio MCP, a deterministic end-to-end demo, operator console, and a single-instance persistent-volume Compose reference deployment.
 
-This run closed the highest-value MCP/restart evidence gap left by the previous run: the **same external stdio MCP client process now remains connected while the Dockerized control plane restarts with a blocking owner-decision call raised by that MCP session still non-terminal**. After restart, that unchanged MCP session observes the same durable escalation as still calling, sees only the affected `release-approval` branch blocked while independent `documentation` work remains active, then consumes the single durable owner decision after trusted reconciliation and continues safely. The existing callback/restart/checkpoint path remains intact.
+This run hardened the production CALL-E boundary after a repository-wide audit found that non-2xx provider responses were copied into application error strings. Because those errors can be persisted as call-attempt recovery state or emitted by lifecycle diagnostics, a provider response that echoed request data could have propagated sensitive phone/task/webhook material into logs or durable error state. Production CALL-E HTTP failures now expose only the HTTP status plus an optional tightly validated provider request id; arbitrary response bodies are never copied into application errors.
 
 ## Exact repo state inspected this run
 
-The run started from `main` HEAD `90a255a4871df0358678021f0ed15e4e0711d384`.
+The run started from `main` HEAD `803d8ed786a27f6be6d752c138381b0ff4ac910a`.
 
 Before making any change, inspected the complete recursive repository tree and current architecture, recent commits, and repository issues/pull requests. There were no open issues or pull requests.
 
@@ -29,69 +29,76 @@ Read in full before implementation:
 
 Also inspected the relevant implementation/deployment surfaces, especially:
 
-- `.github/workflows/compose.yml` and its scoped-credential Docker/SQLite acceptance path;
-- `tests/mcp-stdio-deployment-acceptance.ts`, which launches the actual built `dist/src/mcp-server.js` child through the official MCP stdio client;
-- recent fake-provider restart/rehydration commits and the previous deployment-level in-flight call restart acceptance.
+- `src/calle-provider.ts`, including live create/poll HTTP behavior, structured results, timeouts, and error handling;
+- `src/server.ts`, including where provider exceptions may surface through lifecycle diagnostics and persisted recovery paths;
+- `src/domain.ts`, especially durable `CallAttempt.lastError` and metadata-only `AuditEvent` contracts;
+- `tests/calle-provider.test.ts` and the existing live-adapter contract coverage;
+- `tests/mcp-stdio-deployment-acceptance.ts`, which launches the actual built stdio MCP process and keeps it alive across a Dockerized control-plane restart;
+- `.github/workflows/compose.yml`, including scoped credentials, SQLite persistence, in-flight decision/callback restart recovery, and stdio MCP acceptance;
+- recent fake-provider restart/rehydration and MCP restart commits.
 
-The previous run had already proven restart recovery for accepted non-terminal fake-provider decision and callback calls at the HTTP/Compose boundary. The remaining gap was that the stdio MCP acceptance restarted only **after** its owner decision had already resolved. Therefore it had not yet connected provider rehydration/restart behavior directly to the primary MCP agent integration path.
+The previous run had already proven that the same external MCP process can remain alive while an MCP-raised blocking owner-decision call remains non-terminal across a control-plane restart. The initial next candidate was stronger exact call-attempt audit correlation for that path. During the production provider audit, however, the raw CALL-E response-body propagation was identified as the higher-value reliability/security issue and was fixed first.
 
-The automation/container environment itself could not clone GitHub directly because outbound DNS/network access to `github.com` was unavailable. Repository reads/writes and executable verification therefore used the connected GitHub integration and GitHub Actions; no unsupported local execution claim is made.
+The automation environment did not provide a local repository checkout suitable for running the Node/Docker suite directly. Repository reads/writes used the connected GitHub integration and executable verification used the repository's GitHub Actions workflows. No unsupported local execution claim is made.
 
 ## Changes made this run
 
-### Real stdio MCP now survives a restart while its own decision call is active
+### CALL-E non-2xx response bodies no longer enter application errors
 
-Updated `tests/mcp-stdio-deployment-acceptance.ts` in commit `22cb55a1eea793f696bd5bdbb826eb5806db5fbe` (`test: keep stdio MCP alive across active decision restart`).
+Implemented in commit `7d1dc88a906e599744fb38fd57c718dc22f845dd` (`fix: redact CALL-E HTTP error bodies`).
 
-The acceptance still launches the real built MCP server as an external stdio child with only the least-privilege agent bearer credential, while owner callback creation and provider reconciliation remain on separate owner/reconciler credentials.
+Previously both production provider operations did the equivalent of:
 
-The strengthened flow now:
+- `POST /v1/calls` failure -> include up to 500 characters of the raw response body in the thrown error;
+- `GET /v1/calls/{id}` failure -> include up to 500 characters of the raw response body in the thrown error.
 
-1. connects one official MCP client to `dist/src/mcp-server.js`;
-2. registers an agent and starts a run with independent current scope `documentation`;
-3. raises a blocking `release-approval` owner decision through MCP;
-4. verifies through MCP that the escalation is `calling` and its provider call is still `queued`/`in_progress`;
-5. verifies through MCP checkpoint state that only `release-approval` is blocked and `documentation` remains the current independent scope;
-6. restarts the Dockerized control plane **before** trusted reconciliation while leaving the same stdio MCP child/client alive;
-7. after readiness returns, uses that unchanged MCP session to re-read the escalation lifecycle and checkpoint state;
-8. proves the restored escalation is still active and the same single branch remains blocked;
-9. reconciles the already-accepted original call using only the separate reconciler credential;
-10. consumes the resulting durable structured owner decision through the same MCP agent session;
-11. verifies the branch releases and the run continues;
-12. verifies the audit timeline contains exactly one `owner_decision_recorded` event for that MCP-raised escalation.
+That was unnecessarily risky because a remote service, gateway, or test endpoint can echo submitted fields. A create request contains the owner phone destination, the agent's phone task/context, caller metadata, and the application-generated webhook URL. Persisting or logging an echoed body would create a second sensitive-content channel outside the deliberately privacy-aware domain/audit design.
 
-The acceptance still also proves that the agent MCP credential cannot request an owner callback, that owner callback/reconciliation authority remains separate, that queued callback steering survives a later control-plane restart, and that steering is consumed and acknowledged exactly at a safe checkpoint.
+`src/calle-provider.ts` now routes non-2xx responses through one privacy-safe `providerHttpError` helper. The resulting errors contain only:
 
-No production domain/state-machine rewrite was needed for this increment. It converts existing restart-safe architecture into stronger primary-integration evidence.
+- the fixed operation name (`create` or `get`);
+- the HTTP status code;
+- optionally `x-request-id` when it matches a strict allowlist of `A-Z`, `a-z`, digits, `.`, `_`, `:`, `-` and is at most 128 characters.
+
+The provider response body is not read into the error at all. Unsafe request-id values are ignored rather than sanitized or partially copied.
+
+This does not alter successful CALL-E response parsing, provider idempotency, persisted call identity, polling/webhook convergence, structured owner decisions, callback instructions, timeout behavior, or ambiguous-side-effect recovery semantics.
+
+### Regression coverage deliberately exercises sensitive echoes
+
+Added two production-adapter tests in `tests/calle-provider.test.ts`:
+
+1. a failed CALL-E create response echoes a fake API key, owner phone number, webhook URL/capability token, and private task context. The test proves none appears in the thrown application error while a safe request id remains available for provider support correlation;
+2. a failed CALL-E get response contains private callback/phone text and an intentionally unsafe request id. The test proves both the response body and unsafe request id are absent from the thrown error.
+
+The existing provider tests for request mapping, idempotency headers, decision/callback result parsing, active/failed states, HTTP request deadlines, and configuration validation remain intact.
 
 ## Verification performed
 
-The substantive implementation commit `22cb55a1eea793f696bd5bdbb826eb5806db5fbe` passed every repository verification surface:
+The substantive implementation commit `7d1dc88a906e599744fb38fd57c718dc22f845dd` passed every repository verification surface:
 
-- CI run `34278228401` — **success**. Node 24 locked dependency install, TypeScript typecheck, build, and complete test suite passed: **94 tests, 94 passed, 0 failed**.
-- Container run `34278228311` — **success**. Production image build and fake-provider runtime smoke passed.
-- Compose deployment run `34278228408` — **success**. Every step passed, including generated least-privilege credentials, deployment boot/readiness, the strengthened external stdio MCP acceptance, the existing independent HTTP decision/callback in-flight restart scenarios, SQLite persistence, exact safe-checkpoint acknowledgement, and authorization boundaries.
+- CI run `34284003555` — **success**. Node 24 locked dependency install, TypeScript typecheck, build, and complete test suite passed: **96 tests, 96 passed, 0 failed**. This includes both new provider-error privacy regressions.
+- Container run `34284003531` — **success**. Production image build and fake-provider runtime smoke passed.
+- Compose deployment run `34284003522` — **success**. The full scoped-credential Docker/SQLite acceptance remained green, including generated least-privilege credentials, deployment readiness, the real external stdio MCP acceptance, restart while an MCP-raised decision remains active, independent HTTP in-flight decision/callback restart recovery, durable SQLite state, safe-checkpoint exact acknowledgement, and authorization boundaries.
 
-Most importantly, the Compose step `Verify stdio MCP against deployed control plane` passed with `CYA_RESTART_CONTROL_PLANE=true`, so the real MCP child/client remained alive while its MCP-raised owner-decision call was still active across the Docker control-plane restart and continued using the same persistent run/escalation afterward.
-
-`package.json` still has no separate lint script and no standalone migration/schema-check command. The available `npm run check` path covers TypeScript typechecking, build, and the Node test suite, while Container and Compose provide runtime/deployment verification.
+`package.json` still has no separate lint script and no standalone migration/schema-check command. The available `npm run check` path covers TypeScript typechecking, build, and the Node test suite; Container and Compose provide runtime/deployment verification.
 
 No live CALL-E phone call was attempted or claimed.
 
 ## Architecture decisions made this run
 
-1. The primary MCP integration should prove restart continuity while **its own external side effect remains non-terminal**, not merely reconnect to already-terminal durable state afterward.
-2. The MCP adapter remains thin and stateless with respect to domain truth. Keeping the same MCP child alive across a backend restart works because it communicates through the stable HTTP/SDK boundary and durable SQLite control-plane state rather than owning run/escalation state itself.
-3. Restart does not imply agent-wide blocking. The post-restart MCP checkpoint must still show `documentation` active while only `release-approval` is blocked.
-4. Provider reconciliation authority remains separate from the agent MCP credential. The MCP process can request/consume owner decisions but does not gain `calls:reconcile` merely to make the deployment test convenient.
-5. A provider/control-plane restart is not modeled as a fresh decision request. The original persisted escalation/call identity is restored and only one owner decision may be recorded.
-6. Human decision consumption and owner steering remain checkpoint-safe semantics. Nothing in the restart acceptance claims interruption of an in-flight model/token generation.
-7. The deterministic fake provider remains the correct transport for exhaustive restart acceptance. Production CALL-E behavior is not inferred from fake-provider success beyond the shared control-plane/idempotency contracts.
+1. Provider error bodies are untrusted input and must not become an application logging/persistence channel. CALL-E response payloads are parsed only on successful protocol paths where their schema is explicitly expected.
+2. HTTP status is sufficient for generic failure state; a provider request id may aid support/debugging only when it is demonstrably safe to copy verbatim.
+3. Do not attempt broad redaction of an arbitrary provider body. Allowlisting a tiny diagnostic surface is more reliable than trying to identify every possible phone number, token, task, transcript, or future secret field after the fact.
+4. Privacy boundaries apply to failure paths as strongly as success/audit paths. A metadata-only audit design is undermined if provider exception strings can carry full remote bodies.
+5. This hardening belongs entirely in the production CALL-E adapter. It does not change the provider-agnostic control-plane state machine or make the MCP/HTTP/SDK adapters provider-aware.
+6. Ambiguous create semantics remain fail-closed: network/timeout uncertainty still preserves the original idempotency key and replayable request. The change only prevents a known non-2xx response body from leaking into errors.
+7. No successful fake-provider or deployment acceptance is evidence that a real CALL-E phone call has succeeded.
 
 ## CALL-E integration status
 
-- **Fake provider:** deterministic, credential-free, restart-stable provider identities, provider-local rehydration for durable accepted `queued`/`in_progress` calls, optional observation-driven completion, duplicate prevention, and now deployment-proven directly through a long-lived external stdio MCP integration as well as HTTP/Compose flows.
-- **Production CALL-E adapter:** implemented against the documented asynchronous Calls API with server-only `CALLE_API_KEY`, idempotent create, structured result schemas, persisted metadata/correlation, bounded requests, active observation, polling/webhook terminal convergence, exact-key ambiguous recovery, duplicate prevention, and fail-closed stalled handling. Fake-provider rehydration is not used for remote CALL-E calls.
+- **Fake provider:** deterministic, credential-free, restart-stable provider identities, provider-local rehydration for durable accepted `queued`/`in_progress` calls, optional observation-driven completion, duplicate prevention, and deployment-proven through both external stdio MCP and HTTP/Compose flows.
+- **Production CALL-E adapter:** implemented against the asynchronous Calls API with server-only `CALLE_API_KEY`, stable idempotency, structured result schemas, bounded create/poll requests, persisted metadata/correlation, polling/webhook convergence, duplicate prevention, fail-closed ambiguous/stalled handling, and now privacy-safe non-2xx error reporting that never copies arbitrary provider bodies.
 - **Shared surfaces:** HTTP, TypeScript SDK, stdio MCP, lifecycle worker, and deployment workflows continue to share the same persistent `ControlPlane` state-machine semantics.
 - **Live status:** no authorized real CALL-E phone call has been performed, so live provider success remains unverified.
 
@@ -101,12 +108,12 @@ No repository-development blocker prevents further useful work.
 
 Live CALL-E verification still requires user-controlled prerequisites: a valid/authorized CALL-E credential, an authorized owner phone destination, and stable public HTTPS webhook ingress configured with the application-owned webhook capability token.
 
-A true Claude Code host acceptance still requires running the documented MCP registration in a real Claude Code environment. The repository now proves the actual built stdio MCP process, official MCP client protocol, least-privilege authenticated HTTP boundary, SQLite durability, provider-call rehydration, control-plane restart while an MCP-raised decision remains active, durable decision consumption, callbacks, and safe-checkpoint steering. This must still not be described as evidence of an actual Claude Code host run.
+A true Claude Code host acceptance still requires running the documented MCP registration in a real Claude Code environment. The repository proves the actual built stdio MCP process, official MCP client protocol, least-privilege authenticated HTTP boundary, SQLite durability, control-plane restart while an MCP-raised decision remains active, durable decision consumption, callbacks, and safe-checkpoint steering. This must not be described as evidence of an actual Claude Code host run.
 
 ## Highest-value next actions
 
-1. Add a compact, executable Claude Code real-host acceptance/runbook fixture that uses the standard agent credential and existing stdio MCP tools, with exact expected tool sequence and explicit checkpoint semantics. Keep it honest about the remaining need for a real Claude Code host environment.
-2. Strengthen the stdio restart acceptance with exact call-attempt audit correlation for its MCP-raised decision, proving one create/start/completion chain across restart in the same way the HTTP deployment acceptance already does.
-3. Audit MCP child stderr, deployment logs, and restart diagnostics specifically for accidental bearer/webhook secret disclosure; add a regression assertion if any sensitive material could reach normal logs.
-4. Consider documenting the provider-local `rehydrate` port explicitly in `docs/ARCHITECTURE.md`, clearly separating fake/local provider process reconstruction from remote CALL-E's durable provider-side call identity.
+1. Strengthen `tests/mcp-stdio-deployment-acceptance.ts` with exact call-attempt audit correlation for its MCP-raised decision: derive the unique durable call-attempt id and prove exactly one `call_attempt_created`, `call_attempt_started`, and `call_attempt_completed` chain across restart.
+2. Add a compact executable Claude Code real-host acceptance/runbook fixture using the standard agent credential, existing stdio MCP command, expected tool sequence, branch-safe semantics, and explicit checkpoint/acknowledgement behavior. Keep the remaining real-host prerequisite explicit.
+3. Audit the MCP child stderr and normal deployment/lifecycle diagnostic paths for other accidental bearer/webhook/phone/task disclosure and add focused regression assertions where useful.
+4. Document the provider-local fake `rehydrate` port more explicitly in `docs/ARCHITECTURE.md`, separating local fake-provider reconstruction from remote CALL-E's durable provider-side call identity.
 5. When the user-controlled CALL-E prerequisites are available, perform one tightly bounded live provider acceptance and record only observed behavior.
