@@ -22,8 +22,15 @@ export function buildRuntimeFromEnv(env: NodeJS.ProcessEnv = process.env) {
 
   let provider: FakeCallProvider | CalleCallProvider;
   if (providerMode === "fake") {
-    provider = new FakeCallProvider();
+    provider = new FakeCallProvider({
+      autoCompleteAfterObservations: env.CYA_FAKE_AUTO_COMPLETE_AFTER_OBSERVATIONS
+        ? positiveInteger(env.CYA_FAKE_AUTO_COMPLETE_AFTER_OBSERVATIONS, "CYA_FAKE_AUTO_COMPLETE_AFTER_OBSERVATIONS")
+        : undefined,
+    });
   } else if (providerMode === "calle") {
+    if (env.CYA_FAKE_AUTO_COMPLETE_AFTER_OBSERVATIONS?.trim()) {
+      throw new Error("CYA_FAKE_AUTO_COMPLETE_AFTER_OBSERVATIONS is only valid when CYA_CALL_PROVIDER=fake");
+    }
     const webhookToken = required(env.CYA_CALLE_WEBHOOK_TOKEN, "CYA_CALLE_WEBHOOK_TOKEN");
     const publicBaseUrl = required(env.CYA_PUBLIC_BASE_URL, "CYA_PUBLIC_BASE_URL").replace(/\/$/, "");
     provider = new CalleCallProvider({
