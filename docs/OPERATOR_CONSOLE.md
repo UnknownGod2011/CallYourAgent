@@ -30,6 +30,8 @@ The response uses `Cache-Control: no-store`, a restrictive same-origin Content S
 
 For least privilege, use a read token containing `agent:read` + `audit:read` for observation. Use a separate owner token containing `agent:read` + `audit:read` + `owner:callback` only when the callback button is needed. Agent-write and reconciliation authority remain separate. The legacy `CYA_API_TOKEN` remains full-access and is therefore less appropriate for an exposed deployment.
 
+Callback creation/read responses are also privacy-safe. `POST /v1/callbacks` and `GET /v1/callbacks/:id` return only the callback id, run id, status, and timestamps. The persisted phone task can contain the current agent summary/scope and owner prompt, so that replayable task, provider call id, request metadata, idempotency key, and recovery fields remain server-side for trusted reconciliation/recovery rather than being returned to the browser.
+
 ## One-command hackathon fixture
 
 For a reproducible local browser demo, run from the repository root:
@@ -69,7 +71,7 @@ Refresh `/operator`. The blocked-scope list and pending-steering count should bo
 
 Replace the read token with the separately printed owner token and load the same run. Capability discovery should show **Owner callback enabled**.
 
-Click **Call me about this run**. This invokes the normal authenticated `POST /v1/callbacks` contract. The callback request is persisted and its phone task snapshots the run's current status and current scope. The browser receives the ordinary call-attempt response, but it receives no provider credential and cannot reconcile the call itself.
+Click **Call me about this run**. This invokes the normal authenticated `POST /v1/callbacks` contract. The callback request is persisted and its phone task snapshots the run's current status and current scope. The browser receives only the privacy-safe callback view (`id`, `runId`, `status`, `createdAt`, `updatedAt`); the replayable phone task, provider correlation, idempotency key, and recovery state stay inside the trusted control plane.
 
 Press **Enter in the demo terminal again**. The trusted process discovers the newly persisted owner callback for this run, completes that exact fake-provider call, and reconciles it through `ControlPlane.reconcileCallback`. The deterministic owner response produces one new durable steering instruction. Refresh `/operator`: the pending-steering count should now be `1`, and the timeline should show a fresh **Callback → Phone call → Steering queued** sequence. The browser still receives only the count, never the instruction text.
 
@@ -91,7 +93,7 @@ This launcher is intentionally local-only by default and uses an in-memory store
 6. Refresh or enable three-second auto-refresh. The overview should show the independent active scope separately from the unresolved blocked scope(s).
 7. Follow the stage-labelled causal timeline to distinguish the decision request, provider-call progress, owner decision, callback, queued steering, and eventual exact acknowledgement.
 8. If owner steering has been queued, the page shows only the pending count; the instruction text remains available solely through the agent checkpoint contract.
-9. To demonstrate owner → agent control, load an owner-scoped token, request a callback through the page, and let a trusted backend/reconciliation worker process the provider outcome. The browser should not receive reconciliation authority.
+9. To demonstrate owner → agent control, load an owner-scoped token, request a callback through the page, and let a trusted backend/reconciliation worker process the provider outcome. The browser should not receive reconciliation authority or the replayable phone-task state.
 10. Consume resulting steering only at the agent's next safe checkpoint and acknowledge exactly the instruction ids actually incorporated.
 
 The console is deliberately not presented as evidence of live CALL-E success. In fake mode it visualizes the deterministic control-plane flow; live phone transport remains separately gated by real CALL-E credentials, an authorized destination, and public HTTPS webhook ingress.
