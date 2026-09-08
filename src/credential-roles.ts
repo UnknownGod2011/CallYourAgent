@@ -3,7 +3,7 @@ import type { ApiCredential, ApiScope } from "./http-server.js";
 export type ApiCredentialRole = "agent" | "operator-read" | "owner" | "reconciler";
 
 const ROLE_SCOPES: Record<ApiCredentialRole, readonly ApiScope[]> = {
-  agent: ["agent:read", "agent:write", "audit:read"],
+  agent: ["agent:read", "agent:write", "decision:read", "audit:read"],
   "operator-read": ["agent:read", "audit:read"],
   owner: ["agent:read", "audit:read", "owner:callback"],
   reconciler: ["calls:reconcile"],

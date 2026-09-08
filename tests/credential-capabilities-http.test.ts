@@ -30,6 +30,7 @@ async function capabilities(base: string, token?: string) {
 test("capabilities endpoint exposes only authenticated credential identity and effective scopes", async () => {
   const base = await start([
     { id: "read-only", token: "read-secret", scopes: ["agent:read", "audit:read"] },
+    { id: "agent", token: "agent-secret", scopes: ["agent:read", "agent:write", "decision:read", "audit:read"] },
     { id: "owner", token: "owner-secret", scopes: ["agent:read", "audit:read", "owner:callback"] },
   ]);
 
@@ -44,6 +45,13 @@ test("capabilities endpoint exposes only authenticated credential identity and e
     scopes: ["agent:read", "audit:read"],
   });
 
+  const agent = await capabilities(base, "agent-secret");
+  assert.equal(agent.response.status, 200);
+  assert.deepEqual(agent.body, {
+    credentialId: "agent",
+    scopes: ["agent:read", "agent:write", "decision:read", "audit:read"],
+  });
+
   const owner = await capabilities(base, "owner-secret");
   assert.equal(owner.response.status, 200);
   assert.deepEqual(owner.body, {
@@ -51,10 +59,10 @@ test("capabilities endpoint exposes only authenticated credential identity and e
     scopes: ["agent:read", "audit:read", "owner:callback"],
   });
 
-  const serialized = JSON.stringify([readOnly.body, owner.body]);
-  assert.doesNotMatch(serialized, /read-secret|owner-secret/);
+  const serialized = JSON.stringify([readOnly.body, agent.body, owner.body]);
+  assert.doesNotMatch(serialized, /read-secret|agent-secret|owner-secret/);
   assert.doesNotMatch(serialized, /token/i);
-  assert.doesNotMatch(serialized, /agent:write|calls:reconcile/);
+  assert.doesNotMatch(JSON.stringify([readOnly.body, owner.body]), /decision:read|agent:write|calls:reconcile/);
 });
 
 test("legacy wildcard credential reports concrete effective capabilities instead of wildcard", async () => {
@@ -64,7 +72,7 @@ test("legacy wildcard credential reports concrete effective capabilities instead
   assert.equal(legacy.response.status, 200);
   assert.deepEqual(legacy.body, {
     credentialId: "legacy",
-    scopes: ["agent:read", "agent:write", "audit:read", "owner:callback", "calls:reconcile"],
+    scopes: ["agent:read", "agent:write", "decision:read", "audit:read", "owner:callback", "calls:reconcile"],
   });
   assert.doesNotMatch(JSON.stringify(legacy.body), /legacy-secret|"\*"/);
 });

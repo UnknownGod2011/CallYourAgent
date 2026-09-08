@@ -7,7 +7,7 @@ import {
 } from "../src/credential-roles.js";
 
 const expected: Record<ApiCredentialRole, string[]> = {
-  agent: ["agent:read", "agent:write", "audit:read"],
+  agent: ["agent:read", "agent:write", "decision:read", "audit:read"],
   "operator-read": ["agent:read", "audit:read"],
   owner: ["agent:read", "audit:read", "owner:callback"],
   reconciler: ["calls:reconcile"],
@@ -21,7 +21,7 @@ test("standard credential roles are least privilege and never inherit wildcard a
   }
 });
 
-test("owner role can observe and request callbacks without agent mutation or reconciliation authority", () => {
+test("owner role can observe and request callbacks without decision, agent mutation, or reconciliation authority", () => {
   const credential = credentialForRole("owner-ui", "owner-secret", "owner");
 
   assert.deepEqual(credential, {
@@ -29,9 +29,15 @@ test("owner role can observe and request callbacks without agent mutation or rec
     token: "owner-secret",
     scopes: ["agent:read", "audit:read", "owner:callback"],
   });
+  assert.equal(credential.scopes.includes("decision:read"), false);
   assert.equal(credential.scopes.includes("agent:write"), false);
   assert.equal(credential.scopes.includes("calls:reconcile"), false);
   assert.equal(credential.scopes.includes("*"), false);
+});
+
+test("operator-read role cannot read owner decision answers", () => {
+  assert.equal(scopesForCredentialRole("operator-read").includes("decision:read"), false);
+  assert.equal(scopesForCredentialRole("agent").includes("decision:read"), true);
 });
 
 test("scope arrays are copied so one integration cannot mutate the shared role preset", () => {

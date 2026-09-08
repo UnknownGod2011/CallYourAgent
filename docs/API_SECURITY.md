@@ -8,18 +8,19 @@ CallYourAgent's HTTP boundary separates ordinary agent work from operations that
 
 Supported scopes are:
 
-- `agent:read` — read runs, escalation/decision state, and privacy-safe callback state;
+- `agent:read` — read runs, escalation metadata, and privacy-safe callback state;
 - `agent:write` — register agents, start/report runs, checkpoint, and request owner decisions;
+- `decision:read` — read the owner's durable decision answer and structured result for an escalation; this route also requires `agent:read`;
 - `audit:read` — read the privacy-aware run audit timeline;
 - `owner:callback` — request an owner-initiated callback to an active run;
 - `calls:reconcile` — explicitly reconcile decision/callback calls with the provider;
 - `*` — full trusted access.
 
-The intended split is that normal agent/MCP credentials receive `agent:read`, `agent:write`, and optionally `audit:read`. A human-facing owner surface receives `owner:callback` (plus read access if needed). A trusted backend/operator worker receives `calls:reconcile`. This prevents a compromised normal agent credential from directly generating owner callbacks or repeatedly exercising provider reconciliation endpoints.
+The intended split is that normal agent/MCP credentials receive `agent:read`, `agent:write`, `decision:read`, and optionally `audit:read`. A human-facing owner surface receives `owner:callback` plus only the observational read scopes it actually needs; the standard owner role intentionally does **not** receive `decision:read`. A read-only operator also intentionally lacks `decision:read`. A trusted backend/operator worker receives `calls:reconcile`. This prevents a browser-facing owner/operator credential from retrieving private decision answers merely because it can render run state, while preserving the answer for the agent that must safely resume the affected scope.
 
 The exported helpers in `src/credential-roles.ts` provide standard least-privilege role presets for integrations that construct credentials programmatically:
 
-- `agent` → `agent:read`, `agent:write`, `audit:read`;
+- `agent` → `agent:read`, `agent:write`, `decision:read`, `audit:read`;
 - `operator-read` → `agent:read`, `audit:read`;
 - `owner` → `agent:read`, `audit:read`, `owner:callback`;
 - `reconciler` → `calls:reconcile`.
@@ -36,9 +37,25 @@ Authenticated clients can inspect the effective permissions of the bearer creden
 GET /v1/auth/capabilities
 ```
 
-The response contains only the stable credential id and its effective concrete scopes. It never returns bearer-token material. A legacy trusted `*` credential is projected as the five concrete capabilities rather than exposing the wildcard itself. This keeps owner/operator surfaces from needing to infer privileges from token labels or from probing side-effecting endpoints.
+The response contains only the stable credential id and its effective concrete scopes. It never returns bearer-token material. A legacy trusted `*` credential is projected as the six concrete capabilities rather than exposing the wildcard itself. This keeps owner/operator surfaces from needing to infer privileges from token labels or from probing side-effecting endpoints.
 
 The endpoint is authenticated, side-effect free, and returned with `Cache-Control: no-store`. It does not grant access to any run data on its own; normal route-level scope checks remain authoritative.
+
+## Owner decision response privacy
+
+`GET /v1/escalations/:id` is the endpoint that returns the persisted `OwnerDecision`, including the owner's answer and optional structured result. It now requires **both** `agent:read` and `decision:read`.
+
+The split is intentional:
+
+- the standard `agent` role receives `decision:read` because an agent that raised a decision must be able to consume the durable answer and resume the affected branch safely;
+- `operator-read` can observe run/branch/audit state but cannot retrieve the answer;
+- `owner` can observe the run and request callbacks but cannot retrieve the answer through the browser/API merely by virtue of having `agent:read`;
+- `reconciler` remains provider-facing and cannot read agent or decision state;
+- legacy `*` remains full trusted access for backwards-compatible local deployments.
+
+A custom credential with only `decision:read` is also insufficient: `agent:read` is still required. This prevents a narrowly issued decision capability from becoming a standalone data-exfiltration credential.
+
+Deployments that previously gave custom agent credentials only `agent:read`/`agent:write` and relied on `GET /v1/escalations/:id` must add `decision:read`. The standard `agent` role helper already includes it.
 
 ## Owner callback response privacy
 

@@ -222,7 +222,7 @@ export function lifecycleSweepIntervalMsFromEnv(env: NodeJS.ProcessEnv): number 
 }
 
 function isApiScope(value: unknown): value is ApiScope {
-  return typeof value === "string" && ["agent:read", "agent:write", "audit:read", "owner:callback", "calls:reconcile", "*"].includes(value);
+  return typeof value === "string" && ["agent:read", "agent:write", "decision:read", "audit:read", "owner:callback", "calls:reconcile", "*"].includes(value);
 }
 
 function required(value: string | undefined, name: string): string {

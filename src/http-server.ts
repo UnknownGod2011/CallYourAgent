@@ -7,7 +7,7 @@ import type { ControlPlane } from "./control-plane.js";
 import { operatorConsoleHtml } from "./operator-ui.js";
 import { getRunOverview } from "./run-overview.js";
 
-export type ApiScope = "agent:read" | "agent:write" | "audit:read" | "owner:callback" | "calls:reconcile" | "*";
+export type ApiScope = "agent:read" | "agent:write" | "decision:read" | "audit:read" | "owner:callback" | "calls:reconcile" | "*";
 
 export interface ApiCredential {
   id: string;
@@ -23,6 +23,7 @@ export interface CredentialCapabilities {
 const CONCRETE_API_SCOPES: Exclude<ApiScope, "*">[] = [
   "agent:read",
   "agent:write",
+  "decision:read",
   "audit:read",
   "owner:callback",
   "calls:reconcile",
@@ -191,6 +192,7 @@ export function createControlPlaneHttpServer(controlPlane: ControlPlane, options
       const escalationMatch = url.pathname.match(/^\/v1\/escalations\/([^/]+)$/);
       if (req.method === "GET" && escalationMatch) {
         if (!hasScope(credential, "agent:read")) return forbidden(res, "agent:read");
+        if (!hasScope(credential, "decision:read")) return forbidden(res, "decision:read");
         const id = decodeURIComponent(escalationMatch[1]!);
         return json(res, 200, { escalation: controlPlane.getEscalation(id), decision: controlPlane.getDecision(id) ?? null });
       }
