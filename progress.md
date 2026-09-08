@@ -6,11 +6,11 @@ CallYourAgent is a durable Node 24 TypeScript control plane for asynchronous two
 
 The repository currently includes deterministic fake and production CALL-E providers, SQLite persistence, replayable/idempotent call attempts, polling/webhook convergence, branch-scoped blocking, owner decision persistence, durable per-run instruction queues, exact instruction acknowledgement, call policy/quiet hours/budgets, bounded lifecycle recovery, fail-closed ambiguous/stalled handling, privacy-aware audit history, scoped HTTP authentication, a typed TypeScript client, real stdio MCP, a deterministic end-to-end demo, operator console, and a single-instance persistent-volume Compose reference deployment.
 
-This run hardened the production CALL-E boundary after a repository-wide audit found that non-2xx provider responses were copied into application error strings. Because those errors can be persisted as call-attempt recovery state or emitted by lifecycle diagnostics, a provider response that echoed request data could have propagated sensitive phone/task/webhook material into logs or durable error state. Production CALL-E HTTP failures now expose only the HTTP status plus an optional tightly validated provider request id; arbitrary response bodies are never copied into application errors.
+This run strengthened the exactly-once reliability contract around a branch-blocking owner-decision call that survives a process-style restart. A new SQLite regression correlates the decision call by its durable `callAttemptId` and proves that restart plus repeated reconciliation still produces exactly one `call_attempt_created -> call_attempt_started -> call_attempt_completed` audit chain and exactly one owner decision, while unrelated `documentation` work remains active and only the `release-approval` scope is blocked until the decision resolves.
 
 ## Exact repo state inspected this run
 
-The run started from `main` HEAD `803d8ed786a27f6be6d752c138381b0ff4ac910a`.
+The run started from `main` HEAD `157adc1ee1708c0417f56b4d098484f1f5d726dd`.
 
 Before making any change, inspected the complete recursive repository tree and current architecture, recent commits, and repository issues/pull requests. There were no open issues or pull requests.
 
@@ -29,57 +29,51 @@ Read in full before implementation:
 
 Also inspected the relevant implementation/deployment surfaces, especially:
 
-- `src/calle-provider.ts`, including live create/poll HTTP behavior, structured results, timeouts, and error handling;
-- `src/server.ts`, including where provider exceptions may surface through lifecycle diagnostics and persisted recovery paths;
-- `src/domain.ts`, especially durable `CallAttempt.lastError` and metadata-only `AuditEvent` contracts;
-- `tests/calle-provider.test.ts` and the existing live-adapter contract coverage;
-- `tests/mcp-stdio-deployment-acceptance.ts`, which launches the actual built stdio MCP process and keeps it alive across a Dockerized control-plane restart;
-- `.github/workflows/compose.yml`, including scoped credentials, SQLite persistence, in-flight decision/callback restart recovery, and stdio MCP acceptance;
-- recent fake-provider restart/rehydration and MCP restart commits.
+- `tests/mcp-stdio-deployment-acceptance.ts`, including the real built stdio MCP child, official MCP client, scoped credentials, branch-blocking owner decision, control-plane restart, durable decision consumption, callback steering, safe checkpoint, and exact acknowledgement path;
+- `src/domain.ts`, especially `AuditEvent.callAttemptId`, monotonic `sequence`, and the call-attempt/decision event types;
+- `tests/audit-timeline.test.ts`, for existing metadata-only audit guarantees;
+- `tests/fake-provider-rehydration.test.ts`, for durable fake-provider call restoration semantics;
+- `.github/workflows/compose.yml`, including existing exact callback-call audit correlation and the full Docker/SQLite/stdin MCP restart acceptance;
+- `package.json`, including the available `check`, typecheck, build, and test commands;
+- recent commits for CALL-E error redaction, stdio MCP restart acceptance, fake-provider restart identity, and in-flight Compose restart recovery.
 
-The previous run had already proven that the same external MCP process can remain alive while an MCP-raised blocking owner-decision call remains non-terminal across a control-plane restart. The initial next candidate was stronger exact call-attempt audit correlation for that path. During the production provider audit, however, the raw CALL-E response-body propagation was identified as the higher-value reliability/security issue and was fixed first.
+The previous run had already hardened production CALL-E non-2xx failures so arbitrary provider response bodies cannot leak sensitive phone/task/webhook material into application errors. The highest-value next gap recorded there was exact durable call-attempt correlation across restart for the primary decision path; this run implemented a focused executable regression for that invariant while preserving all existing deployment behavior.
 
-The automation environment did not provide a local repository checkout suitable for running the Node/Docker suite directly. Repository reads/writes used the connected GitHub integration and executable verification used the repository's GitHub Actions workflows. No unsupported local execution claim is made.
+The automation environment did not provide a persistent local checkout suitable for running the Node/Docker suite directly. Repository reads/writes used the connected GitHub integration and executable verification used the repository's GitHub Actions workflows. No unsupported local execution claim is made.
 
 ## Changes made this run
 
-### CALL-E non-2xx response bodies no longer enter application errors
+### Exact decision-call audit chain is now regression-tested across restart
 
-Implemented in commit `7d1dc88a906e599744fb38fd57c718dc22f845dd` (`fix: redact CALL-E HTTP error bodies`).
+Implemented in commit `adc41155300840ad438d307b4c249190421216ad` (`test: correlate decision call audit across restart`).
 
-Previously both production provider operations did the equivalent of:
+Added `tests/decision-call-audit-restart.test.ts`. The test deliberately exercises the same architectural invariants used by the deployed MCP path while keeping the assertion focused on durable control-plane state:
 
-- `POST /v1/calls` failure -> include up to 500 characters of the raw response body in the thrown error;
-- `GET /v1/calls/{id}` failure -> include up to 500 characters of the raw response body in the thrown error.
+1. start a SQLite-backed control plane with the deterministic fake provider;
+2. register an MCP-style agent and start a run whose active/current scope is `documentation`;
+3. raise a blocking owner decision for `release-approval`;
+4. capture the escalation's durable `callAttemptId`;
+5. before restart, prove that exact attempt has one `call_attempt_created`, one `call_attempt_started`, and no terminal event yet;
+6. prove `documentation` remains the current independent scope while only `release-approval` appears in `unresolvedBlockingScopes`;
+7. close the durable store and reconstruct both the SQLite store and fake provider, modeling process restart;
+8. reconcile the persisted decision call through normal provider rehydration and terminal reconciliation;
+9. retry reconciliation deliberately;
+10. prove the exact same `callAttemptId` has exactly one created/start/completed event chain, in causal sequence order;
+11. prove no ambiguous/failed event was fabricated during restart recovery;
+12. prove exactly one `owner_decision_recorded` exists for the escalation;
+13. prove the blocked scope releases while the independent `documentation` scope remains current.
 
-That was unnecessarily risky because a remote service, gateway, or test endpoint can echo submitted fields. A create request contains the owner phone destination, the agent's phone task/context, caller metadata, and the application-generated webhook URL. Persisting or logging an echoed body would create a second sensitive-content channel outside the deliberately privacy-aware domain/audit design.
+The regression guards against a subtle class of future failures where provider reconstruction or a retry could masquerade as a second phone create/start, duplicate a terminal transition, or duplicate the owner's durable decision even though the logical call should remain one real-world side effect.
 
-`src/calle-provider.ts` now routes non-2xx responses through one privacy-safe `providerHttpError` helper. The resulting errors contain only:
-
-- the fixed operation name (`create` or `get`);
-- the HTTP status code;
-- optionally `x-request-id` when it matches a strict allowlist of `A-Z`, `a-z`, digits, `.`, `_`, `:`, `-` and is at most 128 characters.
-
-The provider response body is not read into the error at all. Unsafe request-id values are ignored rather than sanitized or partially copied.
-
-This does not alter successful CALL-E response parsing, provider idempotency, persisted call identity, polling/webhook convergence, structured owner decisions, callback instructions, timeout behavior, or ambiguous-side-effect recovery semantics.
-
-### Regression coverage deliberately exercises sensitive echoes
-
-Added two production-adapter tests in `tests/calle-provider.test.ts`:
-
-1. a failed CALL-E create response echoes a fake API key, owner phone number, webhook URL/capability token, and private task context. The test proves none appears in the thrown application error while a safe request id remains available for provider support correlation;
-2. a failed CALL-E get response contains private callback/phone text and an intentionally unsafe request id. The test proves both the response body and unsafe request id are absent from the thrown error.
-
-The existing provider tests for request mapping, idempotency headers, decision/callback result parsing, active/failed states, HTTP request deadlines, and configuration validation remain intact.
+No production state machine was changed because the existing implementation already satisfied the intended invariant. This run converts that behavior into an explicit durable contract that future adapter/provider changes must preserve.
 
 ## Verification performed
 
-The substantive implementation commit `7d1dc88a906e599744fb38fd57c718dc22f845dd` passed every repository verification surface:
+The substantive implementation commit `adc41155300840ad438d307b4c249190421216ad` passed every repository verification surface:
 
-- CI run `34284003555` — **success**. Node 24 locked dependency install, TypeScript typecheck, build, and complete test suite passed: **96 tests, 96 passed, 0 failed**. This includes both new provider-error privacy regressions.
-- Container run `34284003531` — **success**. Production image build and fake-provider runtime smoke passed.
-- Compose deployment run `34284003522` — **success**. The full scoped-credential Docker/SQLite acceptance remained green, including generated least-privilege credentials, deployment readiness, the real external stdio MCP acceptance, restart while an MCP-raised decision remains active, independent HTTP in-flight decision/callback restart recovery, durable SQLite state, safe-checkpoint exact acknowledgement, and authorization boundaries.
+- CI run `34288656547` — **success**. Node `24.20.0`, locked dependency install, TypeScript typecheck, build, and complete Node test suite passed: **97 tests, 97 passed, 0 failed**. The log explicitly includes the new `decision call keeps one exact created-started-completed audit chain across restart and reconciliation retry` regression as passing.
+- Container run `34288656591` — **success**. Production image build and deterministic fake-provider runtime smoke both passed.
+- Compose deployment run `34288656546` — **success**. The complete Docker/SQLite/scoped-credential acceptance passed, including credential generation/capabilities, the actual built stdio MCP process against the deployed control plane, restart while an MCP-raised owner decision is still active, branch-specific release after reconciliation, owner-requested context-aware callback, restart while that callback remains active, exactly-once restored callback reconciliation, another restart after steering is durable, and exact safe-checkpoint acknowledgement after restart.
 
 `package.json` still has no separate lint script and no standalone migration/schema-check command. The available `npm run check` path covers TypeScript typechecking, build, and the Node test suite; Container and Compose provide runtime/deployment verification.
 
@@ -87,18 +81,18 @@ No live CALL-E phone call was attempted or claimed.
 
 ## Architecture decisions made this run
 
-1. Provider error bodies are untrusted input and must not become an application logging/persistence channel. CALL-E response payloads are parsed only on successful protocol paths where their schema is explicitly expected.
-2. HTTP status is sufficient for generic failure state; a provider request id may aid support/debugging only when it is demonstrably safe to copy verbatim.
-3. Do not attempt broad redaction of an arbitrary provider body. Allowlisting a tiny diagnostic surface is more reliable than trying to identify every possible phone number, token, task, transcript, or future secret field after the fact.
-4. Privacy boundaries apply to failure paths as strongly as success/audit paths. A metadata-only audit design is undermined if provider exception strings can carry full remote bodies.
-5. This hardening belongs entirely in the production CALL-E adapter. It does not change the provider-agnostic control-plane state machine or make the MCP/HTTP/SDK adapters provider-aware.
-6. Ambiguous create semantics remain fail-closed: network/timeout uncertainty still preserves the original idempotency key and replayable request. The change only prevents a known non-2xx response body from leaking into errors.
-7. No successful fake-provider or deployment acceptance is evidence that a real CALL-E phone call has succeeded.
+1. `callAttemptId` is the correct durable correlation key for proving one logical real-world phone interaction across provider/process restart. Provider-local object identity must never be treated as the source of truth.
+2. Fake-provider rehydration is reconstruction of already-accepted local provider state, not another provider create. Therefore restart must never emit a second `call_attempt_started` event for the same durable attempt.
+3. Reconciliation is intentionally retryable. Repeating reconciliation after terminal evidence has already been applied must not create another terminal audit transition or another owner decision.
+4. Audit history is part of the reliability contract, not merely presentation data. The causal sequence `created < started < completed` should remain stable enough to catch duplicate-side-effect regressions.
+5. Branch-scoped blocking remains independent from provider recovery: `release-approval` can stay blocked while `documentation` continues, and restart/reconciliation must not broaden the block to the whole run.
+6. This focused SQLite/domain regression complements, rather than replaces, the real stdio MCP + authenticated HTTP + Docker + persistent SQLite Compose acceptance. The deployment path remains the integration-level proof that those surfaces compose correctly.
+7. No successful fake-provider, CI, container, or Compose acceptance is evidence that a real CALL-E phone call has succeeded.
 
 ## CALL-E integration status
 
-- **Fake provider:** deterministic, credential-free, restart-stable provider identities, provider-local rehydration for durable accepted `queued`/`in_progress` calls, optional observation-driven completion, duplicate prevention, and deployment-proven through both external stdio MCP and HTTP/Compose flows.
-- **Production CALL-E adapter:** implemented against the asynchronous Calls API with server-only `CALLE_API_KEY`, stable idempotency, structured result schemas, bounded create/poll requests, persisted metadata/correlation, polling/webhook convergence, duplicate prevention, fail-closed ambiguous/stalled handling, and now privacy-safe non-2xx error reporting that never copies arbitrary provider bodies.
+- **Fake provider:** deterministic, credential-free, restart-stable provider identities, provider-local rehydration for durable accepted `queued`/`in_progress` calls, optional observation-driven completion, duplicate prevention, exact call-attempt audit-chain coverage across restart, and deployment-proven through both external stdio MCP and HTTP/Compose flows.
+- **Production CALL-E adapter:** implemented against the asynchronous Calls API with server-only `CALLE_API_KEY`, stable idempotency, structured result schemas, bounded create/poll requests, persisted metadata/correlation, polling/webhook convergence, duplicate prevention, fail-closed ambiguous/stalled handling, and privacy-safe non-2xx error reporting that never copies arbitrary provider bodies.
 - **Shared surfaces:** HTTP, TypeScript SDK, stdio MCP, lifecycle worker, and deployment workflows continue to share the same persistent `ControlPlane` state-machine semantics.
 - **Live status:** no authorized real CALL-E phone call has been performed, so live provider success remains unverified.
 
@@ -112,8 +106,8 @@ A true Claude Code host acceptance still requires running the documented MCP reg
 
 ## Highest-value next actions
 
-1. Strengthen `tests/mcp-stdio-deployment-acceptance.ts` with exact call-attempt audit correlation for its MCP-raised decision: derive the unique durable call-attempt id and prove exactly one `call_attempt_created`, `call_attempt_started`, and `call_attempt_completed` chain across restart.
+1. Extend `tests/mcp-stdio-deployment-acceptance.ts` itself with exact `callAttemptId` correlation for the MCP-raised blocking decision, proving the real stdio MCP -> SDK -> authenticated HTTP -> SQLite deployment path has one and only one `call_attempt_created`, `call_attempt_started`, and `call_attempt_completed` chain across restart. The focused regression added this run establishes the expected durable semantics and reduces risk for that deployment-level assertion.
 2. Add a compact executable Claude Code real-host acceptance/runbook fixture using the standard agent credential, existing stdio MCP command, expected tool sequence, branch-safe semantics, and explicit checkpoint/acknowledgement behavior. Keep the remaining real-host prerequisite explicit.
-3. Audit the MCP child stderr and normal deployment/lifecycle diagnostic paths for other accidental bearer/webhook/phone/task disclosure and add focused regression assertions where useful.
+3. Audit MCP child stderr and normal deployment/lifecycle diagnostic paths for accidental bearer/webhook/phone/task disclosure and add focused regression assertions where useful.
 4. Document the provider-local fake `rehydrate` port more explicitly in `docs/ARCHITECTURE.md`, separating local fake-provider reconstruction from remote CALL-E's durable provider-side call identity.
 5. When the user-controlled CALL-E prerequisites are available, perform one tightly bounded live provider acceptance and record only observed behavior.
