@@ -68,6 +68,34 @@ test("opt-in fake auto-completion queues callback steering for safe checkpoint a
   assert.equal(control.checkpoint(run.id).queuedInstructions.length, 0);
 });
 
+test("fake provider call ids remain deterministic and collision-free across provider restarts", async () => {
+  const firstProcess = new FakeCallProvider();
+  const first = await firstProcess.start({
+    idempotencyKey: "restart-stable-call-a",
+    purpose: "owner_callback",
+    task: "First call",
+    metadata: {},
+  });
+
+  const restartedProcess = new FakeCallProvider();
+  const replayed = await restartedProcess.start({
+    idempotencyKey: "restart-stable-call-a",
+    purpose: "owner_callback",
+    task: "First call replay",
+    metadata: {},
+  });
+  const second = await restartedProcess.start({
+    idempotencyKey: "restart-stable-call-b",
+    purpose: "owner_callback",
+    task: "Second logical call",
+    metadata: {},
+  });
+
+  assert.match(first.providerCallId, /^fake_call_[0-9a-f]{24}$/);
+  assert.equal(replayed.providerCallId, first.providerCallId);
+  assert.notEqual(second.providerCallId, first.providerCallId);
+});
+
 test("fake auto-completion is disabled by default and validates its observation threshold", async () => {
   const provider = new FakeCallProvider();
   const started = await provider.start({
