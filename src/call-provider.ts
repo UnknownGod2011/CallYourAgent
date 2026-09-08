@@ -41,12 +41,23 @@ export interface FakeCallProviderOptions {
    * providers that begin dialing before the create response is returned.
    */
   initialStatus?: "queued" | "in_progress";
+  /**
+   * Optional deployment/demo mode that makes an accepted fake call terminal after
+   * this many provider observations. It is disabled by default, so existing tests
+   * retain explicit control through `progress`/`complete`.
+   *
+   * This exists so a separately running HTTP/container deployment can exercise the
+   * complete fake-provider lifecycle without exposing a fake-provider mutation API.
+   */
+  autoCompleteAfterObservations?: number;
 }
 
 interface FakeCallState {
   id: string;
+  purpose: StartCallInput["purpose"];
   status: "queued" | "in_progress";
   outcome: CallOutcome | null;
+  observations: number;
 }
 
 export class FakeCallProvider implements CallProvider {
@@ -54,9 +65,16 @@ export class FakeCallProvider implements CallProvider {
   private readonly calls = new Map<string, FakeCallState>();
   private readonly byIdempotencyKey = new Map<string, StartCallResult>();
   private readonly initialStatus: "queued" | "in_progress";
+  private readonly autoCompleteAfterObservations?: number;
 
   constructor(options: FakeCallProviderOptions = {}) {
     this.initialStatus = options.initialStatus ?? "queued";
+    if (options.autoCompleteAfterObservations !== undefined) {
+      if (!Number.isInteger(options.autoCompleteAfterObservations) || options.autoCompleteAfterObservations < 1) {
+        throw new Error("FakeCallProvider autoCompleteAfterObservations must be a positive integer");
+      }
+      this.autoCompleteAfterObservations = options.autoCompleteAfterObservations;
+    }
   }
 
   async start(input: StartCallInput): Promise<StartCallResult> {
@@ -66,7 +84,13 @@ export class FakeCallProvider implements CallProvider {
     const providerCallId = `fake_call_${this.calls.size + 1}`;
     const result: StartCallResult = { providerCallId, status: this.initialStatus };
     this.byIdempotencyKey.set(input.idempotencyKey, result);
-    this.calls.set(providerCallId, { id: providerCallId, status: this.initialStatus, outcome: null });
+    this.calls.set(providerCallId, {
+      id: providerCallId,
+      purpose: input.purpose,
+      status: this.initialStatus,
+      outcome: null,
+      observations: 0,
+    });
     return { ...result };
   }
 
@@ -74,6 +98,13 @@ export class FakeCallProvider implements CallProvider {
     const call = this.calls.get(providerCallId);
     if (!call) throw new Error(`Unknown fake call: ${providerCallId}`);
     if (call.outcome) return { ...call.outcome };
+
+    call.observations += 1;
+    if (this.autoCompleteAfterObservations !== undefined && call.observations >= this.autoCompleteAfterObservations) {
+      call.outcome = this.deterministicOutcome(call);
+      return { ...call.outcome };
+    }
+
     return call.status === "queued"
       ? { providerCallId: call.id, status: "queued" }
       : { providerCallId: call.id, status: "in_progress" };
@@ -95,5 +126,22 @@ export class FakeCallProvider implements CallProvider {
     const call = this.calls.get(providerCallId);
     if (!call) throw new Error(`Unknown fake call: ${providerCallId}`);
     call.outcome = outcome;
+  }
+
+  private deterministicOutcome(call: FakeCallState): CallOutcome {
+    if (call.purpose === "owner_decision") {
+      return {
+        providerCallId: call.id,
+        status: "completed",
+        answer: "Proceed with the requested scope.",
+        structured: { decision: "proceed", source: "deterministic_fake_provider" },
+      };
+    }
+    return {
+      providerCallId: call.id,
+      status: "completed",
+      instructions: ["Continue the current plan and report progress at the next safe checkpoint."],
+      structured: { source: "deterministic_fake_provider" },
+    };
   }
 }
