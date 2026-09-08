@@ -30,6 +30,7 @@ test("typed client exposes authenticated credential capabilities", async () => {
   assert.deepEqual(capabilities.scopes, [
     "agent:read",
     "agent:write",
+    "decision:read",
     "audit:read",
     "owner:callback",
     "calls:reconcile",
