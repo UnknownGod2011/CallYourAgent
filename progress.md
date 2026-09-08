@@ -6,106 +6,87 @@ CallYourAgent is a durable Node 24 TypeScript control plane for asynchronous two
 
 The repository includes SQLite persistence, deterministic fake and production CALL-E providers, replayable/idempotent call attempts, polling/webhook convergence, scoped authenticated HTTP APIs, a typed TypeScript client, stdio MCP, branch-scoped blocking, call policy/quiet hours/budgets, privacy-aware audit history, bounded lifecycle recovery, fail-closed ambiguous/stalled handling, API abuse controls, graceful shutdown, bounded CALL-E HTTP requests, readiness/liveness surfaces, deterministic end-to-end and operator demos, a production Docker image, and a single-instance persistent-volume Compose deployment.
 
-This run completed a judge-facing branch-semantics visualization increment. `/operator` now gives a concise visual contrast between independent work continuing while another scope is owner-gated, and the post-decision state where no blocking scope remains and the run has resumed active work. The visualization is derived only from the existing privacy-safe run overview plus persisted audit events; it does not create browser-side business state or expose decision/instruction contents.
+This run added a privacy-safe latest owner-callback status projection to the existing run overview and surfaced it in `/operator`. Judges can now watch the latest owner-requested callback move through queued/in-progress/completed or fail-closed states without the browser fetching the full persisted call task, callback prompt, provider transcript, owner instruction text, or reconciliation authority.
 
 ## Exact repo state inspected this run
 
-Before making any changes, inspected the complete recursive `main` tree at HEAD `d1b58c784458377e5a014500d7b9cd782381f275`. The GitHub recursive tree response reported `truncated: false` and covered root files, GitHub Actions workflows, deployment assets, all documentation, every `src` file, and the complete tests directory.
+Before making changes, inspected the complete recursive `main` tree at HEAD `4f6ea30ff99bd9c30b8236a385b6bacc2162ef6f`, covering root files, workflows, deploy assets, docs, `src`, and tests. Read `AGENTS.md`, this file, `README.md`, `docs/ARCHITECTURE.md`, `docs/INTEGRATIONS.md`, `docs/API_SECURITY.md`, `docs/CALL_POLICY.md`, `docs/DEPLOYMENT.md`, `docs/OPERATOR_CONSOLE.md`, and `deploy/README.md` in full before editing.
 
-Read `AGENTS.md` in full, this file in full, `README.md` in full, and every architecture/integration/operations document present before editing: `docs/ARCHITECTURE.md`, `docs/INTEGRATIONS.md`, `docs/API_SECURITY.md`, `docs/CALL_POLICY.md`, `docs/DEPLOYMENT.md`, `docs/OPERATOR_CONSOLE.md`, and `deploy/README.md`.
+Inspected recent commits through the branch-safe operator visualization. Checked repository issues and pull requests; there were no open issues and no PRs. Inspected the relevant implementation surfaces: `src/operator-ui.ts`, `src/run-overview.ts`, `src/http-server.ts`, `src/control-plane.ts`, `src/domain.ts`, `tests/operator-ui.test.ts`, and `tests/run-overview.test.ts`.
 
-Inspected recent commits through the fresh owner-callback demo increment. Checked repository issues and pull requests; there were no open issues and no open PRs.
-
-Inspected the implementation/test surfaces relevant to this increment, especially `src/operator-ui.ts`, `tests/operator-ui.test.ts`, `tests/audit-timeline.test.ts`, and the durable `AuditEvent` contract in `src/domain.ts`. Confirmed that the operator already consumed `GET /v1/runs/:runId/overview` and the metadata-only audit timeline, and that `owner_decision_recorded` is durable audit evidence that can be used for presentation without exposing the decision answer.
-
-A direct local clone/test run was attempted before repository mutation, but this automation container still could not resolve `github.com`. Therefore no unsupported local execution result is claimed. Repository mutation used the connected GitHub API and verification used the repository's GitHub Actions workflows.
+Confirmed before changing code that `GET /v1/callbacks/:id` exposes the complete persisted `CallAttempt`, including the phone task, so using that route directly from the judge-facing browser would widen the current privacy surface. The safer increment was therefore to extend the already privacy-preserving run overview with a deliberately minimal callback projection.
 
 ## Changes made this run
 
-### Branch-safe execution visualization
+### Privacy-safe callback status projection
 
-Updated `src/operator-ui.ts` with a new privacy-safe **Branch-safe execution** card.
+Updated `src/run-overview.ts` with `latestOwnerCallback`, derived from the latest durable `owner_callback_requested` audit event and the linked call attempt. The projection contains only:
 
-While an owner decision is pending and the current active scope is not one of the blocked scopes, the card now shows:
+- call-attempt id;
+- operational status;
+- created timestamp;
+- updated timestamp.
 
-- the current independent scope as work that **kept running**;
-- the owner-gated scope(s) separately as **waiting for owner judgment**;
-- an explicit statement that only the owner-gated scope is blocked.
+It intentionally excludes the persisted CALL-E task, provider metadata, callback prompt, agent briefing text, transcript/result content, and owner instructions.
 
-After an `owner_decision_recorded` audit event exists and the privacy-safe overview reports no unresolved blocking scopes, the card switches to a **Blocked branch resumed** state and reports the control-plane's current active scope. This is intentionally phrased from observable control-plane state: it does not claim hidden scheduler behavior or infer an in-flight model interruption.
+The projection supports the existing call-attempt states `queued`, `in_progress`, `completed`, `failed`, `ambiguous`, and `stalled`. No new business state or state machine was added.
 
-The visualization uses only data already fetched for the operator page:
+### Operator callback-status indicator
 
-- `overview.run`;
-- `overview.unresolvedBlockingScopes`;
-- metadata-only `audit.events`.
+Updated `src/operator-ui.ts` with a **Latest owner callback** card driven only by `overview.latestOwnerCallback`. Auto-refresh now visibly reflects current status without calling reconciliation endpoints or fetching the full call attempt. Presentation distinguishes active states, completed state, and fail-closed ambiguous/stalled states while keeping reconciliation explicitly server-side.
 
-It introduces no browser persistence, no second state machine, no additional API endpoint, no transcript/decision-answer exposure, and no owner-instruction text exposure.
-
-Added responsive styling so the two branch lanes collapse cleanly on smaller screens.
+A fresh browser-requested callback still uses the normal `POST /v1/callbacks` endpoint. The owner-scoped browser credential still lacks agent-write and `calls:reconcile` authority; the trusted demo process remains responsible for fake-provider completion/reconciliation and safe-checkpoint acknowledgement.
 
 ### Regression coverage
 
-Strengthened `tests/operator-ui.test.ts` to lock in the new semantics and privacy boundary. The static-shell test now verifies that the page contains the branch-safe execution presentation, uses the current overview plus the durable `owner_decision_recorded` event, distinguishes independent work from the owner-gated branch, and still does not contain configured secrets or `queuedInstructions` payloads.
+Updated `tests/run-overview.test.ts` to prove callback status is projected while sensitive callback task/prompt content is absent from serialized overview output.
 
-Code/test commit:
+Updated `tests/operator-ui.test.ts` to lock in the callback-status presentation and confirm it consumes `overview.latestOwnerCallback` rather than the full callback request object.
 
-- `e68a5803d45fd646a2799773434b39b498d05a7f` — `feat: visualize branch-safe execution in operator`
+Code/test commits made this run:
 
-### README refresh
-
-Updated `README.md` so the judge-facing `demo:operator` description reflects the current two-credential model, fresh owner callback flow, and new branch-safe execution visualization instead of describing only the earlier read-token stage.
-
-Documentation commit:
-
-- `f02cb722a02b73e980e2db633620cd38df0e9b45` — `docs: refresh operator demo story`
+- `083bcf332ac1eaa4c7ba445d5793d73012e3abc6` — `feat: expose privacy-safe callback status in run overview`
+- `27ce1e77502127bb987e589795ba0690e5e0e718` — `test: cover privacy-safe callback overview projection`
+- `438b45f4874168243e969020072036c43706c357` — `feat: show privacy-safe owner callback status`
+- `8c7af852fc77993d5638f331f58e2a0054ea48a4` — `test: cover operator callback status projection`
 
 ## Architecture decisions made this run
 
-1. Judge-facing visualization must remain a projection of existing durable state, not a new demo state machine.
-2. The current active scope and unresolved blocking scopes come only from the privacy-safe run overview.
-3. The post-decision visual state may use the durable metadata-only `owner_decision_recorded` audit event as evidence that owner judgment occurred, but it must not expose or reconstruct the decision answer.
-4. The card deliberately says that the run now reports a scope as active with no blocked scopes rather than pretending CallYourAgent can interrupt or inject into an in-flight model generation.
-5. No token, CALL-E key, webhook secret, owner decision answer, callback transcript, or owner-instruction text is added to browser-visible state.
-6. Existing HTTP authorization, callback credential separation, provider reconciliation authority, and safe-checkpoint acknowledgement semantics remain unchanged.
-7. No live CALL-E success or undocumented Claude/Codex/ChatGPT interruption capability is claimed.
+1. The browser should not use `GET /v1/callbacks/:id` for status because that existing agent-facing route returns the replayable call request/task and is broader than the operator needs.
+2. Callback status belongs in the existing privacy-safe run read model rather than in a browser-side state machine.
+3. The projection exposes only operational state needed for an owner/operator UI and remains read-only under `agent:read`.
+4. Ambiguous/stalled states are shown as fail-closed review states; the browser never offers a retry/reconcile control or invents a replacement phone call.
+5. The owner callback flow still does not interrupt model generation. Any resulting steering continues to enter the durable instruction queue and is consumed only at a safe checkpoint.
+6. No live CALL-E success or undocumented Claude/Codex/ChatGPT interruption capability is claimed.
 
 ## Verification performed
 
-The code/test-bearing commit `e68a5803d45fd646a2799773434b39b498d05a7f` triggered all three repository verification workflows and all completed successfully:
+The code/test-bearing commit `8c7af852fc77993d5638f331f58e2a0054ea48a4` triggered all three repository workflows. CI run `34175423493` completed successfully, covering locked dependency installation, TypeScript typecheck, build, and the Node test suite. Compose deployment run `34175423480` and Container run `34175423498` were also triggered for the same commit; they were still running/queued when this progress entry was written, so no unsupported success claim is made here.
 
-- CI run `34172058251` — `completed` / `success`; this path performs locked dependency installation and the repository `npm run check` path, covering TypeScript typecheck plus the build-backed Node test suite.
-- Container run `34172058295` — `completed` / `success`; production image build and fake-provider runtime smoke verification passed.
-- Compose deployment run `34172058373` — `completed` / `success`; the single-instance SQLite deployment/persistence restart verification passed.
-
-`package.json` has no separate lint script and no migration/schema command. The available standard project scripts remain `build`, `typecheck`, `test`, and `check`; the CI path covers the relevant typecheck/build/test verification.
-
-The local clone attempt failed before execution because the automation container could not resolve `github.com`; this is an environment limitation and is not represented as a repository test failure.
+`package.json` has no separate lint script and no migration/schema command. The normal verification path remains typecheck/build/test via CI plus container and Compose deployment workflows.
 
 No live CALL-E phone call was attempted or claimed.
 
 ## CALL-E integration status
 
-- Fake provider: implemented and tested across owner decisions, callbacks, branch-scoped blocking, durable steering, exact acknowledgement, idempotency, policy/lifecycle recovery, auditability, SQLite restart, deterministic product demo, MCP work-loop acceptance, privacy-safe run overview, operator visualization, one-command fixture, real HTTP-boundary fixture acceptance, complete seeded-state progression, least-privilege observational access, separately scoped owner-callback access, capability introspection, capability-aware operator controls, fresh browser-requested callback/reconciliation/checkpoint flow, and now explicit judge-facing branch-safe execution visualization.
-- Production CALL-E adapter: implemented with server-only `CALLE_API_KEY`, provider idempotency, structured result handling, polling/webhook convergence, bounded HTTP requests, duplicate-call prevention, exact-key ambiguous replay, and fail-closed stalled handling.
-- HTTP + TypeScript SDK + MCP: implemented over shared control-plane semantics. The operator remains a thin read/callback surface over those same contracts rather than a separate product backend.
+- Fake provider: implemented and tested across owner decisions, callbacks, branch-scoped blocking, durable steering, exact acknowledgement, idempotency, lifecycle recovery, auditability, deterministic demos, HTTP/MCP integration, credential separation, branch-safe visualization, and now privacy-safe callback-status presentation.
+- Production CALL-E adapter: implemented with server-only `CALLE_API_KEY`, idempotent create requests, structured outcomes, polling/webhook convergence, bounded requests, duplicate-call prevention, exact-key ambiguous replay, and fail-closed stalled handling.
+- HTTP + TypeScript SDK + MCP: implemented over shared control-plane semantics. Operator remains a thin read/callback surface over the same backend.
 - Live CALL-E success: unverified; no real authorized phone call was made.
 
 ## Current blockers / external prerequisites
 
 No repository-development blocker currently prevents further useful work.
 
-This automation environment cannot currently clone from `github.com` because outbound DNS resolution fails. GitHub Actions remain the external verification path for repository changes.
-
 Live CALL-E verification still requires user-controlled prerequisites: a valid/authorized CALL-E credential, an authorized owner destination, and stable public HTTPS webhook ingress with the configured webhook capability token.
 
-Real Claude Code host acceptance still requires running the documented stdio MCP registration/workflow in an actual Claude Code environment. Repository-side MCP behavior is CI-tested, but host acceptance must not be invented.
+Real Claude Code host acceptance still requires running the documented stdio MCP registration/workflow in an actual Claude Code environment. Repository-side MCP behavior is tested, but host acceptance must not be invented.
 
 ## Highest-value next actions
 
-1. Add a privacy-safe callback-status indicator to `/operator` so a judge can see that a freshly requested owner callback is queued/in progress/completed without exposing transcript content or granting reconciliation authority.
-2. Add a deterministic acceptance test that drives the operator fixture through both visual branch states and verifies the underlying overview/audit payloads match the presentation semantics.
-3. Refresh `docs/OPERATOR_CONSOLE.md` and `docs/INTEGRATIONS.md` to explicitly describe the branch-safe execution card and current owner/read credential split if those docs drift from the README.
-4. Consider a SQLite-backed HTTP acceptance for the owner credential split and operator read surfaces while preserving the supported one-instance topology and process-local limiter assumptions.
+1. Add deterministic acceptance coverage that drives the operator fixture through callback queued/in-progress/completed presentation states and validates the overview payload at each stage.
+2. Update `docs/OPERATOR_CONSOLE.md` and README to explicitly mention the new privacy-safe callback-status card and that it does not fetch the full persisted call task.
+3. Consider a small typed SDK read model for operator/run overview if broader external owner surfaces need the same privacy-safe projection.
+4. Add a SQLite-backed HTTP acceptance for the owner/read credential split plus callback-status overview while preserving the supported one-instance topology.
 5. When an actual Claude Code host is available, run the documented stdio MCP host acceptance flow with the deterministic fake provider.
-6. When the user-only CALL-E prerequisites are available, perform a bounded live provider acceptance test and record only the observed result.
+6. When user-only CALL-E prerequisites are available, perform a bounded live provider acceptance test and record only the observed result.
