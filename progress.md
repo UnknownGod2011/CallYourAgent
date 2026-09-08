@@ -6,13 +6,13 @@ CallYourAgent is a durable Node 24 TypeScript control plane for asynchronous two
 
 The repository includes SQLite persistence, deterministic fake and production CALL-E providers, replayable/idempotent call attempts, typed active-provider observations, polling/webhook convergence, scoped authenticated HTTP APIs, a typed TypeScript client, stdio MCP, branch-scoped blocking, call policy/quiet hours/budgets, privacy-aware audit history, bounded lifecycle recovery, fail-closed ambiguous/stalled handling, API abuse controls, graceful shutdown, bounded CALL-E HTTP requests, readiness/liveness surfaces, deterministic end-to-end and operator demos, a production Docker image, and a single-instance persistent-volume Compose deployment.
 
-This run closed a real mismatch between the documented least-privilege deployment path and the Compose reference deployment. The reference Compose file now allows `CYA_API_CREDENTIALS_JSON` to be the sole API authentication source instead of requiring the backwards-compatible wildcard `CYA_API_TOKEN`, and the Compose GitHub Actions smoke now boots the actual container from a generated four-role credential bundle, validates capabilities and cross-role denials, persists SQLite state, restarts the service, and proves the same authorization split still holds afterward.
+This run added an opt-in deterministic auto-completion capability to the fake CALL-E provider. The capability is disabled by default and does not expose a fake/admin mutation HTTP endpoint. It allows a separately running runtime/container to eventually exercise terminal fake-provider outcomes through the same provider observation/reconciliation path used by the control plane. New tests prove that a blocking branch decision resolves normally and that an owner callback becomes durable queued steering consumed only through checkpoint + exact acknowledgement.
 
 ## Exact repo state inspected this run
 
-The run started from `main` HEAD `20bed40c0de20429253814b11031c4955e07bc6f`.
+The run started from `main` HEAD `223a9dd67a881890289b9e45916600840e0474df`.
 
-Before making changes, inspected the complete recursive repository tree and current architecture, including root configuration, GitHub Actions workflows, deployment assets, documentation, source modules, and tests. Inspected recent commit history through the generated-credential runtime HTTP acceptance work. Checked repository issues and pull requests; there were no current issues or pull requests.
+Before making changes, inspected the complete recursive repository tree and current architecture, including root configuration, all GitHub Actions workflows, deployment assets, documentation, source modules, and the complete test inventory. The recursive Git tree response was not truncated. Inspected recent commits through the scoped Compose deployment acceptance. Checked repository issues and pull requests; there were no open issues or pull requests.
 
 Read in full before implementation:
 
@@ -27,64 +27,53 @@ Read in full before implementation:
 - `docs/OPERATOR_CONSOLE.md`
 - `deploy/README.md`
 
-Also inspected the relevant deployment/runtime/authentication surfaces, including `deploy/compose.yml`, `.github/workflows/compose.yml`, `src/server.ts`, `src/http-server.ts`, and `package.json`.
+Also inspected the relevant implementation/deployment surfaces, including `.github/workflows/compose.yml`, `deploy/compose.yml`, `src/call-provider.ts`, `src/server.ts`, `src/http-server.ts`, `src/domain.ts`, and representative fake-provider/callback tests.
 
-Inspection found a concrete deployment bug: `src/server.ts` correctly accepts either a legacy `CYA_API_TOKEN` or one or more `CYA_API_CREDENTIALS_JSON` credentials, and the deployment documentation explicitly recommends generating scoped credentials and unsetting the legacy token, but `deploy/compose.yml` still used required Compose interpolation for `CYA_API_TOKEN`. Therefore the documented secure Compose command could not actually start as written without also providing a wildcard credential.
-
-The previous run's highest-value next action was to upgrade the Compose deployment smoke to boot from the scoped four-role bundle and prove role capabilities/denials survive a SQLite restart. This run completed that action.
+The previous run's highest-value next action was to extend deployment-level fake-provider acceptance into a real branch-scoped decision + owner-callback + safe-checkpoint steering flow without adding a demo-only production mutation endpoint. Inspection found the concrete missing primitive: a fake call in a separately running container could only become terminal through the in-process `FakeCallProvider.complete` helper. The normal HTTP reconciliation route could poll it, but there was no external provider state change, and exposing a fake-provider mutation endpoint would weaken the production surface merely for CI/demo purposes.
 
 ## Changes made this run
 
-### Compose now supports scoped-only authentication
+### Opt-in deterministic fake-provider auto-completion
 
-Updated `deploy/compose.yml` so `CYA_API_TOKEN` uses optional interpolation rather than a Compose-time required-value expression.
+Updated `FakeCallProvider` with an optional `autoCompleteAfterObservations` setting.
 
-This does not weaken runtime authentication. `src/server.ts` remains authoritative and refuses startup unless at least one of these is configured:
+Behavior:
 
-- a non-empty legacy `CYA_API_TOKEN`; or
-- at least one valid credential in `CYA_API_CREDENTIALS_JSON`.
+- the setting is disabled by default, preserving all existing explicit fake-provider tests and demos;
+- when configured, it must be a positive integer;
+- each accepted fake call records its purpose and observation count;
+- once the configured observation threshold is reached, `observe()` returns a deterministic terminal `completed` outcome;
+- owner-decision calls receive a deterministic structured `proceed` decision;
+- owner-callback calls receive one deterministic steering instruction;
+- provider idempotency behavior and the existing manual `progress()` / `complete()` helpers remain unchanged.
 
-The change therefore makes the already-supported scoped runtime mode reachable through the reference Compose recipe without requiring an unnecessary full-access secret.
+The intent is narrow: let a real separately running fake-provider deployment progress through normal polling/reconciliation without giving HTTP clients a provider-mutation backdoor. The HTTP control plane remains the only public application boundary.
 
-### Real Compose least-privilege acceptance
+### Regression coverage
 
-Upgraded `.github/workflows/compose.yml` to use the secure deployment path itself instead of a CI-only wildcard token.
+Added `tests/fake-provider-auto-completion.test.ts` covering three invariants:
 
-The workflow now:
+1. A blocking escalation in `release-approval` initially appears in `unresolvedBlockingScopes` while the independent `currentScope` remains active. Normal escalation reconciliation observes the deterministic fake terminal result, persists the owner decision, and releases only the blocked scope.
+2. An owner callback reconciles through the same provider interface into one durable queued owner instruction. A non-consuming checkpoint returns it, exact instruction acknowledgement marks it consumed, and the following checkpoint is empty.
+3. Auto-completion remains disabled by default, and invalid non-positive observation thresholds fail validation.
 
-1. installs Node 24 dependencies and runs the repository credential generator;
-2. exports the complete generated standard bundle as `CYA_API_CREDENTIALS_JSON` and extracts the four generated bearer tokens only for the workflow's role-specific HTTP checks;
-3. explicitly verifies that no `CYA_API_TOKEN` is configured before validating the Compose file;
-4. boots the fake-provider SQLite deployment using only scoped credentials;
-5. queries `/v1/auth/capabilities` and verifies the exact generated role split:
-   - `agent`: `agent:read`, `agent:write`, `decision:read`, `audit:read`;
-   - `owner`: `agent:read`, `audit:read`, `owner:callback`;
-   - `operator-read`: `agent:read`, `audit:read`;
-   - `reconciler`: `calls:reconcile`;
-6. creates an agent/run and updates durable run state with the agent credential;
-7. restarts the same Compose service over the same named SQLite volume;
-8. proves the agent and operator can still read the persisted run and the operator can read its privacy-aware audit history;
-9. proves the reconciler still cannot read ordinary run state;
-10. proves neither the agent nor read-only operator can initiate an owner callback;
-11. proves the owner can initiate a callback but cannot reconcile it;
-12. proves only the reconciler can perform callback reconciliation;
-13. rechecks effective capabilities after restart so the deployment restart cannot accidentally widen a role.
+Implementation/fix commits before this progress update:
 
-The workflow uses the normal HTTP control plane and normal fake provider. No demo-only mutation or authorization bypass was added.
-
-Implementation commit before this progress update:
-
-- `1bae6d1f808297f43e62a89f4d9c44383847cbd3` — `test: verify scoped credentials in compose deployment`
+- `1e58d4c922e9d78083c49a65efccac91c5d28639` — `feat: support opt-in fake provider auto completion`
+- `f1e23aec0862ef038965cbd8485bed2fe939ae1f` — `test: cover fake provider auto completion`
+- `a081599eec37e1f13a99ecc5a6f07ffa0c74cf09` — `test: fix fake auto completion assertions`
 
 ## Verification performed
 
-The automation environment did not provide a local repository checkout suitable for running Node tooling directly, so no local build/test claim was fabricated. Executable verification was performed through the repository's existing GitHub Actions workflows.
+The automation environment did not provide a local repository checkout suitable for running Node tooling directly, so no local build/test claim was fabricated. Executable verification used the repository's GitHub Actions workflows.
 
-The implementation state at commit `1bae6d1f808297f43e62a89f4d9c44383847cbd3` passed every available verification surface:
+The first test-bearing commit `f1e23aec0862ef038965cbd8485bed2fe939ae1f` failed CI run `34242469269` during TypeScript typechecking. The new test incorrectly assumed `ControlPlane.reconcileEscalation()` returned an object containing `.escalation` and `.decision`; the production API actually returns the reconciled `Escalation` directly. This was a test-authoring mistake, not a production regression. The test was corrected to assert the returned escalation and retrieve the persisted decision through `getDecision()`.
 
-- CI run `34235994071` — success. The repository's Node 24 locked-install/typecheck/build/test path completed successfully.
-- Container run `34235996233` — success. Production image build and deterministic fake-provider runtime smoke completed successfully.
-- Compose deployment run `34235993980` — success. The strengthened workflow generated the four scoped credentials, validated the Compose configuration with no legacy token, booted the fake-provider/SQLite container, verified exact capabilities, created durable API state, restarted the named-volume deployment, verified persisted state and audit history, exercised cross-role denials, allowed the owner callback only through the owner role, allowed reconciliation only through the reconciler role, and cleaned up successfully.
+The corrected implementation/test state at commit `a081599eec37e1f13a99ecc5a6f07ffa0c74cf09` passed every available verification surface:
+
+- CI run `34242583001` — success. Node 24 locked install, TypeScript typecheck, build/test path, including the new fake auto-completion tests, completed successfully.
+- Container run `34242582905` — success. Production image build and deterministic fake-provider runtime smoke completed successfully.
+- Compose deployment run `34242582870` — success. The existing scoped-credential + persistent SQLite deployment smoke completed successfully on the new code state.
 
 `package.json` still has no separate lint script and no standalone migration/schema-check command. The available executable verification remains CI typecheck/build/test plus Container and Compose deployment workflows.
 
@@ -92,20 +81,19 @@ No live CALL-E phone call was attempted or claimed.
 
 ## Architecture decisions made this run
 
-1. The reference Compose layer must not impose a stronger requirement than the runtime authentication contract. Scoped-only deployments are a first-class supported mode, so Compose must allow them without an extra wildcard secret.
-2. Runtime startup remains the single enforcement point for the invariant that at least one valid API authentication mechanism must exist. Optional Compose interpolation is not anonymous access.
-3. A least-privilege deployment path is only credible if the actual container recipe and CI use it. The Compose acceptance therefore boots with generated role credentials rather than proving scoped auth only in an in-process test.
-4. Credential roles are configuration, not SQLite domain state. Restarting persisted control-plane state must not widen permissions; the workflow now proves the four role capabilities remain unchanged after restart.
-5. The standard agent can mutate agent state and consume durable decisions but cannot initiate owner callbacks; the owner can request callbacks but cannot reconcile provider calls or consume private decision answers; the read-only operator remains observational; the reconciler remains provider-facing and cannot read ordinary run/audit state.
-6. The HTTP control plane remains the authorization source of truth. Capability discovery is descriptive only; every successful/denied operation is still enforced independently at its route.
-7. No branch-scoped blocking, owner-decision persistence, instruction queue, call policy, retry/idempotency, provider observation, webhook convergence, or safe-checkpoint semantics changed in this run.
-8. Human steering still becomes durable queued state and is consumed only at explicit safe checkpoints; no mid-generation interruption capability is claimed.
+1. Fake-provider deployment acceptance should not require a production HTTP endpoint that mutates provider state. Test/demo conveniences must stay behind the provider abstraction rather than widening the public control-plane attack surface.
+2. Deterministic fake auto-completion is opt-in. Existing tests that need precise queued/in-progress/ambiguous timing retain manual provider control, so this feature does not silently alter fake-provider semantics repository-wide.
+3. Auto-completion occurs from `observe()` rather than `start()`. That preserves the asynchronous architecture: call creation first persists/accepts a side effect, and terminal evidence is discovered later through the same reconciliation shape used for real CALL-E polling.
+4. The deterministic terminal result is purpose-aware: an owner decision creates structured decision evidence, while an owner callback creates queued steering. Both still flow through the existing single terminal-transition implementation in `ControlPlane`.
+5. The test explicitly preserves branch semantics: a blocking owner decision blocks only its scope while an independent current scope remains active.
+6. Callback steering remains durable `queued` state until the agent reaches a safe checkpoint and explicitly acknowledges the exact instruction id. No mid-token or in-flight model interruption capability was introduced or claimed.
+7. No production CALL-E request/webhook/idempotency contract, credential scope, persistence schema, call policy, ambiguity handling, or stalled-call behavior changed in this run.
 
 ## CALL-E integration status
 
-- Fake provider: deterministic and tested for decisions, callbacks, branch-scoped blocking, durable steering, idempotency, ambiguous recovery, active-state progress, stale downgrade rejection, bounded stale detection, restart durability, auditability, HTTP/TypeScript/MCP integration, operator demos, privacy boundaries, generated least-privilege roles, runtime/env authorization composition, and now the actual scoped-only Compose + persistent SQLite deployment path.
+- Fake provider: deterministic and tested for decisions, callbacks, branch-scoped blocking, durable steering, idempotency, ambiguous recovery, active-state progress, stale downgrade rejection, bounded stale detection, restart durability, auditability, HTTP/TypeScript/MCP integration, operator demos, privacy boundaries, generated least-privilege roles, scoped-only Compose deployment, and now optional observation-driven terminal completion suitable for a separately running fake deployment.
 - Production CALL-E adapter: implemented with server-only `CALLE_API_KEY`, idempotent create, structured result schemas, active-state observation, terminal polling/webhook convergence, bounded requests, exact-key ambiguous recovery, duplicate prevention, and fail-closed stalled handling.
-- HTTP + TypeScript SDK + MCP continue to share the same control-plane services and durable state machine. This run changed deployment wiring/acceptance only; it did not create a second authorization or provider path.
+- HTTP + TypeScript SDK + MCP continue to share the same control-plane services and durable state machine. This run changed the fake provider/test infrastructure only; it did not create an alternate application state machine.
 - Live CALL-E success remains unverified; no real authorized phone call was made.
 
 ## Current blockers / external prerequisites
@@ -118,8 +106,9 @@ Real Claude Code host acceptance still requires running the documented stdio MCP
 
 ## Highest-value next actions
 
-1. Extend deployment-level fake-provider acceptance beyond authentication/persistence into one representative branch-scoped decision + owner-callback flow under the separate scoped credentials, without adding demo-only production mutation endpoints. Prefer composing existing public agent/owner APIs plus trusted provider/reconciliation surfaces so the reference deployment proves the same end-to-end semantics as the deterministic in-process demo.
-2. Audit deployment secret handling for accidental credential exposure in generated workflow/config output and tighten masking/logging where useful without introducing a second secret-management system.
-3. Keep capability-aware MCP/operator UX as presentation only; do not move authorization out of the HTTP control plane.
-4. When an actual Claude Code host is available, run the documented stdio MCP host acceptance path with the deterministic fake provider and verify tool discovery plus checkpoint behavior from the real host.
-5. When user-only CALL-E prerequisites are available, perform one bounded live provider acceptance test and record only observed results.
+1. Wire the opt-in fake observation-completion threshold into `src/server.ts` as a fake-only validated environment setting, pass it through the reference Compose deployment, and enable it only in the Compose acceptance workflow.
+2. Extend the Compose acceptance to prove the complete public-boundary story under the four separate scoped credentials: agent creates a branch-blocking decision while unrelated scope stays active; reconciler obtains deterministic terminal provider evidence; agent consumes the durable owner decision; owner requests a context-aware callback; reconciler completes it; callback steering survives as queued state; agent reads it only at a safe checkpoint and acknowledges the exact instruction id.
+3. Prefer a restart between terminal callback reconciliation and instruction acknowledgement so the deployment acceptance also proves queued steering survives the actual SQLite/container restart path.
+4. Audit generated workflow/environment secret handling for unnecessary echo/log exposure while keeping authorization logic centralized in the HTTP control plane.
+5. When an actual Claude Code host is available, run the documented stdio MCP host acceptance path with the deterministic fake provider and verify tool discovery plus checkpoint behavior from the real host.
+6. When user-only CALL-E prerequisites are available, perform one bounded live provider acceptance test and record only observed results.
