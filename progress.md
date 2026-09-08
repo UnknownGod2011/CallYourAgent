@@ -6,11 +6,11 @@ CallYourAgent is a durable Node 24 TypeScript control plane for asynchronous two
 
 The repository includes SQLite persistence, deterministic fake and production CALL-E providers, replayable/idempotent call attempts, polling/webhook convergence, scoped authenticated HTTP APIs, a typed TypeScript client, stdio MCP, branch-scoped blocking, call policy/quiet hours/budgets, privacy-aware audit history, bounded lifecycle recovery, fail-closed ambiguous/stalled handling, API abuse controls, graceful shutdown, readiness/liveness surfaces, deterministic demos, and a single-instance persistent-volume Compose deployment.
 
-This run closed the fake-provider restart gap left by the prior run. A persisted non-terminal fake phone call can now survive reconstruction of the control-plane process and the in-memory fake provider. On the first normal reconciliation after restart, the control plane can restore only the provider-local active-call state from the already-durable `CallAttempt`, then continue through the existing observation/terminal transition path. No fake mutation HTTP endpoint, duplicate provider create, or second business state machine was introduced.
+This run elevated the previous fake-provider rehydration work from SQLite/domain tests into the actual container deployment path. The Compose acceptance now restarts the Dockerized control plane while an accepted owner-decision phone attempt is still non-terminal, then independently does the same for an accepted owner callback. After each restart, normal reconciliation restores only process-local fake-provider state from the durable `CallAttempt` and completes the original logical phone attempt without creating a replacement call. The workflow also proves exactly-once decision/instruction side effects and preserves safe-checkpoint steering semantics across an additional SQLite-backed restart.
 
 ## Exact repo state inspected this run
 
-The run started from `main` HEAD `521367bead128d8eb68237b43c98f44342225960`.
+The run started from `main` HEAD `7c7aae4eb2d10d28b8d13b5feea3e62b6532db8a`.
 
 Before making any change, inspected the complete recursive repository tree and current architecture, recent commits, and repository issues/pull requests. There were no open issues or pull requests.
 
@@ -27,75 +27,78 @@ Read in full before implementation:
 - `docs/OPERATOR_CONSOLE.md`
 - `deploy/README.md`
 
-Also inspected the relevant implementation/test/deployment surfaces before and during the change:
+Also inspected the relevant implementation/deployment surfaces before and during the change:
 
-- `src/call-provider.ts`
-- `src/domain.ts`
-- `src/control-plane.ts`
-- `src/lifecycle.ts`
-- `tests/fake-provider-auto-completion.test.ts`
-- `tests/sqlite-store.test.ts`
-- `.github/workflows/compose.yml`
-- `package.json`
+- `src/control-plane.ts`, especially escalation/callback reconciliation, terminal outcome handling, provider rehydration, call creation, and audit events;
+- `src/escalation-view.ts` for the privacy-safe active-call lifecycle projection;
+- `.github/workflows/compose.yml` in full;
+- the prior fake-provider restart implementation and recent commit history.
 
-The previous run had already made fake provider call identifiers deterministic from the provider idempotency key and proved durable MCP steering across a control-plane restart. However, a fresh `FakeCallProvider` still had an empty in-memory call map. A durable `queued` or `in_progress` call could therefore exist correctly in SQLite while normal reconciliation against the newly constructed fake provider failed with `Unknown fake call`. That was the smallest high-value reliability gap selected for this run.
+The prior run had already added the correct production/domain mechanism: durable `queued`/`in_progress` fake calls can rehydrate provider-local state after process reconstruction, while real CALL-E remains a remote durable provider and does not use that hook. The remaining evidence gap was deployment-level: Compose still restarted only after callback steering had already become terminal/durable. That meant the real container path had not yet proved a restart while the provider call itself was accepted but still active.
 
 ## Changes made this run
 
-### Provider-local rehydration capability
+### Compose now restarts during an active owner-decision call
 
-Added an optional `CallProvider.rehydrate(...)` capability. Its input contains only state the control plane already persisted before a restart:
+Strengthened `.github/workflows/compose.yml` so the deployment acceptance now:
 
-- stable provider call id;
-- stable provider idempotency key;
-- call purpose;
-- persisted active state (`queued` or `in_progress`);
-- exact replayable task;
-- exact persisted metadata.
+1. creates a running agent whose independent scope is `documentation`;
+2. creates a blocking `release-approval` owner-decision escalation;
+3. verifies the privacy-safe lifecycle is `calling` with an active `queued`/`in_progress` call;
+4. verifies the checkpoint still reports `documentation` as current work and only `release-approval` as blocked;
+5. restarts the Dockerized control plane **before** decision reconciliation;
+6. verifies the escalation remains active and the same branch remains blocked after restart;
+7. reconciles the already-accepted call using only the reconciler credential;
+8. verifies the durable structured owner decision resolves exactly once and releases only that branch.
 
-This capability is optional. The production CALL-E adapter does not implement it because CALL-E is a remote durable provider and its active call should continue to be observed through the real provider API. The hook exists for provider adapters whose active state is intentionally process-local, principally the deterministic fake provider.
+The audit assertion follows the `owner_decision_recorded` event to the exact call-attempt id and then proves exactly one `call_attempt_created`, one `call_attempt_started`, and one `call_attempt_completed` event for that specific logical phone call. It therefore does not accidentally count the separate stdio MCP acceptance that runs earlier in the same persistent deployment.
 
-### FakeCallProvider restores an accepted in-flight call safely
+### Compose now restarts during an active owner callback
 
-`FakeCallProvider.rehydrate` now rebuilds its process-local active-call entry from durable state without sending or simulating a second provider create.
+The owner callback path is now split around a real container restart:
 
-It validates that the supplied provider call id is exactly the deterministic SHA-256-derived identity for the persisted idempotency key. It rejects a conflicting idempotency mapping or purpose mismatch, preventing corrupt durable input from silently becoming a different logical phone call.
+1. the owner credential creates a context-aware callback while the run remains active;
+2. the callback is verified as `queued`/`in_progress` and the owner credential is still denied reconciliation authority;
+3. the control plane is restarted while that callback call is still non-terminal;
+4. the owner can still observe the same privacy-safe active callback and the agent still has no queued steering yet;
+5. only the reconciler credential completes the restored call through normal reconciliation;
+6. reconciliation is retried to prove terminal idempotency;
+7. exactly one durable owner instruction is queued;
+8. the audit timeline proves one create, one provider start, one completion, and one queue event for the exact callback/instruction ids.
 
-When valid, it restores the persisted `queued`/`in_progress` state and initializes only provider-local observation bookkeeping. Existing in-memory calls are left intact. Auto-completion remains opt-in and deterministic; after process recreation its local observation counter naturally restarts because that counter is fake-provider implementation state rather than domain truth.
+No demo-only provider mutation endpoint, replacement call, new idempotency key, or privileged browser behavior was added.
 
-### Normal reconciliation performs rehydration only when needed
+### Safe-checkpoint behavior remains durable after another restart
 
-`ControlPlane.reconcileEscalation` and `ControlPlane.reconcileCallback` now call a small shared `rehydrateProviderCallIfSupported` helper immediately before ordinary provider observation when:
+After the callback completes and steering is durable, Compose performs another control-plane restart. The agent then:
 
-- the provider implements the optional capability;
-- the durable attempt has a provider call id; and
-- the durable attempt is still `queued` or `in_progress`.
+- receives the same exact instruction id only at a normal non-consuming checkpoint;
+- acknowledges that exact id;
+- retries the acknowledgement and receives the already-consumed instruction without a duplicate transition;
+- sees an empty queue on the next checkpoint;
+- has exactly one `owner_instruction_queued` and one `owner_instruction_consumed` audit event for that instruction.
 
-The helper uses the existing persisted `CallAttempt` request/idempotency/provider state. It does not create an audit event, update the durable attempt, change timestamps, or invoke `start()`. Therefore a process-local restoration cannot masquerade as a second accepted phone side effect or refresh stale-call timing.
+This keeps the product model explicit: provider completion can happen asynchronously, but human steering is incorporated only at the agent's safe work boundary.
 
-All subsequent progress/terminal handling remains in the existing `observe` -> `applyActiveObservation` / `applyTerminalOutcome` path. Branch-scoped blocking, owner decisions, callback steering, instruction queues, webhook convergence, recovery budgets, and CALL-E behavior are unchanged.
+### Transient harness failure corrected without changing production logic
 
-### Restart regression coverage
+The first workflow commit, `bc7e7b5928c05803183d47518e16a2f4cad2ab2d` (`ci: verify in-flight fake calls across compose restarts`), successfully passed the new restart-while-decision-active stage and the actual post-restart decision reconciliation, but failed at a newly added audit assertion.
 
-Added `tests/fake-provider-rehydration.test.ts` with three regressions:
+The assertion incorrectly filtered `call_attempt_created` by `escalationId`. That audit event intentionally carries `runId` + `callAttemptId`, not `escalationId`. It also risked counting the earlier stdio MCP decision call because both flows share the same persistent Compose database. Production behavior was correct.
 
-1. A queued owner callback is persisted in SQLite, the store is closed, and a completely fresh fake provider/control plane is constructed. Normal callback reconciliation then rehydrates the same provider identity, completes through deterministic fake observation, queues one owner instruction, leaves one durable call attempt, and leaves the number of `call_attempt_started` events at exactly one.
-2. An `in_progress` fake callback survives SQLite reopen even when the restarted fake provider's constructor default is `queued`. Reconciliation preserves the durable `in_progress` state and creates no artificial `call_attempt_progressed` event.
-3. Fake-provider rehydration rejects a provider call id that does not correspond to the persisted idempotency key.
-
-Commits made before this progress update:
-
-- `342143e8e09dfa9478be199654694630161e9cdd` — `feat: rehydrate persisted fake calls after restart`
-- `7df11a76aae8dadd54eb5e908504b0a4005d9c5f` — `fix: restore active provider state before reconciliation`
-- `c05f7431b40e62b479c64836ae4a96640cb23a02` — `test: cover active fake calls across process restart`
+The corrected commit `9c1c4d317dd329f71b16f8c7099fec7eb376a631` (`test: scope decision restart audit assertions`) derives the exact call-attempt id from the unique `owner_decision_recorded` event for the target escalation, then scopes all exactly-once call assertions to that id.
 
 ## Verification performed
 
-The automation environment did not provide a local repository checkout suitable for running the repository's Node/Docker commands directly, so no local execution claim is made. Executable verification used the repository's GitHub Actions workflows on implementation commit `c05f7431b40e62b479c64836ae4a96640cb23a02`.
+The execution environment did not provide a local repository checkout suitable for running Node/Docker commands directly, so no local execution claim is made. Executable verification used the repository's GitHub Actions workflows.
 
-- CI run `34266516503` — **success**. Node 24 locked dependency install, TypeScript typecheck, build, and the complete test suite passed: **94 tests, 94 passed, 0 failed**. The three new active-call restart regressions all passed.
-- Container run `34266516647` — **success**. The production image build and fake-provider runtime smoke passed.
-- Compose deployment run `34266516561` — **success**. The existing least-privilege credential checks, real stdio MCP subprocess path, control-plane restart, branch-scoped decision/callback flow, SQLite persistence, safe-checkpoint steering acknowledgement, and authorization boundaries all remained green with the new provider behavior.
+Corrected implementation commit `9c1c4d317dd329f71b16f8c7099fec7eb376a631` passed all three verification surfaces:
+
+- CI run `34272901050` — **success**. Node 24 locked dependency install, TypeScript typecheck, build, and the complete test suite passed: **94 tests, 94 passed, 0 failed**.
+- Container run `34272900836` — **success**. Production image build and fake-provider runtime smoke passed.
+- Compose deployment run `34272900988` — **success**. Every stage passed, including generated least-privilege credentials, the existing real stdio MCP subprocess acceptance, restart while the owner-decision call was still active, post-restart decision reconciliation, restart while the owner callback was still active, exactly-once restored callback completion/steering, a further SQLite-backed restart, exact safe-checkpoint acknowledgement, idempotent acknowledgement retry, and authorization boundaries.
+
+The earlier Compose run `34272640702` for commit `bc7e7b5928c05803183d47518e16a2f4cad2ab2d` is intentionally recorded as a **test-harness failure**. Its new active-decision restart stage passed, as did actual decision reconciliation; only the incorrect audit-filter assertion failed. That assertion was corrected rather than weakening production contracts.
 
 `package.json` still has no separate lint script and no standalone migration/schema-check command. Available executable verification remains `npm run check` through CI plus the Container and Compose workflows.
 
@@ -103,19 +106,20 @@ No live CALL-E phone call was attempted or claimed.
 
 ## Architecture decisions made this run
 
-1. Durable control-plane state remains authoritative. Rehydration reconstructs only process-local provider simulation state from a persisted `CallAttempt`; it does not introduce provider state as a second source of truth.
-2. Rehydration is optional at the provider port. Remote CALL-E continues normal API observation and receives no fake-only restart behavior.
-3. Rehydration is not recovery by re-creation. It must not call `start()`, generate a new idempotency key, create a replacement phone attempt, refresh the durable timeout anchor, or emit another `call_attempt_started` event.
-4. The fake provider verifies provider identity against the persisted idempotency key before accepting rehydration. A mismatch fails closed instead of silently creating a new logical call.
-5. The persisted active status wins over a new fake provider constructor default. This avoids inventing a `queued -> in_progress` transition after restart and keeps lifecycle timeout/audit semantics accurate.
-6. Fake auto-completion observation counters remain provider-local test machinery rather than new persisted domain state. Persisting them would add fake-specific state to the core schema without improving production correctness.
-7. Existing safe-checkpoint semantics are unchanged: callback instructions become durable only through the normal terminal outcome path and are still consumed solely by explicit agent checkpoint/acknowledgement.
+1. In-flight restart evidence belongs at the real deployment boundary, not only in unit/SQLite tests. The reference Compose path must prove that durable state is sufficient after a whole container/process reconstruction.
+2. Restart must happen before provider terminal evidence is applied. Restarting only after a decision/instruction is already durable proves persistence but does not prove accepted-call recovery.
+3. Branch-scoped semantics remain observable throughout restart: the affected `release-approval` scope stays blocked while independent `documentation` work remains active.
+4. Rehydration remains provider-local reconstruction, not provider re-creation. Exactly one call-create/start/completion audit chain is required for the logical attempt across restart.
+5. Exactly-once assertions are correlated through durable ids rather than broad event-type counts, because the same deployment deliberately exercises multiple independent MCP/HTTP calls in one database.
+6. Callback completion and instruction consumption remain separate transitions. A restored callback can finish after restart, but the resulting owner instruction is still queued until the agent explicitly checkpoints and acknowledges it.
+7. Reconciliation and acknowledgement retries must remain idempotent and are now deployment-tested after restart.
+8. The production CALL-E adapter remains unchanged by this fake-provider deployment evidence; live CALL-E continues to rely on the remote provider's durable call identity and normal polling/webhook reconciliation.
 
 ## CALL-E integration status
 
-- Fake provider: deterministic, credential-free, restart-stable for provider identity, and now able to restore a durable accepted `queued`/`in_progress` fake call after complete provider-process reconstruction. Tested with SQLite reopen, deterministic terminal completion, durable steering, HTTP/SDK/MCP paths, branch-scoped decisions, callbacks, exact acknowledgement, and deployment restart coverage.
-- Production CALL-E adapter: implemented with server-only `CALLE_API_KEY`, idempotent create, structured results, active-state observation, polling/webhook terminal convergence, bounded HTTP requests, exact-key ambiguous recovery, duplicate prevention, and fail-closed stalled handling. It does not use the fake rehydration hook.
-- HTTP, SDK, MCP, and lifecycle reconciliation continue to share the same persistent `ControlPlane` semantics.
+- Fake provider: deterministic, credential-free, restart-stable for provider identity, able to restore durable accepted `queued`/`in_progress` fake calls after provider-process reconstruction, and now proven at the actual Docker Compose + persistent SQLite boundary for both owner-decision and owner-callback calls.
+- Production CALL-E adapter: implemented with server-only `CALLE_API_KEY`, idempotent create, structured results, active-state observation, polling/webhook terminal convergence, bounded HTTP requests, exact-key ambiguous recovery, duplicate prevention, and fail-closed stalled handling. It does not use fake-provider rehydration.
+- HTTP, SDK, stdio MCP, and lifecycle reconciliation continue to share the same persistent `ControlPlane` semantics.
 - Live CALL-E success remains unverified; no authorized real phone call was made.
 
 ## Current blockers / external prerequisites
@@ -124,13 +128,12 @@ No repository-development blocker prevents further useful work.
 
 Live CALL-E verification still requires user-controlled prerequisites: a valid/authorized CALL-E credential, an authorized owner phone destination, and stable public HTTPS webhook ingress configured with the application-owned webhook capability token.
 
-Actual Claude Code host acceptance still requires executing the documented host registration in a real Claude Code environment. The repository proves the built stdio subprocess, official MCP protocol, authenticated HTTP boundary, SQLite durability, and control-plane restart behavior, but this is not represented as a real Claude Code host run.
+Actual Claude Code host acceptance still requires executing the documented host registration in a real Claude Code environment. The repository proves the built stdio subprocess, official MCP protocol, authenticated HTTP boundary, SQLite durability, control-plane restarts, and now in-flight provider-call restart behavior, but this is not represented as a real Claude Code host run.
 
 ## Highest-value next actions
 
-1. Extend the real Compose deployment acceptance so the service is restarted **while an accepted fake owner-decision/callback call is still non-terminal**, then reconcile it after restart. This will elevate the new SQLite/domain regression into container-level deployment evidence.
-2. Verify the same in-flight restart case through the external stdio MCP path, ensuring the agent host never receives a duplicate owner decision or callback instruction.
-3. Consider a narrowly scoped architecture note for optional provider rehydration once the deployment-level acceptance is in place; keep it clearly fake/process-local and do not imply CALL-E needs local reconstruction.
-4. Add a compact real-host runbook/fixture for Claude Code using the existing least-privilege agent credential and already-proven stdio tools.
-5. Continue auditing restart/provider diagnostics for bearer/webhook secret exposure and fail-closed behavior.
-6. When the user-controlled CALL-E prerequisites are available, perform one bounded live provider acceptance and record only observed behavior.
+1. Extend the external stdio MCP deployment acceptance so the **MCP host remains alive while a decision call it raised is still non-terminal across a control-plane restart**, then consumes the single durable owner decision afterward. This would connect the newly proven provider rehydration path directly to the primary agent integration surface.
+2. Add a compact Claude Code real-host runbook/fixture using the existing least-privilege agent credential and current stdio MCP tools, with explicit expected checkpoints and no unsupported mid-generation claims.
+3. Continue auditing restart/provider diagnostics and CI output for bearer/webhook secret exposure and fail-closed behavior.
+4. Consider a small architecture note documenting the optional provider-local rehydration port now that both domain and Compose deployment evidence exist; keep it explicitly separate from remote CALL-E semantics.
+5. When the user-controlled CALL-E prerequisites are available, perform one bounded live provider acceptance and record only observed behavior.
