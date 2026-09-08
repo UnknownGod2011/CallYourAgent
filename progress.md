@@ -6,89 +6,129 @@ CallYourAgent is a durable Node 24 TypeScript control plane for asynchronous two
 
 The repository includes SQLite persistence, deterministic fake and production CALL-E providers, replayable/idempotent call attempts, typed active-provider observations, polling/webhook convergence, scoped authenticated HTTP APIs, a typed TypeScript client, stdio MCP, branch-scoped blocking, call policy/quiet hours/budgets, privacy-aware audit history, bounded lifecycle recovery, fail-closed ambiguous/stalled handling, API abuse controls, graceful shutdown, bounded CALL-E HTTP requests, readiness/liveness surfaces, deterministic end-to-end and operator demos, a production Docker image, and a single-instance persistent-volume Compose deployment.
 
-This run hardened the owner-decision privacy boundary. The durable owner answer/structured result returned by `GET /v1/escalations/:id` is no longer implied by generic `agent:read`: the endpoint now additionally requires an explicit `decision:read` scope. The standard agent role receives it because the agent that raised an escalation must consume the durable answer and resume the affected scope; standard owner/operator-read credentials intentionally do not.
+This run split individual escalation observation from sensitive decision-result retrieval. Owner/operator credentials with ordinary `agent:read` can now inspect one escalation's privacy-safe lifecycle through `GET /v1/escalations/:id/status`, while the owner's durable answer/structured result remains available only through the existing `GET /v1/escalations/:id` route requiring both `agent:read` and `decision:read`.
 
 ## Exact repo state inspected this run
 
-The run started from `main` HEAD `c84980efd41d69bbb33290a5a2c2e3dd8df30961`. Inspected the complete recursive Git tree and current architecture, covering root configuration, all GitHub Actions workflows, deployment assets, every documentation path, source modules, and tests. Inspected recent commits through the stale-provider downgrade acceptance and checked repository issues and pull requests; there were no relevant open issues or pull requests.
+The run started from `main` HEAD `cc93bb0ad0e7b89b2f0a31f7ffbef0583c1d6821`.
 
-Read `AGENTS.md`, this file, `README.md`, `docs/ARCHITECTURE.md`, `docs/INTEGRATIONS.md`, and `docs/API_SECURITY.md` before the authorization code change. During the same repository review, also read `docs/CALL_POLICY.md`, `docs/DEPLOYMENT.md`, `docs/OPERATOR_CONSOLE.md`, and `deploy/README.md` in full before the final documentation/progress changes. Inspected the relevant implementation and regression surfaces: `src/http-server.ts`, `src/server.ts`, `src/credential-roles.ts`, `src/domain.ts`, `src/call-provider.ts`, `tests/credential-roles.test.ts`, `tests/credential-capabilities-http.test.ts`, `tests/callback-privacy-http.test.ts`, `tests/http-server.test.ts`, `tests/client.test.ts`, and `package.json`.
+Before making changes, inspected the complete recursive repository tree and current architecture, including root configuration, GitHub Actions workflows, deployment assets, documentation, source modules, and tests. Inspected the recent commit history through the owner-decision authorization hardening. Checked relevant repository issues and pull requests; there were no open issues or pull requests.
 
-The prior run's highest-value next action was specifically to review `GET /v1/escalations/:id` and decide which credential roles should be allowed to receive the owner's decision answer/structured result. Inspection confirmed that the route required only `agent:read`, while both the standard owner and operator-read role presets also carried `agent:read`; those browser/observational credentials could therefore retrieve the full durable owner answer despite not needing it.
+Read in full before implementation:
+
+- `AGENTS.md`
+- `progress.md`
+- `README.md`
+- `docs/ARCHITECTURE.md`
+- `docs/INTEGRATIONS.md`
+- `docs/API_SECURITY.md`
+- `docs/CALL_POLICY.md`
+- `docs/DEPLOYMENT.md`
+- `docs/OPERATOR_CONSOLE.md`
+- `deploy/README.md`
+
+Also inspected the relevant implementation and verification surfaces, including `src/http-server.ts`, `src/domain.ts`, `src/client.ts`, `src/index.ts`, `tests/owner-decision-authorization-http.test.ts`, `package.json`, and `tsconfig.json`.
+
+The previous run's highest-value next action was to separate privacy-safe individual escalation lifecycle observation from sensitive owner-decision retrieval. Inspection confirmed that the only individual escalation GET surface returned the full `Escalation` plus `OwnerDecision`, so owner/operator credentials correctly lost access when `decision:read` was introduced but had no narrow per-escalation alternative.
 
 ## Changes made this run
 
-### Explicit owner-decision read authorization
+### Privacy-safe escalation lifecycle projection
 
-Added `decision:read` as a concrete HTTP API scope and wired it through runtime environment validation and authenticated capability discovery.
+Added `src/escalation-view.ts` with a typed `EscalationLifecycleView` and `getEscalationLifecycleView` projection.
 
-`GET /v1/escalations/:id` now requires both:
+The view intentionally exposes only operational lifecycle data:
 
-1. `agent:read`, for access to agent/escalation state; and
-2. `decision:read`, for access to the persisted `OwnerDecision.answer` and optional structured result.
+- escalation id;
+- run id;
+- scope id;
+- blocking flag;
+- priority;
+- escalation status;
+- current call-attempt status when a call attempt exists;
+- optional policy deferral reason;
+- created/updated timestamps;
+- optional expiry timestamp.
 
-This is intentionally conjunctive. A credential with only `decision:read` is insufficient, so the new scope cannot become a standalone decision-data exfiltration capability.
+It deliberately omits the escalation question/context, escalation idempotency key, call-attempt id, decision id, provider call id/provider metadata, replayable phone task, owner decision answer, and structured owner result.
 
-Updated the standard credential roles:
+### Least-privilege HTTP split
 
-- `agent` -> `agent:read`, `agent:write`, `decision:read`, `audit:read`;
-- `operator-read` -> `agent:read`, `audit:read`;
-- `owner` -> `agent:read`, `audit:read`, `owner:callback`;
-- `reconciler` -> `calls:reconcile`.
+Added:
 
-The legacy trusted `*` credential remains backwards-compatible full access and capability discovery projects it as the six concrete scopes rather than returning `*`.
+```text
+GET /v1/escalations/:id/status
+```
 
-### HTTP privacy regression coverage
+The route requires only `agent:read` and returns the privacy-safe lifecycle projection. It does not mutate state and does not grant decision-result access.
 
-Added `tests/owner-decision-authorization-http.test.ts`. Through the real HTTP boundary it creates and resolves a blocking owner decision, then proves:
+The existing sensitive route remains unchanged in authority:
 
-- a standard-style operator credential with `agent:read` cannot retrieve the answer;
-- a standard-style owner callback credential with `agent:read` cannot retrieve the answer;
-- a `decision:read`-only credential is also rejected because it lacks `agent:read`;
-- an agent credential carrying both scopes receives the resolved durable answer and structured result needed to resume safely.
+```text
+GET /v1/escalations/:id
+```
 
-Updated credential-role and capability tests to lock the new least-privilege split. The new authorization test deliberately leaves branch/scope blocking, provider reconciliation, and checkpoint semantics untouched.
+It still requires both `agent:read` and `decision:read` and remains the route an agent uses when it must consume the owner's durable answer to safely resume the affected branch.
+
+### TypeScript SDK surface
+
+Added `CallYourAgentClient.getEscalationLifecycleStatus(escalationId)` returning `EscalationLifecycleView`, and exported the new view from `src/index.ts`.
+
+This keeps the HTTP and SDK contracts aligned rather than forcing platform adapters to hand-build a browser-only request.
+
+### Privacy regression acceptance
+
+Added `tests/escalation-lifecycle-privacy-http.test.ts` through the real authenticated HTTP boundary. It creates and resolves a blocking owner decision containing deliberately private question/context/answer material, then proves:
+
+- an operator credential with `agent:read` can read the new lifecycle endpoint;
+- the response exposes the resolved escalation and completed call lifecycle;
+- the response does not contain the private question, context, owner answer, idempotency key, provider call id, call-attempt id, decision id, or decision object;
+- that same operator credential still receives `403 decision:read` from the sensitive decision-result endpoint;
+- an agent credential carrying `agent:read` + `decision:read` can still retrieve the durable owner answer.
 
 ### Documentation alignment
 
-Expanded `docs/API_SECURITY.md` with the exact `decision:read` contract, role rationale, dual-scope requirement, and migration note for custom scoped agent credentials that previously relied on `agent:read`/`agent:write` alone.
-
-Updated `docs/DEPLOYMENT.md` so its recommended internet-exposed agent/MCP credential includes `decision:read`, while owner/operator read surfaces remain intentionally narrower.
+Updated `docs/API_SECURITY.md` to document the new lifecycle endpoint, `EscalationLifecycleView`, scope split, and the rule that observational credentials should use the safe route rather than being granted `decision:read` merely to inspect status.
 
 ## Verification performed
 
-Primary security implementation commit: `91e8c4805ac7f7897731cf71007d5b5cd6768382` (`security: isolate owner decision read scope`).
+Repository-side network access is unavailable in the execution container, so no local clone/build was claimed. Executable verification was performed through the repository's existing GitHub Actions workflows.
 
-Its first CI run `34208421320` failed in exactly one stale test expectation: `tests/client.test.ts` still expected the legacy wildcard capability projection to contain the previous five concrete scopes. Typecheck/build succeeded and the new owner-decision authorization acceptance itself passed. The production authorization boundary was not weakened.
+The code/test state at commit `1ad34343671649839537a68b5c46c05522772d22` passed all available verification paths:
 
-Fixed that stale client capability assertion in commit `9e39a4c0976006c8d7f582d2f70440006830d645` (`test: include decision read in legacy capabilities`). All available verification paths then passed on that corrected code state:
+- CI run `34213240458` — success. Node 24 setup, locked dependency install, TypeScript typecheck, build, and complete Node test suite passed, including the new escalation lifecycle privacy acceptance.
+- Container run `34213240430` — success. Production image build and deterministic fake-provider runtime smoke passed.
+- Compose deployment run `34213240431` — success. Compose validation, fake-provider boot/health, durable API-state creation, named-volume restart, post-restart persistence verification, and cleanup passed.
 
-- CI run `34208623075` — success. Node 24 setup, locked dependency install, TypeScript typecheck, build, and the complete Node test suite passed; the suite reported 77 tests with all passing, including the new owner-decision authorization acceptance.
-- Container run `34208622923` — success. Production image build and deterministic fake-provider runtime smoke passed.
-- Compose deployment run `34208622953` — success. Compose validation, fake-provider boot/health, durable API-state creation, named-volume restart, post-restart persistence verification, and cleanup passed.
+Implementation commits in this run:
 
-Documentation-alignment commit: `57c20a3f1c29cb9c24dc372e5165a4e4e5a00750` (`docs: align agent credential decision scope`).
+- `c19233dde6bdd184f9b0aeb64673d40c56189b06` — `feat: add privacy-safe escalation lifecycle view`
+- `31959aac1b725d1cabc1139505f94719ea975123` — `feat: expose privacy-safe escalation lifecycle status`
+- `552c80765d53f2ff40c8f69aedbdbc8cf6d6e29b` — `feat: add typed escalation lifecycle read`
+- `d545f0857bb4206839d80a194f2fca427888fef4` — `feat: export escalation lifecycle view`
+- `1ad34343671649839537a68b5c46c05522772d22` — `test: prove privacy-safe escalation lifecycle reads`
+- `a388b2a87a958c76041cad4d5b7dce5eb2a01449` — `docs: document escalation lifecycle privacy view`
 
-`package.json` has no separate lint script and no standalone migration/schema-check command. The repository's available executable verification remains CI typecheck/build/test plus Container and Compose deployment workflows.
+`package.json` has no separate lint script and no standalone migration/schema-check command. The available executable verification remains CI typecheck/build/test plus Container and Compose deployment workflows.
 
 No live CALL-E phone call was attempted or claimed.
 
 ## Architecture decisions made this run
 
-1. A durable owner decision answer is agent-consumption state, not generic observational run metadata. `agent:read` therefore must not implicitly grant access to it.
-2. `decision:read` is intentionally additive to `agent:read`; the sensitive route requires both rather than replacing the ordinary agent-state authorization boundary.
-3. The standard agent role receives `decision:read` because the agent that raised the escalation must be able to consume the answer and safely resume only the affected scope.
-4. Standard owner and read-only operator browser credentials intentionally do not receive `decision:read`. They can observe privacy-safe run/branch/audit state and request owner callbacks where authorized without retrieving the decision answer.
-5. Provider reconciliation authority remains separate. `calls:reconcile` neither implies agent read access nor decision-answer access.
-6. Legacy `*` remains supported for trusted/local compatibility, but scoped credentials are the recommended exposed-deployment path.
-7. This security split changes only HTTP authorization. It does not alter CALL-E provider state, branch-scoped blocking, durable decision persistence, callback steering, or the rule that human instructions are consumed only at explicit safe checkpoints.
+1. Individual escalation lifecycle state is observational metadata and may be exposed under `agent:read` when projected through a deliberately narrow view.
+2. The owner's decision answer/structured result remains agent-consumption state and continues to require the stronger additive `decision:read` capability.
+3. The safe lifecycle projection must not reuse the persisted `Escalation` object directly because that object contains question/context/idempotency/correlation fields that an operator does not need.
+4. Provider call status is safe to expose as an operational enum, but provider call ids, replayable tasks, provider metadata, and recovery material remain server-side.
+5. The new HTTP route and TypeScript SDK method share the same projection helper so privacy semantics cannot silently diverge between adapters.
+6. No branch-blocking, owner-decision persistence, callback steering, CALL-E reconciliation, or safe-checkpoint semantics were changed.
+7. Human steering still enters durable queued state and is consumed only at explicit safe checkpoints; no mid-generation interruption capability is claimed.
 
 ## CALL-E integration status
 
-- Fake provider: deterministic and tested for decisions, callbacks, branch-scoped blocking, durable steering, idempotency, ambiguous recovery, immediate/later `in_progress`, repeated same-state polling, stale active-state downgrade rejection, bounded stale detection, provider-progress persistence across SQLite restart, auditability, HTTP/MCP integration, operator demos, persistence/restart behavior, and the newly hardened decision-read credential boundary.
-- Production CALL-E adapter: implemented with server-only `CALLE_API_KEY`, idempotent create, structured result schemas, create-time and later active-state observation, terminal polling/webhook convergence, bounded requests, exact-key ambiguous recovery, duplicate prevention, and fail-closed stalled handling.
-- HTTP + TypeScript SDK + MCP: share the same control-plane services and durable state machine. Scoped agent credentials that use `get_escalation_status`/`GET /v1/escalations/:id` now require `decision:read`; browser-facing owner/operator presets do not receive it.
-- Live CALL-E success: unverified; no real authorized phone call was made.
+- Fake provider: deterministic and tested for decisions, callbacks, branch-scoped blocking, durable steering, idempotency, ambiguous recovery, active-state progress, stale downgrade rejection, bounded stale detection, restart durability, auditability, HTTP/MCP integration, operator demos, credential boundaries, and the new privacy-safe individual escalation lifecycle read.
+- Production CALL-E adapter: implemented with server-only `CALLE_API_KEY`, idempotent create, structured result schemas, active-state observation, terminal polling/webhook convergence, bounded requests, exact-key ambiguous recovery, duplicate prevention, and fail-closed stalled handling.
+- HTTP + TypeScript SDK + MCP continue to share the same control-plane services and durable state machine. The new lifecycle route is an observational projection only; sensitive decision consumption remains separately scoped.
+- Live CALL-E success remains unverified; no real authorized phone call was made.
 
 ## Current blockers / external prerequisites
 
@@ -98,12 +138,10 @@ Live CALL-E verification still requires user-controlled prerequisites: a valid/a
 
 Real Claude Code host acceptance still requires running the documented stdio MCP workflow in an actual Claude Code environment. Repository-side MCP behavior is tested; host acceptance must not be fabricated.
 
-Executable verification for this run was taken from the repository's GitHub Actions workflows. No local CALL-E or external-agent-host success was claimed.
-
 ## Highest-value next actions
 
-1. Consider splitting escalation observation into a privacy-safe escalation-status view and a separately authorized decision-result view, so owner/operator surfaces can inspect an individual escalation's lifecycle without ever being eligible to receive its answer; keep the current run overview as the safe browser default.
-2. Add an explicit scoped MCP/TypeScript integration acceptance using the standard `agent` role to prove `request_owner_decision -> get_escalation_status` works with `decision:read`, while an owner/operator scoped client receives a clear authorization failure rather than widening its permissions.
-3. Audit remaining deployment/config examples for custom `CYA_API_CREDENTIALS_JSON` snippets and ensure any agent credential intended to read decision results includes `decision:read` while owner/reconciler credentials remain narrow.
+1. Add scoped TypeScript/MCP integration acceptance proving the standard `agent` role can execute `request_owner_decision -> get_escalation_status` with `decision:read`, while an owner/operator scoped client can use the new lifecycle-status read but receives a clear authorization failure for the sensitive decision result.
+2. Consider exposing the new privacy-safe escalation lifecycle read as a distinct read-only MCP tool only if it improves real operator/agent host workflows; do not replace the sensitive agent decision-consumption tool.
+3. Audit deployment/config examples for custom credential JSON and ensure observational clients use `agent:read` without `decision:read`, while agent credentials that must consume owner decisions include both.
 4. When an actual Claude Code host is available, run the documented stdio MCP host acceptance path with the deterministic fake provider.
 5. When user-only CALL-E prerequisites are available, perform one bounded live provider acceptance test and record only observed results.
