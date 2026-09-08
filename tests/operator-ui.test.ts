@@ -49,6 +49,15 @@ test("operator console is a static privacy-safe shell with explicit causal timel
   assert.match(body, /Only this owner-gated scope is blocked; the active scope remains separate/);
   assert.match(body, /Owner decision is durably recorded; the run now reports this scope as active with no blocked scopes/);
 
+  assert.match(body, /Latest owner callback/);
+  assert.match(body, /renderCallbackStatus\(overview\.latestOwnerCallback\)/);
+  assert.match(body, /Callback is durably queued before provider completion/);
+  assert.match(body, /provider has accepted the callback/i);
+  assert.match(body, /The callback completed/);
+  assert.match(body, /Provider outcome is ambiguous/);
+  assert.match(body, /fail-closed for review/);
+  assert.doesNotMatch(body, /latestOwnerCallback\.request/);
+
   assert.match(body, /Needs owner/);
   assert.match(body, /Phone call/);
   assert.match(body, /Decision/);
