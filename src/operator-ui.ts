@@ -35,10 +35,15 @@ export function operatorConsoleHtml(): string {
     .branch-lane.waiting { border-color:#7b6235; }
     .branch-lane.resumed { border-color:#397c78; }
     .branch-arrow { align-self:center; color:#8fb6ff; font-size:22px; font-weight:800; }
-    .capability { display:flex; gap:8px; align-items:center; flex-wrap:wrap; margin:12px 0 0; padding:10px 12px; background:#091829; border-radius:12px; }
+    .capability,.callback-status { display:flex; gap:8px; align-items:center; flex-wrap:wrap; margin:12px 0 0; padding:10px 12px; background:#091829; border-radius:12px; }
+    .callback-status { align-items:flex-start; flex-direction:column; border:1px solid #1d3858; }
+    .callback-status-row { width:100%; display:flex; justify-content:space-between; align-items:center; gap:10px; }
     .badge { display:inline-flex; align-items:center; border:1px solid #29486d; border-radius:999px; padding:4px 8px; font-size:11px; font-weight:700; }
     .badge.owner { color:#88e5b7; border-color:#3a7b66; }
     .badge.readonly { color:#ffd88f; border-color:#7b6235; }
+    .badge.callback-active { color:#8fb6ff; border-color:#466f9e; }
+    .badge.callback-complete { color:#88e5b7; border-color:#3a7b66; }
+    .badge.callback-warning { color:#ffd88f; border-color:#7b6235; }
     .legend { display:flex; flex-wrap:wrap; gap:7px; margin:12px 0 14px; }
     .legend-item,.event-stage { display:inline-flex; align-items:center; gap:6px; border:1px solid #29486d; border-radius:999px; padding:4px 8px; font-size:11px; font-weight:700; letter-spacing:.02em; }
     .timeline { display:flex; flex-direction:column; gap:10px; max-height:640px; overflow:auto; padding-right:4px; }
@@ -93,6 +98,10 @@ export function operatorConsoleHtml(): string {
       <button id="callback" class="secondary" disabled>Call me about this run</button>
       <div id="callbackAccess" class="muted" style="margin-top:10px">Load a run with an owner-scoped credential to enable callbacks.</div>
       <div id="callbackResult" class="muted" style="margin-top:8px"></div>
+      <div id="callbackStatus" class="callback-status" hidden>
+        <div class="callback-status-row"><div><div class="tag">Latest owner callback</div><strong id="callbackStatusTitle">No callback</strong></div><span id="callbackStatusBadge" class="badge readonly">—</span></div>
+        <div id="callbackStatusDetail" class="muted"></div>
+      </div>
     </section>
     <section class="card">
       <div style="display:flex;justify-content:space-between;gap:12px;align-items:center"><div><div class="tag">Causal timeline</div><h2 style="margin:5px 0 0">What actually happened</h2></div><button id="auto" class="secondary" style="width:auto;margin:0">Auto refresh: off</button></div>
@@ -161,6 +170,23 @@ export function operatorConsoleHtml(): string {
     byId('branchStoryBadge').textContent = hasResolvedDecision ? 'Blocked branch resumed' : 'No branch blocked';
     byId('branchStoryBadge').className = 'badge owner';
   };
+  const renderCallbackStatus = (callback) => {
+    const panel = byId('callbackStatus');
+    if (!callback) { panel.hidden = true; return; }
+    panel.hidden = false;
+    const presentation = {
+      queued:['Queued','Callback is durably queued before provider completion.','callback-active'],
+      in_progress:['In progress','The provider has accepted the callback and terminal evidence is still pending.','callback-active'],
+      completed:['Completed','The callback completed. Any owner steering is handled through the durable instruction queue.','callback-complete'],
+      failed:['Failed','The original callback attempt reached a terminal failure; no replacement call is inferred here.','callback-warning'],
+      ambiguous:['Needs review','Provider outcome is ambiguous. Recovery remains idempotent and server-side.','callback-warning'],
+      stalled:['Stalled','The accepted callback exceeded its bounded in-progress window and is fail-closed for review.','callback-warning'],
+    }[callback.status] || ['Unknown',String(callback.status || 'unknown'),'readonly'];
+    byId('callbackStatusTitle').textContent = presentation[0];
+    byId('callbackStatusBadge').textContent = presentation[0];
+    byId('callbackStatusBadge').className = 'badge ' + presentation[2];
+    byId('callbackStatusDetail').textContent = presentation[1] + ' Updated ' + new Date(callback.updatedAt).toLocaleString() + '. Call attempt ' + callback.id + '.';
+  };
   const escapeHtml = (value) => String(value ?? '').replace(/[&<>"']/g, (c) => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
   const eventStage = (type) => {
     if (type === 'escalation_created' || type === 'call_policy_deferred' || type === 'call_policy_released') return { id:'decision-request', label:'Needs owner' };
@@ -203,9 +229,10 @@ export function operatorConsoleHtml(): string {
         ? 'Independent work is still active while ' + blocked.length + ' blocked scope' + (blocked.length === 1 ? ' waits.' : 's wait.')
         : blocked.length ? blocked.length + ' scope' + (blocked.length === 1 ? ' is' : 's are') + ' waiting for owner resolution.' : 'No scope is currently blocked on owner judgment.';
       renderBranchStory(run, blocked, audit.events);
+      renderCallbackStatus(overview.latestOwnerCallback);
       byId('timeline').innerHTML = audit.events.slice().reverse().map(renderEvent).join('') || '<div class="muted">No audit events yet.</div>';
       byId('message').textContent = 'Connected'; byId('message').className = 'error ok';
-    } catch (error) { resetCapabilities(); byId('message').className = 'error'; byId('message').textContent = error.message; }
+    } catch (error) { resetCapabilities(); byId('callbackStatus').hidden = true; byId('message').className = 'error'; byId('message').textContent = error.message; }
   };
   byId('token').addEventListener('input', resetCapabilities);
   byId('refresh').addEventListener('click', load);
