@@ -12,9 +12,16 @@ export interface StartCallResult {
   status: "queued" | "in_progress" | "completed";
 }
 
-export type CallProviderObservation =
-  | { providerCallId: string; status: "queued" | "in_progress" }
-  | CallOutcome;
+export interface ActiveCallObservation {
+  providerCallId: string;
+  status: "queued" | "in_progress";
+}
+
+export type CallProviderObservation = ActiveCallObservation | CallOutcome;
+
+export function isActiveCallObservation(observation: CallProviderObservation): observation is ActiveCallObservation {
+  return observation.status === "queued" || observation.status === "in_progress";
+}
 
 export interface CallProvider {
   readonly name: string;
@@ -73,7 +80,7 @@ export class FakeCallProvider implements CallProvider {
 
   async getOutcome(providerCallId: string): Promise<CallOutcome | null> {
     const observation = await this.observe(providerCallId);
-    return observation.status === "queued" || observation.status === "in_progress" ? null : observation;
+    return isActiveCallObservation(observation) ? null : observation;
   }
 
   progress(providerCallId: string): void {
