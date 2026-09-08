@@ -68,10 +68,12 @@ For an internet-exposed deployment prefer `CYA_API_CREDENTIALS_JSON` instead of 
 
 Recommended roles:
 
-- agent/MCP credential: `agent:read`, `agent:write`, optionally `audit:read`;
+- agent/MCP credential: `agent:read`, `agent:write`, `decision:read`, optionally `audit:read`;
 - owner-facing callback surface: `owner:callback` plus only the read scopes it genuinely needs;
 - trusted reconciliation worker/operator: `calls:reconcile`;
 - avoid `*` except for tightly controlled trusted administration.
+
+`decision:read` is intentionally separate from ordinary observational read access because `GET /v1/escalations/:id` can return the owner's durable answer and structured result. The standard agent role includes it so the agent that raised an escalation can resume the affected scope; standard owner/operator-read roles do not.
 
 Store bearer credentials, `CALLE_API_KEY`, owner phone configuration, and the webhook capability token in the hosting platform's secret store. Do not bake them into an image or commit them to the repository.
 
