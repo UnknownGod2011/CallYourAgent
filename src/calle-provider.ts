@@ -1,5 +1,11 @@
 import type { CallOutcome } from "./domain.js";
-import type { CallProvider, CallProviderObservation, StartCallInput, StartCallResult } from "./call-provider.js";
+import {
+  isActiveCallObservation,
+  type CallProvider,
+  type CallProviderObservation,
+  type StartCallInput,
+  type StartCallResult,
+} from "./call-provider.js";
 
 type FetchLike = typeof fetch;
 
@@ -146,7 +152,7 @@ export class CalleCallProvider implements CallProvider {
 
   async getOutcome(providerCallId: string): Promise<CallOutcome | null> {
     const observation = await this.observe(providerCallId);
-    return observation.status === "queued" || observation.status === "in_progress" ? null : observation;
+    return isActiveCallObservation(observation) ? null : observation;
   }
 }
 
