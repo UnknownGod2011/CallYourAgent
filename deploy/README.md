@@ -6,13 +6,24 @@ It intentionally runs **one** control-plane process and mounts the whole `/data`
 
 ## Fake-provider bring-up
 
-From the repository root:
+For the simplest trusted localhost bring-up, the backwards-compatible full-access token still works:
 
 ```bash
 export CYA_API_TOKEN="replace-with-a-long-random-token"
 docker compose -f deploy/compose.yml up --build -d
 curl --fail http://127.0.0.1:8787/health
 ```
+
+For anything exposed beyond a trusted local environment, prefer the standard scoped bundle instead:
+
+```bash
+npm ci
+export CYA_API_CREDENTIALS_JSON="$(npm run --silent credentials:generate)"
+unset CYA_API_TOKEN
+docker compose -f deploy/compose.yml up --build -d
+```
+
+The generator creates separate `agent`, `owner`, `operator-read`, and `reconciler` credentials from the same least-privilege role definitions used by the application tests. The owner/operator credentials do not receive `decision:read`, and no browser-facing role receives `calls:reconcile`. Store the generated JSON as a secret and do not commit or paste it into client code.
 
 Open `http://127.0.0.1:8787/operator` for the thin operator console. Keep using the deterministic fake provider until the full agent -> decision -> callback -> checkpoint flow works for your deployment.
 
