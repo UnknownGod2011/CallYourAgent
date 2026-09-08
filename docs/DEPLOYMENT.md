@@ -66,12 +66,25 @@ Because the capability token is carried in the URL query string, configure rever
 
 For an internet-exposed deployment prefer `CYA_API_CREDENTIALS_JSON` instead of handing every integration the legacy full-access `CYA_API_TOKEN`.
 
-Recommended roles:
+The safest setup path is to generate the repository's standard four-role bundle rather than hand-editing scope arrays:
 
-- agent/MCP credential: `agent:read`, `agent:write`, `decision:read`, optionally `audit:read`;
-- owner-facing callback surface: `owner:callback` plus only the read scopes it genuinely needs;
-- trusted reconciliation worker/operator: `calls:reconcile`;
-- avoid `*` except for tightly controlled trusted administration.
+```bash
+npm ci
+export CYA_API_CREDENTIALS_JSON="$(npm run --silent credentials:generate)"
+```
+
+The command emits one JSON array containing four independently generated high-entropy bearer tokens with these exact roles:
+
+- `agent`: `agent:read`, `agent:write`, `decision:read`, `audit:read`;
+- `owner`: `agent:read`, `audit:read`, `owner:callback`;
+- `operator-read`: `agent:read`, `audit:read`;
+- `reconciler`: `calls:reconcile`.
+
+Store the resulting JSON as one secret value in the hosting platform. Do not commit the generated output, paste it into browser code, or reuse one role's token for another process. In particular, owner/operator credentials intentionally lack `decision:read`, and browser-facing credentials intentionally lack `calls:reconcile`.
+
+If the platform's secret UI does not support command substitution, run `npm run --silent credentials:generate` locally once, copy the single JSON line into the `CYA_API_CREDENTIALS_JSON` secret, then discard terminal history/output according to your local secret-handling policy. Regenerate the whole bundle if any generated token is exposed.
+
+Custom credentials remain supported when a deployment genuinely needs a different split, but start from the standard role definitions in `src/credential-roles.ts` rather than widening a browser token for convenience. Avoid `*` except for tightly controlled trusted administration.
 
 `decision:read` is intentionally separate from ordinary observational read access because `GET /v1/escalations/:id` can return the owner's durable answer and structured result. The standard agent role includes it so the agent that raised an escalation can resume the affected scope; standard owner/operator-read roles do not.
 
