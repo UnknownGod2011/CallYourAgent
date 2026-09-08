@@ -25,9 +25,10 @@ test("opt-in fake auto-completion resolves a branch decision through normal reco
   assert.equal(before.run.currentScope, "independent-work");
 
   const reconciled = await control.reconcileEscalation(escalation.id);
-  assert.equal(reconciled.escalation.status, "resolved");
-  assert.equal(reconciled.decision?.answer, "Proceed with the requested scope.");
-  assert.deepEqual(reconciled.decision?.structured, {
+  assert.equal(reconciled.status, "resolved");
+  const decision = control.getDecision(escalation.id);
+  assert.equal(decision?.answer, "Proceed with the requested scope.");
+  assert.deepEqual(decision?.structured, {
     decision: "proceed",
     source: "deterministic_fake_provider",
   });
