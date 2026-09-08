@@ -89,7 +89,11 @@ The escalation/callback remains linked to that ambiguous attempt, so a process r
 
 The fake provider implements the same provider-side deduplication behavior, allowing tests to verify duplicate retries do not create duplicate calls.
 
-## Polling and webhook convergence
+## Polling, active observations, and webhook convergence
+
+Provider polling returns a typed observation rather than collapsing every non-terminal state into `null`. A provider can therefore report `queued`, later report `in_progress`, and eventually report a terminal outcome through the same read path.
+
+The control plane persists only a genuine forward active-state transition from `queued` to `in_progress`. That transition receives one privacy-safe `call_attempt_progressed` audit event and refreshes the attempt's `updatedAt`, giving a newly dialing call a fresh bounded in-progress window. Repeated identical `in_progress` polls do **not** rewrite the attempt or refresh `updatedAt`, and a later stale `queued` observation cannot downgrade an already in-progress attempt. This prevents a provider that keeps returning the same active state from extending the stale-call timeout forever.
 
 Polling and webhooks are delivery mechanisms for the same terminal provider outcome; they must never implement separate business transitions.
 
@@ -127,7 +131,7 @@ Persisted `CallAttempt` rows include the exact replayable provider request field
 
 ## Durable audit timeline
 
-Every meaningful control-plane transition can now produce a first-class `AuditEvent`. The timeline covers run status reporting, escalation creation, policy deferral/release, expiration, call-attempt creation/start/ambiguous/terminal transitions, owner decisions, callbacks, queued/consumed instructions, and provider webhook reconciliation.
+Every meaningful control-plane transition can now produce a first-class `AuditEvent`. The timeline covers run status reporting, escalation creation, policy deferral/release, expiration, call-attempt creation/start/progress/ambiguous/terminal transitions, owner decisions, callbacks, queued/consumed instructions, and provider webhook reconciliation.
 
 Audit events are deliberately **metadata-only**. They do not copy full escalation context, owner decision answers, callback transcripts, or owner instruction text. The domain records event type, actor, references, safe operational metadata, and a human-readable summary so an operator or demo UI can explain what happened without creating a second sensitive transcript store.
 
@@ -145,7 +149,7 @@ The production adapter uses the current asynchronous Calls API:
 - `Idempotency-Key` for safe retries;
 - caller-owned `metadata` for run/escalation/callback correlation;
 - `result_schema` / `recipient_result_schema` for owner decisions and callback instructions;
-- `GET /v1/calls/{call_id}` for reconciliation;
+- `GET /v1/calls/{call_id}` for active-state observation and terminal reconciliation;
 - terminal webhooks for low-latency completion, deduplicated by event id.
 
 `CALLE_API_KEY` must only exist in trusted server environments.
@@ -156,9 +160,7 @@ The repository has GitHub Actions CI on `main` and pull requests using Node 24. 
 
 ## Next architectural layers
 
-1. Bounded retry/backoff and lifecycle sweeps for ambiguous/deferred/expired work.
-2. API credential scopes and rate limiting before broader exposure.
-3. Graceful shutdown and production deployment hardening.
-4. Real Claude Code host acceptance of the already-tested stdio MCP adapter.
-5. A small demo/status UI over the HTTP audit/status APIs, without introducing another business-state layer.
-6. Codex / ChatGPT adapters only where current platform capabilities support the required tool/checkpoint semantics.
+1. Real Claude Code host acceptance of the already-tested stdio MCP adapter.
+2. Codex / ChatGPT adapters only where current platform capabilities support the required tool/checkpoint semantics.
+3. Provider-specific operational tuning only after bounded live CALL-E verification.
+4. A multi-instance store/rate-limiter architecture only if deployment requirements outgrow the current single-instance SQLite reference topology.
