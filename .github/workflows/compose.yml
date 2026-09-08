@@ -78,6 +78,13 @@ jobs:
           jq -e '.credentialId == "operator-read" and (.scopes | sort) == (["agent:read","audit:read"] | sort)' <<<"$operator_caps" >/dev/null
           jq -e '.credentialId == "reconciler" and .scopes == ["calls:reconcile"]' <<<"$reconciler_caps" >/dev/null
 
+      - name: Verify stdio MCP against deployed control plane
+        env:
+          CYA_BASE_URL: http://127.0.0.1:8787
+        run: |
+          npm run build --silent
+          node dist/tests/mcp-stdio-deployment-acceptance.js
+
       - name: Create durable run and branch-blocking owner decision
         run: |
           agent_json=$(curl --fail --silent \
