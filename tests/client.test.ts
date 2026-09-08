@@ -63,7 +63,7 @@ test("typed client drives register, run, escalation, status, and checkpoint flow
   assert.deepEqual(checkpoint.queuedInstructions, []);
 });
 
-test("typed client drives owner-requested callback path", async () => {
+test("typed client drives owner-requested callback path with privacy-safe views", async () => {
   const { client } = await start();
   const agent = await client.registerAgent({ name: "Worker", platform: "custom", ownerId: "owner-1" });
   const run = await client.startRun({ agentId: agent.id, summary: "Implementing authentication" });
@@ -71,7 +71,9 @@ test("typed client drives owner-requested callback path", async () => {
   const callback = await client.requestOwnerCallback({ runId: run.id, idempotencyKey: "callback-1", prompt: "Give me a status update" });
   const fetched = await client.getCallback(callback.id);
   assert.equal(fetched.id, callback.id);
-  assert.equal(fetched.purpose, "owner_callback");
+  assert.equal(fetched.runId, run.id);
+  assert.equal(fetched.status, callback.status);
+  assert.deepEqual(Object.keys(fetched).sort(), ["createdAt", "id", "runId", "status", "updatedAt"]);
 });
 
 test("typed client exposes HTTP failures with status and server body", async () => {
