@@ -4,95 +4,124 @@
 
 CallYourAgent is a durable Node 24 TypeScript control plane for asynchronous two-way voice coordination between autonomous AI agents and their owners. Agents can raise important owner decisions without freezing unrelated scopes; owners can independently request callbacks for progress/questions/steering; human input is persisted and consumed only at explicit safe checkpoints rather than pretending to interrupt in-flight model generation.
 
-The repository includes SQLite persistence, deterministic fake and production CALL-E providers, replayable/idempotent call attempts, polling/webhook convergence, scoped authenticated HTTP APIs, a typed TypeScript client, stdio MCP, branch-scoped blocking, call policy/quiet hours/budgets, privacy-aware audit history, bounded lifecycle recovery, fail-closed ambiguous/stalled handling, API abuse controls, graceful shutdown, bounded CALL-E HTTP requests, readiness/liveness surfaces, deterministic end-to-end and operator demos, a production Docker image, and a single-instance persistent-volume Compose deployment.
+The repository includes SQLite persistence, deterministic fake and production CALL-E providers, replayable/idempotent call attempts, typed active-provider observations, polling/webhook convergence, scoped authenticated HTTP APIs, a typed TypeScript client, stdio MCP, branch-scoped blocking, call policy/quiet hours/budgets, privacy-aware audit history, bounded lifecycle recovery, fail-closed ambiguous/stalled handling, API abuse controls, graceful shutdown, bounded CALL-E HTTP requests, readiness/liveness surfaces, deterministic end-to-end and operator demos, a production Docker image, and a single-instance persistent-volume Compose deployment.
 
-This run closed the previously identified `in_progress` acceptance gap. The deterministic fake provider can now truthfully model a provider that returns `in_progress` when a call is accepted, while retaining `queued` as its default. Regression coverage proves that this status survives the durable call attempt, privacy-safe owner callback view, run overview, audit metadata, idempotent retry, and later completion without exposing callback prompt/task content or queued steering text.
+This run closed the previously identified later-poll lifecycle gap: a phone call that is accepted as `queued` can now be observed later as genuinely `in_progress`, and the control plane durably records that progress without creating another phone side effect or letting repeated identical polls extend the stale-call timeout forever.
 
 ## Exact repo state inspected this run
 
-Before making any changes, inspected the complete recursive `main` repository tree at HEAD `3d35d1c495ad2f494543b11c1109659b98b09cdf`. The Git tree reported `truncated: false` and covered root configuration, all GitHub workflows, deployment assets, every documentation file, every `src` file, and every test file.
+Before making any change, inspected the complete recursive `main` Git tree at HEAD `62a456364ad09c0befbfa6773679a6fc838c9142`; GitHub reported `truncated: false`. The inspection covered root configuration, all GitHub Actions workflows, deployment assets, every documentation file, every source file, and every test file.
 
-Inspected recent commits through the callback privacy-hardening work. Checked repository issues and pull requests; there were no open issues and no open pull requests competing with this work.
+Inspected recent commits through the immediate-`in_progress` fake-provider work. Checked relevant repository issues and pull requests; there were no open issues and no open pull requests.
 
 Read `AGENTS.md`, this file, `README.md`, `docs/ARCHITECTURE.md`, `docs/INTEGRATIONS.md`, `docs/API_SECURITY.md`, `docs/CALL_POLICY.md`, `docs/DEPLOYMENT.md`, `docs/OPERATOR_CONSOLE.md`, and `deploy/README.md` in full before editing.
 
-Inspected the relevant provider/lifecycle/read-model implementation and tests before making changes: `src/call-provider.ts`, `src/calle-provider.ts`, `src/domain.ts`, `src/control-plane.ts`, `src/lifecycle.ts`, `src/run-overview.ts`, `tests/calle-provider.test.ts`, `tests/control-plane.test.ts`, and `tests/operator-ui.test.ts`, plus the complete source/test listing from the recursive tree.
+Inspected the relevant implementation/tests before changing behavior: `src/call-provider.ts`, `src/calle-provider.ts`, `src/control-plane.ts`, `src/domain.ts`, `src/lifecycle.ts`, `tests/calle-provider.test.ts`, and `tests/lifecycle.test.ts`, plus the complete source/test listing from the recursive tree.
 
-The prior run had already made owner callback creation/read responses privacy-safe and explicitly identified the next highest-value action: cover a provider that truthfully reports `in_progress` and verify that state reaches the callback DTO, run overview, audit, and operator presentation without leaking replay/provider material.
+The prior run had explicitly identified the highest-value next action: stop collapsing later `queued` and `in_progress` provider reads into the same `null` result, persist a truthful `queued -> in_progress` transition, and ensure repeated polling cannot indefinitely refresh stale-call age.
 
 ## Changes made this run
 
-### Deterministic fake provider can truthfully start `in_progress`
+### Typed provider observation contract
 
-Updated `FakeCallProvider` in `src/call-provider.ts` with an optional `initialStatus: "queued" | "in_progress"` setting.
+Added a provider observation model in `src/call-provider.ts`:
 
-The default remains `queued`, preserving all existing deterministic demos and tests. A focused test/provider path can now select `in_progress` at create time, matching the existing `CallProvider.start` contract and the production CALL-E adapter's already-supported create response.
+- `CallProvider.observe(providerCallId)` returns either an active `queued`/`in_progress` observation or a terminal `CallOutcome`;
+- `getOutcome()` remains as a compatibility helper for integrations that only care about terminal evidence;
+- active observations and terminal outcomes are discriminated by status, avoiding unsafe casts in reconciliation code.
 
-The fake provider's idempotency map now stores the full accepted `StartCallResult` rather than only the provider call id. Retrying the exact same idempotency key therefore returns the same provider call id **and the same accepted start status**, rather than accidentally rewriting an originally accepted `in_progress` call back to `queued`.
+The deterministic fake provider now stores its active state and exposes `progress(providerCallId)` so tests/demos can truthfully advance an already-created fake call from `queued` to `in_progress` without another create call. Its existing provider-side idempotency behavior is unchanged.
 
-### In-progress callback projection acceptance
+### Production CALL-E active-state observation
 
-Added `tests/in-progress-callback.test.ts`.
+Updated `CalleCallProvider` so `GET /v1/calls/{call_id}` preserves CALL-E's documented active state:
 
-The acceptance creates a running agent and owner callback using `FakeCallProvider({ initialStatus: "in_progress" })` and proves:
+- `queued` -> typed queued observation;
+- `in_progress` -> typed in-progress observation;
+- `completed`/`failed`/`canceled` -> existing provider-agnostic terminal outcome mapping.
 
-- the durable `CallAttempt` is genuinely `in_progress` immediately after provider acceptance;
-- `OwnerCallbackView` returns only `id`, `runId`, `status`, `createdAt`, and `updatedAt`, with `status: "in_progress"`;
-- the run overview reports that exact callback as `in_progress` without exposing `providerCallId` or the owner's callback prompt;
-- the durable `call_attempt_started` audit event records only safe operational metadata including `status: "in_progress"`, without copying the phone task/prompt;
-- after deterministic terminal evidence arrives, normal callback reconciliation moves the call to `completed` and queues exactly one owner instruction;
-- the overview then reports `completed` plus `queuedInstructionCount: 1` while still omitting the instruction text;
-- an idempotent retry against an in-progress fake call returns the exact same accepted result instead of creating/relabeling another call.
+`CALLE_API_KEY` remains server-side. No live CALL-E call was attempted.
 
-The existing operator UI already renders `latestOwnerCallback.status` generically and has regression coverage for the `in_progress` presentation copy. The new domain/read-model acceptance therefore exercises the previously missing state source rather than adding a demo-only browser transition.
+### Durable `queued -> in_progress` transition
 
-Code/test commits made this run:
+Updated `ControlPlane.reconcileEscalation` and `ControlPlane.reconcileCallback` to consume provider observations through the same shared domain service used by HTTP/MCP/runtime paths.
 
-- `1e829b80028aba03d60e84f4081384f35a8fe2df` — `feat: let fake provider model immediate in-progress calls`
-- `6c090d56302c11e110f605d8aa11cdcc68a2745f` — `test: cover truthful in-progress callback projection`
+A new internal active-observation transition:
+
+- validates that the observed provider call id matches the persisted attempt;
+- persists only a genuine forward `queued -> in_progress` transition;
+- writes one privacy-safe `call_attempt_progressed` audit event;
+- refreshes `updatedAt` once when actual provider progress is learned;
+- ignores repeated same-state observations without rewriting `updatedAt` or producing duplicate progress audit events;
+- ignores a stale later `queued` observation for an already `in_progress` attempt rather than downgrading it;
+- does not alter terminal polling/webhook convergence, which still uses the existing single terminal transition path.
+
+Human-answer/instruction semantics are unchanged. Owner decisions remain durable state releasing only the relevant blocking scope, and callback steering remains queued until explicit safe-checkpoint acknowledgement.
+
+### Timeout/idempotency regression coverage
+
+Added `tests/provider-observation.test.ts`.
+
+Coverage proves:
+
+- the CALL-E adapter can distinguish later `queued` and `in_progress` reads instead of returning `null` for both;
+- a fake callback created as `queued` can later advance to `in_progress` through provider observation;
+- the transition updates durable status/timestamp exactly once and emits exactly one progress audit event;
+- repeated `in_progress` reconciliation leaves `updatedAt` unchanged;
+- lifecycle stale-call detection still marks the call `stalled` once the configured age is exceeded, proving polling cannot keep it alive forever.
+
+### Documentation
+
+Updated `docs/ARCHITECTURE.md` and `docs/CALL_POLICY.md` to document active observations, forward-only progress semantics, privacy-safe auditing, and the exact stale-timeout rule.
 
 ## Architecture decisions made this run
 
-1. Do not fabricate a `queued -> in_progress` transition solely for presentation. The deterministic provider now truthfully returns `in_progress` through the same `StartCallResult` contract a real provider may return at create time.
-2. Preserve fake-provider defaults. `queued` remains the normal deterministic mode so existing demo timing and established acceptance behavior do not change unless a test explicitly asks for `in_progress`.
-3. Provider idempotency includes the accepted state, not only the provider call id. Retrying one logical create must reproduce the same accepted result rather than changing local lifecycle state.
-4. `in_progress` remains ordinary durable `CallAttempt` state. Owner/browser surfaces receive only the existing privacy-safe projection; provider ids, replayable tasks, callback prompts, and recovery material remain server-side.
-5. Auditability remains metadata-only. The operator can learn that a provider accepted an in-progress call, but the audit log does not become a second transcript/task store.
-6. Human steering semantics are unchanged. Completion may enqueue structured steering, but it remains durable queued state for a later safe checkpoint; no mid-token interruption behavior was introduced.
-7. A distinct follow-on gap is now clearer: when a provider create initially returns `queued` and a later poll reports `in_progress`, the current provider polling contract returns `null` for both active states, so the control plane cannot durably distinguish that queued-to-in-progress observation. That should be solved through an explicit provider observation/read contract, not by guessing in the UI.
+1. Provider reads are observations, not merely optional terminal outcomes. Active provider progress is first-class typed evidence.
+2. `queued -> in_progress` is the only accepted active forward transition. Same-state polls are no-ops and stale provider regressions cannot downgrade local state.
+3. A real progress transition may refresh the stale-call window once; an unchanged poll may not. This keeps timeout semantics truthful and bounded.
+4. Active observation never creates a new provider side effect. Only the already-known provider call id is polled.
+5. Terminal polling and webhooks continue converging through the same terminal state machine so decisions/instructions cannot be duplicated by different delivery mechanisms.
+6. Provider observation ids are checked against persisted provider ids before state mutation.
+7. Audit remains metadata-only: progress status/purpose/provider may be recorded, but callback prompts, decision answers, transcripts, and steering text are not copied into audit events.
+8. Type safety is part of the contract. After CI exposed an overly broad status-union model, active and terminal observation states were made genuinely discriminated rather than papering over the problem with casts.
 
 ## Verification performed
 
-The code/test-bearing state `6c090d56302c11e110f605d8aa11cdcc68a2745f` passed all repository verification paths:
+The first code-bearing verification exposed TypeScript narrowing failures in the new observation union. CI run `34193138442` and the corresponding container path failed at typecheck. This was a genuine implementation defect and was not treated as success.
 
-- CI run `34189059427` — `completed` / `success`; the normal Node 24 locked-install, TypeScript typecheck, build, and full Node test suite passed, including the new `in-progress-callback` acceptance.
-- Container run `34189059389` — `completed` / `success`; production image build and fake-provider runtime smoke passed.
-- Compose deployment run `34189059461` — `completed` / `success`; Compose validation, fake-provider deployment boot/health, durable API-state creation, named-volume restart, and post-restart persistence checks passed.
+A first correction made terminal `CallOutcome` discriminated, but CI run `34193451354` still showed that `ActiveCallObservation` itself used a status union and therefore could not be excluded safely by TypeScript in the control-plane terminal branch. The active observation type was then corrected to a true discriminated union (`queued` vs `in_progress`) rather than using a cast.
 
-`package.json` has no separate lint script and no standalone migration/schema command. The available repository verification path remains CI typecheck/build/test plus Container and Compose deployment workflows.
+The final code-bearing state `3d6b628ff22e2af2f84647488fe82ae5f7cd744e` passed all available repository verification paths:
+
+- CI run `34193511353` / job `101956231730` — success. Locked dependency install, Node 24 TypeScript typecheck, build, and full Node test suite passed, including `provider-observation.test.ts`.
+- Container run `34193511338` — success. Production image build and fake-provider runtime smoke passed.
+- Compose deployment run `34193511316` / job `101956231572` — success. Compose validation, fake-provider boot/health, durable API-state creation, named-volume restart, post-restart state verification, and cleanup all passed.
+
+`package.json` has no separate lint script and no standalone migration/schema-check command. The repository's available verification remains CI typecheck/build/test plus Container and Compose deployment workflows.
 
 No live CALL-E phone call was attempted or claimed.
 
 ## CALL-E integration status
 
-- Fake provider: implemented and tested across owner decisions, callbacks, branch-scoped blocking, durable steering, exact acknowledgement, idempotency, lifecycle recovery, auditability, deterministic demos, HTTP/MCP integration, credential separation, branch-safe visualization, privacy-safe callback status, SQLite restart persistence, privacy-safe callback creation/read responses, and now truthful immediate `in_progress` provider acceptance plus idempotent preservation of that state.
-- Production CALL-E adapter: implemented with server-only `CALLE_API_KEY`, idempotent create requests, structured outcomes, create-time `queued`/`in_progress` support, polling/webhook convergence for terminal results, bounded requests, duplicate-call prevention, exact-key ambiguous replay, and fail-closed stalled handling.
-- HTTP + TypeScript SDK + MCP: implemented over shared control-plane semantics. Owner/operator callback reads remain narrow/privacy-safe; trusted reconciliation remains separate.
+- Fake provider: deterministic and tested for decisions, callbacks, branch-scoped blocking, durable steering, idempotency, ambiguous recovery, immediate and later `in_progress` states, bounded stale detection, auditability, HTTP/MCP integration, operator demos, and persistence/restart behavior.
+- Production CALL-E adapter: implemented with server-only `CALLE_API_KEY`, idempotent create, structured result schemas, create-time and later active-state observation, terminal polling/webhook convergence, bounded requests, exact-key ambiguous recovery, duplicate prevention, and fail-closed stalled handling.
+- HTTP + TypeScript SDK + MCP: share the same control-plane services and durable state machine. No browser-side provider reconciliation or replay material was introduced.
 - Live CALL-E success: unverified; no real authorized phone call was made.
 
 ## Current blockers / external prerequisites
 
-No repository-development blocker currently prevents further useful work.
+No repository-development blocker prevents further useful work.
 
-Live CALL-E verification still requires user-controlled prerequisites: a valid/authorized CALL-E credential, an authorized owner destination, and stable public HTTPS webhook ingress with the configured webhook capability token.
+Live CALL-E verification still requires user-controlled prerequisites: a valid/authorized CALL-E credential, authorized owner phone destination, and stable public HTTPS webhook ingress configured with the application-owned webhook capability token.
 
-Real Claude Code host acceptance still requires running the documented stdio MCP registration/workflow in an actual Claude Code environment. Repository-side MCP behavior is tested, but host acceptance must not be invented.
+Real Claude Code host acceptance still requires running the documented stdio MCP workflow in an actual Claude Code environment. Repository-side MCP behavior is tested; host acceptance must not be fabricated.
+
+The execution environment used for this run could not clone GitHub directly because outbound DNS resolution to `github.com` was unavailable, so all executable verification was taken from the repository's GitHub Actions workflows rather than claiming local test execution.
 
 ## Highest-value next actions
 
-1. Extend the provider read/reconciliation contract so a later provider poll can distinguish active `queued` from `in_progress` (instead of returning `null` for both), persist a truthful `queued -> in_progress` observation without creating a new phone side effect, and audit it with privacy-safe metadata. Keep terminal polling/webhook convergence on the same domain transition path and verify lifecycle stale-age semantics are not accidentally refreshed forever by repeated identical observations.
-2. Review the owner-decision read boundary (`GET /v1/escalations/:id`) for equivalent least-privilege concerns: it intentionally returns structured owner decision data to agent readers, so document and test which roles may see answer text rather than narrowing it blindly.
-3. Consider a trusted internal/admin callback diagnostic surface only if real operations require it; do not broaden the ordinary owner/read DTO for troubleshooting convenience.
-4. Continue improving the one-command judge flow only where it communicates already-tested semantics rather than adding demo-only state.
-5. When an actual Claude Code host is available, run the documented stdio MCP host acceptance flow with the deterministic fake provider.
-6. When user-only CALL-E prerequisites are available, perform a bounded live provider acceptance test and record only the observed result.
+1. Add restart/persistence acceptance for a durable call that has already advanced `queued -> in_progress`, proving the progress timestamp/status and progress audit survive SQLite close/reopen and still age into `stalled` correctly after restart.
+2. Add a stale-provider-regression acceptance (`in_progress` locally, later provider read says `queued`) so the forward-only no-downgrade rule is locked explicitly rather than only by implementation.
+3. Review owner-decision read authorization (`GET /v1/escalations/:id`) and document/test which credential roles are intentionally allowed to receive the decision answer/structured result.
+4. When an actual Claude Code host is available, run the documented stdio MCP host acceptance path with the deterministic fake provider.
+5. When user-only CALL-E prerequisites are available, perform one bounded live provider acceptance test and record only observed results.
