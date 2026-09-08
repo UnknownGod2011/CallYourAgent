@@ -7,6 +7,7 @@ export * from "./calle-provider.js";
 export * from "./calle-webhook.js";
 export * from "./control-plane.js";
 export * from "./callback-view.js";
+export * from "./escalation-view.js";
 export * from "./run-overview.js";
 export * from "./lifecycle.js";
 export * from "./http-server.js";
