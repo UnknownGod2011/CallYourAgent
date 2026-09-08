@@ -4,6 +4,7 @@ import { URL } from "node:url";
 import { parseCalleTerminalWebhook } from "./calle-webhook.js";
 import { toOwnerCallbackView } from "./callback-view.js";
 import type { ControlPlane } from "./control-plane.js";
+import { getEscalationLifecycleView } from "./escalation-view.js";
 import { operatorConsoleHtml } from "./operator-ui.js";
 import { getRunOverview } from "./run-overview.js";
 
@@ -187,6 +188,12 @@ export function createControlPlaneHttpServer(controlPlane: ControlPlane, options
           expiresAt: optionalText(value.expiresAt), idempotencyKey: text(value.idempotencyKey, "idempotencyKey"),
         });
         return json(res, 201, escalation);
+      }
+
+      const escalationLifecycleMatch = url.pathname.match(/^\/v1\/escalations\/([^/]+)\/status$/);
+      if (req.method === "GET" && escalationLifecycleMatch) {
+        if (!hasScope(credential, "agent:read")) return forbidden(res, "agent:read");
+        return json(res, 200, getEscalationLifecycleView(controlPlane, decodeURIComponent(escalationLifecycleMatch[1]!)));
       }
 
       const escalationMatch = url.pathname.match(/^\/v1\/escalations\/([^/]+)$/);
