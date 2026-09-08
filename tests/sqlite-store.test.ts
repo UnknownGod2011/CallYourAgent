@@ -4,13 +4,20 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 import { FakeCallProvider } from "../src/call-provider.js";
-import { ControlPlane } from "../src/control-plane.js";
+import { ControlPlane, type Clock } from "../src/control-plane.js";
+import { LifecycleManager } from "../src/lifecycle.js";
 import { SqliteControlPlaneStore } from "../src/sqlite-store.js";
 
 function withDatabase<T>(run: (filename: string) => Promise<T> | T): Promise<T> {
   const directory = mkdtempSync(join(tmpdir(), "cya-sqlite-"));
   const filename = join(directory, "state.db");
   return Promise.resolve(run(filename)).finally(() => rmSync(directory, { recursive: true, force: true }));
+}
+
+class MutableClock implements Clock {
+  constructor(private current: Date) {}
+  now(): Date { return new Date(this.current); }
+  advance(ms: number): void { this.current = new Date(this.current.getTime() + ms); }
 }
 
 test("SQLite store survives process-style reopen with queued state intact", async () => {
@@ -38,6 +45,74 @@ test("SQLite store survives process-style reopen with queued state intact", asyn
     assert.equal(reopened.instructions.size, 1);
     assert.equal(reopened.callAttempts.size, 1);
     reopened.close();
+  });
+});
+
+test("in-progress provider observation survives SQLite reopen and still ages into stalled", async () => {
+  await withDatabase(async (filename) => {
+    const clock = new MutableClock(new Date("2026-09-08T00:00:00.000Z"));
+    const provider = new FakeCallProvider();
+    const firstStore = SqliteControlPlaneStore.open(filename);
+    const first = new ControlPlane(firstStore, provider, clock);
+
+    const agent = first.registerAgent({ name: "Durable callback worker", platform: "test", ownerId: "owner-1" });
+    const run = first.startRun(agent.id, "Working independently", "independent-scope");
+    const callback = await first.requestOwnerCallback({
+      runId: run.id,
+      idempotencyKey: "sqlite-provider-progress",
+      prompt: "Give me a progress update",
+    });
+
+    assert.equal(callback.status, "queued");
+    clock.advance(4_000);
+    provider.progress(callback.providerCallId!);
+    const progressed = await first.reconcileCallback(callback.id);
+    assert.equal(progressed.status, "in_progress");
+    assert.equal(progressed.updatedAt, "2026-09-08T00:00:04.000Z");
+
+    const progressEventsBeforeRestart = first.listAuditEvents(run.id)
+      .filter((event) => event.type === "call_attempt_progressed");
+    assert.equal(progressEventsBeforeRestart.length, 1);
+    const progressSequence = progressEventsBeforeRestart[0]!.sequence;
+    firstStore.close();
+
+    clock.advance(4_000);
+    const reopenedStore = SqliteControlPlaneStore.open(filename);
+    const reopened = new ControlPlane(reopenedStore, provider, clock);
+    const lifecycle = new LifecycleManager(reopened, reopenedStore, clock, { maxInProgressCallAgeMs: 5_000 });
+
+    const durableProgress = reopened.getCallAttempt(callback.id);
+    assert.equal(durableProgress.status, "in_progress");
+    assert.equal(durableProgress.updatedAt, "2026-09-08T00:00:04.000Z");
+    const progressEventsAfterRestart = reopened.listAuditEvents(run.id)
+      .filter((event) => event.type === "call_attempt_progressed");
+    assert.equal(progressEventsAfterRestart.length, 1);
+    assert.equal(progressEventsAfterRestart[0]!.sequence, progressSequence);
+
+    const beforeTimeout = await lifecycle.sweep();
+    assert.equal(beforeTimeout.staleCallsMarked, 0);
+    assert.equal(reopened.getCallAttempt(callback.id).status, "in_progress");
+    assert.equal(reopened.getCallAttempt(callback.id).updatedAt, "2026-09-08T00:00:04.000Z");
+    assert.equal(
+      reopened.listAuditEvents(run.id).filter((event) => event.type === "call_attempt_progressed").length,
+      1,
+    );
+
+    clock.advance(1_001);
+    const afterTimeout = await lifecycle.sweep();
+    const stalled = reopened.getCallAttempt(callback.id);
+    assert.equal(afterTimeout.staleCallsMarked, 1);
+    assert.equal(stalled.status, "stalled");
+    assert.equal(stalled.stalledAt, "2026-09-08T00:00:09.001Z");
+    assert.equal(
+      reopened.listAuditEvents(run.id).filter((event) => event.type === "call_attempt_progressed").length,
+      1,
+    );
+    assert.equal(
+      reopened.listAuditEvents(run.id).filter((event) => event.type === "call_attempt_stalled").length,
+      1,
+    );
+    reopenedStore.close();
   });
 });
 
