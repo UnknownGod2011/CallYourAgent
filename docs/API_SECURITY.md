@@ -27,6 +27,19 @@ The exported helpers in `src/credential-roles.ts` provide standard least-privile
 
 These presets intentionally never include `*`. They are convenience defaults, not a second authorization system: `createControlPlaneHttpServer` remains the enforcement boundary and custom scoped credentials are still supported directly.
 
+### Copy-safe standard bundle
+
+To avoid hand-copying scope arrays in an exposed deployment, generate the recommended four-role bundle with:
+
+```bash
+npm ci
+npm run --silent credentials:generate
+```
+
+The command prints one JSON array suitable for `CYA_API_CREDENTIALS_JSON`. Each invocation generates four independent 32-byte random bearer tokens and applies the same standard role presets above. The generator is intentionally built on `standardCredentialBundle`, so deployment setup and tested role definitions cannot silently diverge.
+
+Treat the output as secret material. Store the complete JSON in the deployment secret store, do not commit it, do not place it in browser/client bundles, and regenerate it if terminal output or any individual token is exposed. The owner/operator tokens are intentionally incapable of reading owner decision answers, and only the reconciler token receives `calls:reconcile`.
+
 Credential ids and bearer tokens must both be unique. Authentication comparisons use constant-time equality. The server never returns configured tokens.
 
 ## Credential capabilities
