@@ -25,6 +25,16 @@ export function operatorConsoleHtml(): string {
     .status { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:10px; margin-top:14px; }
     .metric { padding:12px; background:#091829; border-radius:12px; min-height:78px; }
     .metric b { display:block; margin-top:6px; overflow-wrap:anywhere; }
+    .branch-story { margin-top:14px; padding:14px; border:1px solid #29486d; border-radius:14px; background:linear-gradient(135deg,rgba(46,111,231,.11),rgba(9,24,41,.86)); }
+    .branch-story-head { display:flex; justify-content:space-between; gap:10px; align-items:center; margin-bottom:10px; }
+    .branch-lanes { display:grid; grid-template-columns:minmax(0,1fr) auto minmax(0,1fr); gap:10px; align-items:stretch; }
+    .branch-lane { background:#091829; border-radius:12px; padding:12px; border:1px solid #1d3858; }
+    .branch-lane b { display:block; margin:5px 0; overflow-wrap:anywhere; }
+    .branch-lane small { display:block; color:#91a2b8; line-height:1.4; }
+    .branch-lane.running { border-color:#2f705b; }
+    .branch-lane.waiting { border-color:#7b6235; }
+    .branch-lane.resumed { border-color:#397c78; }
+    .branch-arrow { align-self:center; color:#8fb6ff; font-size:22px; font-weight:800; }
     .capability { display:flex; gap:8px; align-items:center; flex-wrap:wrap; margin:12px 0 0; padding:10px 12px; background:#091829; border-radius:12px; }
     .badge { display:inline-flex; align-items:center; border:1px solid #29486d; border-radius:999px; padding:4px 8px; font-size:11px; font-weight:700; }
     .badge.owner { color:#88e5b7; border-color:#3a7b66; }
@@ -41,7 +51,7 @@ export function operatorConsoleHtml(): string {
     .event-heading strong { display:block; }
     .error { color:#ff9a9a; min-height:22px; margin-top:10px; white-space:pre-wrap; }
     .ok { color:#88e5b7; } .warning { color:#ffd88f; } code { color:#b9d2ff; }
-    @media (max-width:800px) { .grid { grid-template-columns:1fr; } header { align-items:flex-start; flex-direction:column; } }
+    @media (max-width:800px) { .grid { grid-template-columns:1fr; } header { align-items:flex-start; flex-direction:column; } .branch-lanes { grid-template-columns:1fr; } .branch-arrow { transform:rotate(90deg); justify-self:center; } }
   </style>
 </head>
 <body>
@@ -68,6 +78,14 @@ export function operatorConsoleHtml(): string {
         <div class="metric"><span class="muted">Audit events</span><b id="eventCount"></b></div>
       </div>
       <p id="scopeNote" class="muted" hidden style="margin:12px 0 0"></p>
+      <div id="branchStory" class="branch-story" hidden>
+        <div class="branch-story-head"><div><div class="tag">Branch-safe execution</div><strong id="branchStoryTitle">Human judgment without freezing the run</strong></div><span id="branchStoryBadge" class="badge readonly">Waiting</span></div>
+        <div class="branch-lanes">
+          <div id="independentLane" class="branch-lane running"><span class="muted">Independent work</span><b id="independentStory">—</b><small id="independentDetail"></small></div>
+          <div class="branch-arrow" aria-hidden="true">→</div>
+          <div id="decisionLane" class="branch-lane waiting"><span class="muted">Owner-gated branch</span><b id="decisionStory">—</b><small id="decisionDetail"></small></div>
+        </div>
+      </div>
       <hr style="border:0;border-top:1px solid #24405f;margin:22px 0" />
       <h2>Request owner callback</h2>
       <p class="muted">Requires <code>owner:callback</code>. Capability discovery controls this button for clarity; the server independently enforces the scope.</p>
@@ -116,6 +134,33 @@ export function operatorConsoleHtml(): string {
       ? 'This credential may request owner callbacks. Agent-write and reconciliation permissions remain separate.'
       : 'Read-only credential: callback creation is disabled. Use a separately scoped owner credential to request a call.';
   };
+  const renderBranchStory = (run, blocked, events) => {
+    const currentScope = run.currentScope || 'No active scope reported';
+    const activeIndependent = Boolean(run.currentScope && !blocked.includes(run.currentScope));
+    const hasResolvedDecision = events.some((event) => event.type === 'owner_decision_recorded');
+    byId('branchStory').hidden = false;
+    byId('independentStory').textContent = currentScope;
+    byId('independentDetail').textContent = activeIndependent && blocked.length
+      ? 'Kept running while another branch waited for owner judgment.'
+      : 'Current work reported by the agent control plane.';
+    if (blocked.length) {
+      byId('branchStoryTitle').textContent = 'Human judgment without freezing unrelated work';
+      byId('branchStoryBadge').textContent = 'Independent work kept running';
+      byId('branchStoryBadge').className = 'badge owner';
+      byId('decisionLane').className = 'branch-lane waiting';
+      byId('decisionStory').textContent = blocked.join(', ');
+      byId('decisionDetail').textContent = 'Only this owner-gated scope is blocked; the active scope remains separate.';
+      return;
+    }
+    byId('decisionLane').className = 'branch-lane resumed';
+    byId('decisionStory').textContent = hasResolvedDecision && run.currentScope ? run.currentScope : 'No branch waiting';
+    byId('decisionDetail').textContent = hasResolvedDecision && run.currentScope
+      ? 'Owner decision is durably recorded; the run now reports this scope as active with no blocked scopes.'
+      : 'No unresolved owner-gated scope is currently blocking the run.';
+    byId('branchStoryTitle').textContent = hasResolvedDecision ? 'Owner-gated work is clear to continue' : 'No owner-gated branch is blocking';
+    byId('branchStoryBadge').textContent = hasResolvedDecision ? 'Blocked branch resumed' : 'No branch blocked';
+    byId('branchStoryBadge').className = 'badge owner';
+  };
   const escapeHtml = (value) => String(value ?? '').replace(/[&<>"']/g, (c) => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
   const eventStage = (type) => {
     if (type === 'escalation_created' || type === 'call_policy_deferred' || type === 'call_policy_released') return { id:'decision-request', label:'Needs owner' };
@@ -157,6 +202,7 @@ export function operatorConsoleHtml(): string {
       byId('scopeNote').textContent = activeIndependent && blocked.length
         ? 'Independent work is still active while ' + blocked.length + ' blocked scope' + (blocked.length === 1 ? ' waits.' : 's wait.')
         : blocked.length ? blocked.length + ' scope' + (blocked.length === 1 ? ' is' : 's are') + ' waiting for owner resolution.' : 'No scope is currently blocked on owner judgment.';
+      renderBranchStory(run, blocked, audit.events);
       byId('timeline').innerHTML = audit.events.slice().reverse().map(renderEvent).join('') || '<div class="muted">No audit events yet.</div>';
       byId('message').textContent = 'Connected'; byId('message').className = 'error ok';
     } catch (error) { resetCapabilities(); byId('message').className = 'error'; byId('message').textContent = error.message; }

@@ -38,13 +38,23 @@ test("operator console is a static privacy-safe shell with explicit causal timel
   assert.match(body, /\/v1\/runs\/.*\/overview/);
   assert.match(body, /queuedInstructionCount/);
 
+  assert.match(body, /Branch-safe execution/);
+  assert.match(body, /Independent work/);
+  assert.match(body, /Owner-gated branch/);
+  assert.match(body, /Independent work kept running/);
+  assert.match(body, /Blocked branch resumed/);
+  assert.match(body, /owner_decision_recorded/);
+  assert.match(body, /renderBranchStory\(run, blocked, audit\.events\)/);
+  assert.match(body, /events\.some\(\(event\) => event\.type === 'owner_decision_recorded'\)/);
+  assert.match(body, /Only this owner-gated scope is blocked; the active scope remains separate/);
+  assert.match(body, /Owner decision is durably recorded; the run now reports this scope as active with no blocked scopes/);
+
   assert.match(body, /Needs owner/);
   assert.match(body, /Phone call/);
   assert.match(body, /Decision/);
   assert.match(body, /Callback/);
   assert.match(body, /Steering queued/);
   assert.match(body, /Steering acknowledged/);
-  assert.match(body, /owner_decision_recorded/);
   assert.match(body, /owner_instruction_queued/);
   assert.match(body, /owner_instruction_consumed/);
   assert.match(body, /data-stage/);
