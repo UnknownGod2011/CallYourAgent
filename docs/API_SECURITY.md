@@ -8,7 +8,7 @@ CallYourAgent's HTTP boundary separates ordinary agent work from operations that
 
 Supported scopes are:
 
-- `agent:read` — read runs, escalation/decision state, and call-attempt state;
+- `agent:read` — read runs, escalation/decision state, and privacy-safe callback state;
 - `agent:write` — register agents, start/report runs, checkpoint, and request owner decisions;
 - `audit:read` — read the privacy-aware run audit timeline;
 - `owner:callback` — request an owner-initiated callback to an active run;
@@ -39,6 +39,22 @@ GET /v1/auth/capabilities
 The response contains only the stable credential id and its effective concrete scopes. It never returns bearer-token material. A legacy trusted `*` credential is projected as the five concrete capabilities rather than exposing the wildcard itself. This keeps owner/operator surfaces from needing to infer privileges from token labels or from probing side-effecting endpoints.
 
 The endpoint is authenticated, side-effect free, and returned with `Cache-Control: no-store`. It does not grant access to any run data on its own; normal route-level scope checks remain authoritative.
+
+## Owner callback response privacy
+
+`POST /v1/callbacks` and `GET /v1/callbacks/:id` return a deliberately narrow `OwnerCallbackView` containing only:
+
+- `id`;
+- `runId`;
+- operational `status`;
+- `createdAt`;
+- `updatedAt`.
+
+They do **not** return the internally persisted provider call id, provider name, idempotency key, replayable `request.task`, request metadata, last provider error, or automatic-recovery fields. A callback phone task can contain the agent's current status/scope and the owner's prompt, so exposing the persisted `CallAttempt` to a browser-facing owner/read credential would unnecessarily duplicate sensitive agent context and recovery material outside the control plane.
+
+The full `CallAttempt` remains durable server-side because ambiguous-create recovery, provider polling/webhook convergence, and duplicate-call prevention require the exact original request and correlation state. Trusted reconciliation operations continue to work against that internal representation. The privacy projection therefore changes only the ordinary owner/read response boundary; it does not weaken recovery or idempotency guarantees.
+
+The TypeScript client mirrors this contract: `requestOwnerCallback` and `getCallback` return `OwnerCallbackView`, while trusted reconciliation remains a separate privileged operation.
 
 ## Targeted rate limits
 
