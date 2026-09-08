@@ -6,13 +6,13 @@ CallYourAgent is a durable Node 24 TypeScript control plane for asynchronous two
 
 The repository includes SQLite persistence, deterministic fake and production CALL-E providers, replayable/idempotent call attempts, typed active-provider observations, polling/webhook convergence, scoped authenticated HTTP APIs, a typed TypeScript client, stdio MCP, branch-scoped blocking, call policy/quiet hours/budgets, privacy-aware audit history, bounded lifecycle recovery, fail-closed ambiguous/stalled handling, API abuse controls, graceful shutdown, bounded CALL-E HTTP requests, readiness/liveness surfaces, deterministic end-to-end and operator demos, a production Docker image, and a single-instance persistent-volume Compose deployment.
 
-This run carried the escalation privacy split through the MCP integration layer and added a scoped end-to-end acceptance. MCP now exposes a distinct `get_escalation_lifecycle_status` observational tool over the existing privacy-safe HTTP/TypeScript contract, while `get_escalation_status` remains the sensitive decision-consumption tool for agent credentials carrying `decision:read`.
+This run hardened deployment credential ergonomics so an exposed deployment can generate the recommended agent, owner, read-only operator, and reconciler credentials from the same canonical least-privilege role definitions used by the application, rather than hand-copying scope arrays and risking accidental `decision:read` or `calls:reconcile` exposure to browser-facing clients.
 
 ## Exact repo state inspected this run
 
-The run started from `main` HEAD `2d4442eba6fa04087d6749ce002e937e5b520630`.
+The run started from `main` HEAD `acf2ff2257453f91daf7e89341ebda7cf00b9157`.
 
-Before making changes, inspected the complete recursive repository tree and current architecture, including root configuration, GitHub Actions workflows, deployment assets, all documentation, source modules, and tests. Inspected recent commit history through the escalation-lifecycle privacy work. Checked repository issues and pull requests; there were no open issues or pull requests.
+Before making changes, inspected the complete recursive repository tree and current architecture, including root configuration, GitHub Actions workflows, deployment assets, every documentation file, all source modules, and all tests. Inspected recent commit history through the scoped MCP escalation-boundary work. Checked repository issues and pull requests; there were no current issues or pull requests.
 
 Read in full before implementation:
 
@@ -27,95 +27,106 @@ Read in full before implementation:
 - `docs/OPERATOR_CONSOLE.md`
 - `deploy/README.md`
 
-Also inspected the relevant implementation and verification surfaces, including `src/mcp-server.ts`, `src/client.ts`, `src/http-server.ts`, `src/call-provider.ts`, `src/escalation-view.ts`, `tests/mcp-server.test.ts`, `tests/owner-decision-authorization-http.test.ts`, `package.json`, and the existing HTTP privacy tests.
+Also inspected the relevant implementation/configuration and verification surfaces, including `.env.example`, `src/server.ts`, `src/credential-roles.ts`, `package.json`, and `tests/credential-roles.test.ts`.
 
-The previous run's highest-value next action was a scoped TypeScript/MCP acceptance proving that the standard agent credential can request a decision and later consume its durable answer, while owner/operator-style credentials can inspect the new lifecycle status but cannot retrieve the answer. Inspection confirmed that the HTTP and TypeScript SDK split already existed, but MCP exposed only the richer sensitive `get_escalation_status` tool.
+The previous run's highest-value next action was to strengthen scoped `CYA_API_CREDENTIALS_JSON` deployment examples so the agent, owner, read-only operator, and reconciler credentials can be configured without accidentally granting sensitive decision-read or provider-reconciliation authority to browser-facing surfaces. Inspection confirmed the canonical role presets were already correct and tested, but deployment setup still relied on users manually composing JSON scope arrays; `.env.example` also omitted `decision:read` from its supported-scope comment.
 
 ## Changes made this run
 
-### Privacy-safe MCP lifecycle tool
+### Canonical standard credential bundle
 
-Added a distinct MCP tool:
+Extended `src/credential-roles.ts` with `standardCredentialBundle(tokenFactory)`.
+
+The helper builds exactly four stable credential roles using the existing canonical `credentialForRole` / `scopesForCredentialRole` definitions:
+
+- `agent` -> `agent:read`, `agent:write`, `decision:read`, `audit:read`;
+- `owner` -> `agent:read`, `audit:read`, `owner:callback`;
+- `operator-read` -> `agent:read`, `audit:read`;
+- `reconciler` -> `calls:reconcile`.
+
+It rejects empty generated tokens and duplicate generated tokens. It deliberately does not introduce a second scope map for deployment, so changes to the tested role definitions cannot silently diverge from generated deployment credentials.
+
+### Copy-safe credential generator CLI
+
+Added `src/generate-credentials.ts` and the package script:
 
 ```text
-get_escalation_lifecycle_status
+npm run --silent credentials:generate
 ```
 
-It delegates to `CallYourAgentClient.getEscalationLifecycleStatus`, which uses the existing `GET /v1/escalations/:id/status` HTTP contract. The tool therefore shares the same `EscalationLifecycleView` projection and `agent:read` authorization boundary rather than introducing MCP-specific business state.
+The generator uses Node's `crypto.randomBytes` and emits a single JSON array suitable for the existing `CYA_API_CREDENTIALS_JSON` environment variable. Each standard invocation creates four independent 32-byte random bearer tokens. The exported generator rejects token sizes below 16 bytes.
 
-The tool returns operational escalation lifecycle metadata suitable for owner/operator observation and does not return the escalation question/context, owner answer/structured result, provider ids, replayable call tasks, idempotency material, or recovery state.
+The generator only prints the credential bundle; it does not persist secrets, alter runtime state, contact CALL-E, or create phone side effects.
 
-The existing MCP `get_escalation_status` tool remains available for the agent that must consume the owner's decision. Its description now explicitly states that it requires both `agent:read` and `decision:read` and may return the structured owner decision.
+### Regression coverage
 
-### Scoped MCP/HTTP acceptance
+Extended `tests/credential-roles.test.ts` to prove the generated standard bundle preserves all four exact least-privilege role boundaries and rejects empty/duplicate token factories.
 
-Added `tests/mcp-scope-boundary.test.ts` using two real MCP clients over the stdio-compatible MCP server abstraction, both ultimately calling the same authenticated HTTP control plane.
+Added `tests/generate-credentials.test.ts` to prove the real generator emits:
 
-The acceptance configures:
+- the exact four stable role ids;
+- four unique high-entropy token strings;
+- no wildcard scopes;
+- `decision:read` only where the standard agent needs it;
+- no `decision:read` or `calls:reconcile` on the owner credential;
+- only `calls:reconcile` on the reconciler credential;
+- rejection of an explicitly weak token-size request.
 
-- an agent credential with `agent:read`, `agent:write`, `decision:read`, and `audit:read`;
-- an owner credential with `agent:read`, `audit:read`, and `owner:callback`, deliberately without `decision:read`.
+### Deployment/configuration guidance
 
-It proves the complete boundary:
+Updated `.env.example` so its supported-scope comment now includes `decision:read` and points users to the standard generator instead of encouraging hand-authored JSON.
 
-1. the agent MCP client registers an agent, starts a run, and raises a blocking owner decision;
-2. the owner MCP client can call `get_escalation_lifecycle_status` while the escalation is calling;
-3. that safe lifecycle result contains neither the private question nor private context;
-4. the same owner MCP credential receives a structured HTTP-derived `403` tool error from sensitive `get_escalation_status`, specifically requiring `decision:read`;
-5. the deterministic fake provider completes the already-persisted decision call and normal control-plane reconciliation records the durable owner decision;
-6. the owner MCP client can observe `resolved` plus `completed` call lifecycle without receiving the answer or structured decision;
-7. the owner credential remains unable to call the sensitive result tool after resolution;
-8. the standard agent MCP credential can call `get_escalation_status` and receive the durable answer and structured result it needs to resume safely.
+Updated `docs/DEPLOYMENT.md`, `docs/API_SECURITY.md`, and `deploy/README.md` with a copy-safe setup path such as:
 
-The test does not create a demo-only mutation path. Provider completion is fixture setup inside the trusted test process, and decision reconciliation still goes through the normal control-plane state machine.
+```bash
+npm ci
+export CYA_API_CREDENTIALS_JSON="$(npm run --silent credentials:generate)"
+```
 
-### Integration documentation
-
-Updated `docs/INTEGRATIONS.md` to list and distinguish both MCP escalation-read tools.
-
-The documentation now makes explicit that:
-
-- `get_escalation_lifecycle_status` is the `agent:read` observational surface;
-- `get_escalation_status` is the `agent:read` + `decision:read` decision-consumption surface;
-- owner/operator integrations should not receive `decision:read` merely to observe lifecycle state;
-- MCP tool discovery is not an authorization boundary, so the shared HTTP control plane remains authoritative even when a credential sees a tool it lacks permission to execute;
-- Claude/Claude Code integrations should use the sensitive tool only when the agent actually needs to consume the durable answer at a safe work boundary.
+The docs explicitly require generated output to be treated as secret material, kept out of browser/client bundles and source control, and regenerated if exposed. They preserve the backwards-compatible full-access `CYA_API_TOKEN` for tightly trusted/local bring-up while recommending scoped credentials for exposed deployments.
 
 ## Verification performed
 
-Repository-side network access is unavailable in the execution container, so no local clone/build was claimed. Executable verification was performed through the repository's existing GitHub Actions workflows.
+The automation environment did not provide a local repository checkout suitable for running Node tooling directly, so no local build/test claim was fabricated. Executable verification was performed through the repository's existing GitHub Actions workflows.
 
-The code/test-bearing state at commit `555c88415d5e65c65052cfe9ee0accc5a5aeb19f` passed all available verification paths:
+The code/test-bearing state at commit `d0db4449250c01305f5a617baec46ceb19c78dae` passed every available verification path:
 
-- CI run `34218291161` — success. Node 24 setup, locked dependency install, TypeScript typecheck, build, and complete Node test suite passed, including the new scoped MCP decision privacy acceptance.
-- Container run `34218291164` — success. Production image build and deterministic fake-provider runtime smoke passed.
-- Compose deployment run `34218291237` — success. Compose validation, fake-provider boot/health, durable API-state creation, named-volume restart, post-restart persistence verification, and cleanup passed.
+- CI run `34224142694` — success. The repository's Node 24 locked-install/typecheck/build/test workflow completed successfully, including the new credential-bundle and generator tests.
+- Container run `34224142764` — success. Production image build and deterministic fake-provider runtime smoke completed successfully.
+- Compose deployment run `34224142673` — success. Compose validation, fake-provider boot/health, durable authenticated API state, named-volume restart, post-restart persistence verification, and cleanup completed successfully.
 
-Implementation/documentation commits in this run:
+Implementation/documentation commits in this run before this progress update:
 
-- `b2bbe19e025986dc9d622ffb94cdd2f1db0bb1ec` — `feat: expose privacy-safe escalation lifecycle through MCP`
-- `555c88415d5e65c65052cfe9ee0accc5a5aeb19f` — `test: prove scoped MCP decision privacy boundary`
-- `3379452db2a62f5c0b4fd9e7ceb800ee07a5d86a` — `docs: document scoped MCP escalation reads`
+- `cf5c56c4875809f0c78b006f8f48ce959be95ded` — `feat: generate standard scoped credential bundle`
+- `99b65cc96b86ec39178b8a7fbaeb0d146346d2dc` — `feat: add scoped credential generator CLI`
+- `01ea9b31fdff31eb86222e6ff945e0462dc1c19b` — `test: cover standard credential bundle`
+- `dd1510587c6c73f57713cce537b67a19904274d1` — `chore: expose scoped credential generator`
+- `21b11656fa72d763df137b8338c40f487f9e8c13` — `docs: make scoped credential setup copy-safe`
+- `d0db4449250c01305f5a617baec46ceb19c78dae` — `test: validate generated deployment credentials`
+- `659ea91b602a2d9e654ff8f5b96485d5c1973074` — `docs: add copy-safe scoped credential deployment`
+- `b359148d5d7f8fdf73f77b0f1ba4ee9424b06ae8` — `docs: use generated scoped credentials in compose deployment`
+- `dd5ff9703e5079ebdec58166818e4771af1f72e3` — `docs: document standard credential generator`
 
-`package.json` has no separate lint script and no standalone migration/schema-check command. The available executable verification remains CI typecheck/build/test plus Container and Compose deployment workflows.
+`package.json` still has no separate lint script and no standalone migration/schema-check command. The available executable verification remains CI typecheck/build/test plus Container and Compose deployment workflows.
 
 No live CALL-E phone call was attempted or claimed.
 
 ## Architecture decisions made this run
 
-1. MCP should expose both lifecycle observation and decision consumption because they have materially different privacy/authorization requirements.
-2. `get_escalation_lifecycle_status` must reuse the existing HTTP/SDK privacy projection rather than introduce an MCP-specific reduced object that could drift over time.
-3. `get_escalation_status` remains the agent's durable decision-consumption path; it is not appropriate for owner/operator observation because it may contain the human answer and structured result.
-4. MCP tool discovery is not itself an authorization mechanism. Keeping authorization authoritative at the HTTP control-plane boundary preserves one permission model for MCP, TypeScript SDK, and custom clients. A credential may discover a tool it cannot execute and should receive a clear scoped error rather than a weaker duplicate authorization implementation in MCP.
-5. Owner/operator credentials may observe lifecycle with `agent:read` but do not receive `decision:read` simply for UI or monitoring convenience.
-6. Branch-scoped blocking, decision persistence, callback steering, CALL-E reconciliation, and safe-checkpoint semantics were not changed.
-7. Human steering still becomes durable queued state and is consumed only at explicit safe checkpoints; no mid-generation interruption capability is claimed.
+1. Standard deployment credentials should be generated from the same canonical role presets used by application code/tests, not from a duplicated deployment-only scope map.
+2. Least privilege should be an executable setup path, not only prose. A copy-safe generator reduces the chance that a real deployment widens owner/operator authority for convenience.
+3. `decision:read` remains agent-consumption authority. The standard owner and operator credentials intentionally do not receive it merely to render lifecycle state.
+4. `calls:reconcile` remains isolated to the reconciler role. Browser-facing credentials do not receive provider reconciliation authority.
+5. The credential generator is only a secret-generation/configuration helper. HTTP authorization remains authoritative in `createControlPlaneHttpServer`; no new permission system was introduced.
+6. The backwards-compatible wildcard/full-access token remains available for tightly trusted local use, but is not the recommended exposed deployment boundary.
+7. No branch-scoped blocking, owner-decision persistence, callback steering, CALL-E reconciliation, idempotency, or safe-checkpoint semantics changed in this run.
+8. Human steering still becomes durable queued state and is consumed only at explicit safe checkpoints; no mid-generation interruption capability is claimed.
 
 ## CALL-E integration status
 
-- Fake provider: deterministic and tested for decisions, callbacks, branch-scoped blocking, durable steering, idempotency, ambiguous recovery, active-state progress, stale downgrade rejection, bounded stale detection, restart durability, auditability, HTTP/TypeScript/MCP integration, operator demos, credential boundaries, privacy-safe escalation lifecycle reads, and the new scoped MCP decision-consumption boundary.
+- Fake provider: deterministic and tested for decisions, callbacks, branch-scoped blocking, durable steering, idempotency, ambiguous recovery, active-state progress, stale downgrade rejection, bounded stale detection, restart durability, auditability, HTTP/TypeScript/MCP integration, operator demos, credential/privacy boundaries, and the generated least-privilege deployment-role definitions added this run.
 - Production CALL-E adapter: implemented with server-only `CALLE_API_KEY`, idempotent create, structured result schemas, active-state observation, terminal polling/webhook convergence, bounded requests, exact-key ambiguous recovery, duplicate prevention, and fail-closed stalled handling.
-- HTTP + TypeScript SDK + MCP continue to share the same control-plane services and durable state machine. MCP now mirrors the HTTP privacy split instead of forcing all escalation reads through the sensitive result endpoint.
+- HTTP + TypeScript SDK + MCP continue to share the same control-plane services and durable state machine. Credential generation changes deployment setup only; they do not bypass HTTP authorization.
 - Live CALL-E success remains unverified; no real authorized phone call was made.
 
 ## Current blockers / external prerequisites
@@ -128,8 +139,7 @@ Real Claude Code host acceptance still requires running the documented stdio MCP
 
 ## Highest-value next actions
 
-1. Audit and strengthen deployment/config examples for scoped `CYA_API_CREDENTIALS_JSON` so agent, owner, read-only operator, and reconciler tokens can be copied without accidentally granting `decision:read` or `calls:reconcile` to browser-facing surfaces.
-2. Add a focused typed-SDK credential acceptance only if it adds a distinct regression guarantee beyond the new MCP test; avoid redundant tests that merely repeat the same HTTP authorization path.
-3. Consider capability-aware MCP UX only as a presentation improvement. Do not move authorization out of the HTTP control plane or create platform-specific permission semantics.
-4. When an actual Claude Code host is available, run the documented stdio MCP host acceptance path with the deterministic fake provider and verify tool discovery plus checkpoint behavior from the real host.
-5. When user-only CALL-E prerequisites are available, perform one bounded live provider acceptance test and record only observed results.
+1. Add an end-to-end runtime acceptance that feeds a generated four-role bundle through `CYA_API_CREDENTIALS_JSON`, boots the fake-provider runtime, verifies `/v1/auth/capabilities` for each generated credential, and proves owner/operator/reconciler cross-role denials through the real HTTP boundary. This would connect generator -> env parser -> runtime authorization without duplicating existing unit coverage.
+2. Keep capability-aware MCP/operator UX as presentation only; do not move authorization out of the HTTP control plane.
+3. When an actual Claude Code host is available, run the documented stdio MCP host acceptance path with the deterministic fake provider and verify tool discovery plus checkpoint behavior from the real host.
+4. When user-only CALL-E prerequisites are available, perform one bounded live provider acceptance test and record only observed results.
