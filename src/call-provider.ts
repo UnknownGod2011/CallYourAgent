@@ -13,6 +13,11 @@ export interface StartCallResult {
   status: "queued" | "in_progress" | "completed";
 }
 
+export interface RehydrateCallInput extends StartCallInput {
+  providerCallId: string;
+  status: "queued" | "in_progress";
+}
+
 export type ActiveCallObservation =
   | { providerCallId: string; status: "queued" }
   | { providerCallId: string; status: "in_progress" };
@@ -27,6 +32,12 @@ export interface CallProvider {
   readonly name: string;
   start(input: StartCallInput): Promise<StartCallResult>;
   observe(providerCallId: string): Promise<CallProviderObservation>;
+  /**
+   * Optional provider-local restoration hook for adapters whose active-call state is
+   * intentionally process-local. The control plane supplies only state it already
+   * persisted before the restart. Real remote providers normally do not need this.
+   */
+  rehydrate?(input: RehydrateCallInput): Promise<void> | void;
   /**
    * Compatibility helper for integrations that only care about terminal evidence.
    * New reconciliation code should prefer `observe` so active provider progress is
@@ -98,6 +109,39 @@ export class FakeCallProvider implements CallProvider {
       observations: 0,
     });
     return { ...result };
+  }
+
+  rehydrate(input: RehydrateCallInput): void {
+    const expectedProviderCallId = fakeProviderCallId(input.idempotencyKey);
+    if (input.providerCallId !== expectedProviderCallId) {
+      throw new Error(`Fake call id does not match persisted idempotency key: ${input.providerCallId}`);
+    }
+
+    const existingByKey = this.byIdempotencyKey.get(input.idempotencyKey);
+    if (existingByKey && existingByKey.providerCallId !== input.providerCallId) {
+      throw new Error(`Fake idempotency key already maps to another call: ${input.idempotencyKey}`);
+    }
+
+    const existingCall = this.calls.get(input.providerCallId);
+    if (existingCall) {
+      if (existingCall.purpose !== input.purpose) {
+        throw new Error(`Fake call purpose mismatch for ${input.providerCallId}`);
+      }
+      return;
+    }
+
+    const result: StartCallResult = {
+      providerCallId: input.providerCallId,
+      status: input.status,
+    };
+    this.byIdempotencyKey.set(input.idempotencyKey, result);
+    this.calls.set(input.providerCallId, {
+      id: input.providerCallId,
+      purpose: input.purpose,
+      status: input.status,
+      outcome: null,
+      observations: 0,
+    });
   }
 
   async observe(providerCallId: string): Promise<CallProviderObservation> {
