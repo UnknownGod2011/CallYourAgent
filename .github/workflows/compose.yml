@@ -32,11 +32,19 @@ jobs:
       - name: Generate scoped deployment credentials
         run: |
           credential_json="$(npm run --silent credentials:generate)"
+          agent_token="$(jq -er '.[] | select(.id == "agent") | .token' <<<"$credential_json")"
+          owner_token="$(jq -er '.[] | select(.id == "owner") | .token' <<<"$credential_json")"
+          operator_token="$(jq -er '.[] | select(.id == "operator-read") | .token' <<<"$credential_json")"
+          reconciler_token="$(jq -er '.[] | select(.id == "reconciler") | .token' <<<"$credential_json")"
+          echo "::add-mask::$agent_token"
+          echo "::add-mask::$owner_token"
+          echo "::add-mask::$operator_token"
+          echo "::add-mask::$reconciler_token"
           printf 'CYA_API_CREDENTIALS_JSON=%s\n' "$credential_json" >> "$GITHUB_ENV"
-          printf 'CYA_AGENT_TOKEN=%s\n' "$(jq -er '.[] | select(.id == "agent") | .token' <<<"$credential_json")" >> "$GITHUB_ENV"
-          printf 'CYA_OWNER_TOKEN=%s\n' "$(jq -er '.[] | select(.id == "owner") | .token' <<<"$credential_json")" >> "$GITHUB_ENV"
-          printf 'CYA_OPERATOR_TOKEN=%s\n' "$(jq -er '.[] | select(.id == "operator-read") | .token' <<<"$credential_json")" >> "$GITHUB_ENV"
-          printf 'CYA_RECONCILER_TOKEN=%s\n' "$(jq -er '.[] | select(.id == "reconciler") | .token' <<<"$credential_json")" >> "$GITHUB_ENV"
+          printf 'CYA_AGENT_TOKEN=%s\n' "$agent_token" >> "$GITHUB_ENV"
+          printf 'CYA_OWNER_TOKEN=%s\n' "$owner_token" >> "$GITHUB_ENV"
+          printf 'CYA_OPERATOR_TOKEN=%s\n' "$operator_token" >> "$GITHUB_ENV"
+          printf 'CYA_RECONCILER_TOKEN=%s\n' "$reconciler_token" >> "$GITHUB_ENV"
 
       - name: Validate Compose configuration
         run: |
