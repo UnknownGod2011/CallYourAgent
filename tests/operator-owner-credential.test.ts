@@ -58,12 +58,18 @@ test("operator demo proves a fresh owner callback can queue and later consume st
       }),
     });
     assert.equal(ownerCallback.status, 201, "owner token should have owner:callback");
-    const callback = await ownerCallback.json() as { id: string; request: { task: string }; status: string };
-    assert.match(callback.request.task, /Current scope: production-deploy/);
-    assert.match(callback.request.task, /Give me a concise progress briefing/);
+    const callback = await ownerCallback.json() as { id: string; runId: string; status: string; createdAt: string; updatedAt: string };
+    assert.equal(callback.runId, demo.fixture.runId);
+    assert.deepEqual(Object.keys(callback).sort(), ["createdAt", "id", "runId", "status", "updatedAt"]);
+    const serializedCallback = JSON.stringify(callback);
+    assert.doesNotMatch(serializedCallback, /production-deploy/);
+    assert.doesNotMatch(serializedCallback, /concise progress briefing/);
+    assert.doesNotMatch(serializedCallback, /request/);
+    assert.doesNotMatch(serializedCallback, /providerCallId/);
 
     const callbackRead = await fetch(`${demo.baseUrl}/v1/callbacks/${encodeURIComponent(callback.id)}`, { headers: ownerHeaders });
     assert.equal(callbackRead.status, 200);
+    assert.deepEqual(await callbackRead.json(), callback);
 
     const checkpoint = await fetch(
       `${demo.baseUrl}/v1/runs/${encodeURIComponent(demo.fixture.runId)}/checkpoint`,
