@@ -11,6 +11,7 @@
     "check": "npm run typecheck && npm test",
     "demo": "npm run build && node dist/src/demo.js",
     "demo:operator": "npm run build && node dist/src/operator-demo.js",
+    "credentials:generate": "npm run build --silent && node dist/src/generate-credentials.js",
     "start": "node dist/src/server.js",
     "start:mcp": "node dist/src/mcp-server.js"
   },
