@@ -70,12 +70,15 @@ The current MCP tools are:
 - `checkpoint`
 - `acknowledge_owner_instructions`
 - `request_owner_callback`
+- `get_callback_status`
 - `reconcile_escalation`
 - `reconcile_callback`
 
 `get_escalation_lifecycle_status` mirrors the privacy-safe `GET /v1/escalations/:id/status` HTTP contract. It requires only `agent:read` and returns operational lifecycle metadata without the escalation question/context, provider correlation, or owner decision answer. Owner/operator integrations should use this tool when they only need to observe whether an escalation is pending, calling, resolved, expired, or failed.
 
 `get_escalation_status` is deliberately different: it is the decision-consumption surface for the agent that raised the escalation and requires both `agent:read` and `decision:read`. It may return the owner's durable answer and structured result. Do not grant an owner/operator credential `decision:read` merely so it can inspect lifecycle state.
+
+`get_callback_status` mirrors the privacy-safe `GET /v1/callbacks/:id` HTTP contract. It requires only `agent:read` and returns the durable callback/call-attempt lifecycle view without callback prompt text, phone task contents, provider metadata, transcripts, or queued steering text. This lets Claude Code, Codex, an owner console, or another MCP host observe whether a callback is still queued/in progress or has reached a terminal state without receiving sensitive call content.
 
 `get_audit_timeline` is read-only. It exposes operational events and safe metadata, not full call transcripts, escalation context, owner decision answers, or owner instruction text.
 
@@ -114,14 +117,14 @@ The intended workflow is checkpoint-based rather than fake mid-generation interr
 5. use `get_escalation_status` when the agent needs to consume a durable owner answer; use `get_escalation_lifecycle_status` for privacy-safe observation where the answer is not needed;
 6. call `checkpoint` between work units without consuming instructions;
 7. incorporate the returned queued instructions at that safe boundary, then call `acknowledge_owner_instructions` with exactly those ids;
-8. when the owner independently requests a callback, CALL-E captures steering as queued instructions, which the same checkpoint/acknowledgement loop consumes safely;
+8. when the owner independently requests a callback, `get_callback_status` can observe that phone interaction's lifecycle while CALL-E captures steering as queued instructions; the same checkpoint/acknowledgement loop consumes that steering safely;
 9. optionally inspect `get_audit_timeline` to explain prior deferrals/call transitions without changing agent state.
 
 This proves the product semantics without requiring Claude Code to support undocumented mid-token interruption.
 
 ## Codex
 
-Use the same checkpoint/acknowledgement model and the same MCP or typed HTTP client boundary. Codex integration should let a running workflow publish status, raise an escalation, incorporate queued instructions between work units, acknowledge the exact ids incorporated, and optionally read the audit timeline. Do not implement a Codex-only state machine.
+Use the same checkpoint/acknowledgement model and the same MCP or typed HTTP client boundary. Codex integration should let a running workflow publish status, raise an escalation, incorporate queued instructions between work units, acknowledge the exact ids incorporated, and optionally read callback lifecycle/audit state. Do not implement a Codex-only state machine.
 
 ## ChatGPT / ChatGPT Work / scheduled workflows
 
