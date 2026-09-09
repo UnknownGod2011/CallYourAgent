@@ -25,6 +25,18 @@ async function connectMcp(baseUrl: string, apiToken: string, name: string) {
   return { server, client };
 }
 
+function assertRedactedForbidden(result: { content?: unknown; isError?: boolean }): void {
+  assert.equal(result.isError, true);
+  const detail = parseTextResult(result);
+  assert.deepEqual(detail, {
+    message: "CallYourAgent request failed with HTTP 403",
+    status: 403,
+  });
+  const serialized = JSON.stringify(result);
+  assert.equal(serialized.includes("requiredScope"), false);
+  assert.equal(serialized.includes("decision:read"), false);
+}
+
 test("scoped MCP clients separate lifecycle observation from owner decision consumption", async () => {
   const store = new InMemoryControlPlaneStore();
   const provider = new FakeCallProvider();
@@ -93,10 +105,7 @@ test("scoped MCP clients separate lifecycle observation from owner decision cons
       name: "get_escalation_status",
       arguments: { escalationId: escalation.id },
     });
-    assert.equal(ownerSensitiveBefore.isError, true);
-    const ownerError = parseTextResult(ownerSensitiveBefore);
-    assert.equal(ownerError.status, 403);
-    assert.deepEqual(ownerError.body, { error: "forbidden", requiredScope: "decision:read" });
+    assertRedactedForbidden(ownerSensitiveBefore);
 
     const persistedEscalation = controlPlane.getEscalation(escalation.id as string);
     assert.ok(persistedEscalation.callAttemptId);
@@ -126,10 +135,7 @@ test("scoped MCP clients separate lifecycle observation from owner decision cons
       name: "get_escalation_status",
       arguments: { escalationId: escalation.id },
     });
-    assert.equal(ownerSensitiveAfter.isError, true);
-    const ownerResolvedError = parseTextResult(ownerSensitiveAfter);
-    assert.equal(ownerResolvedError.status, 403);
-    assert.deepEqual(ownerResolvedError.body, { error: "forbidden", requiredScope: "decision:read" });
+    assertRedactedForbidden(ownerSensitiveAfter);
 
     const agentSensitive = await agentMcp.client.callTool({
       name: "get_escalation_status",
