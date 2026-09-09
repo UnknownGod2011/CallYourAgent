@@ -6,13 +6,13 @@ CallYourAgent is a durable Node 24 TypeScript control plane for asynchronous two
 
 The repository currently includes deterministic fake and production CALL-E providers, SQLite persistence, replayable/idempotent call attempts, polling/webhook convergence, branch-scoped blocking, owner decision persistence, durable per-run instruction queues, exact instruction acknowledgement, call policy/quiet hours/budgets, bounded lifecycle recovery, fail-closed ambiguous/stalled handling, privacy-aware audit history, scoped HTTP authentication, a typed TypeScript client, a real stdio MCP adapter, deterministic end-to-end/demo flows, an operator console, a Claude Code real-host acceptance runbook, and a single-instance persistent-volume Compose reference deployment.
 
-This run closed a practical MCP observability gap: an MCP host could already request an owner callback, but it had no thin MCP-native read surface for that callback's lifecycle. The stdio MCP adapter now exposes `get_callback_status`, delegating to the existing typed client and privacy-safe authenticated HTTP callback view. A regression proves the MCP -> typed client -> HTTP control-plane path returns active callback lifecycle state while withholding callback prompt/task/provider metadata.
+This run added a new external-process regression proving that the same long-lived stdio MCP session can observe an owner callback before and after a complete HTTP control-plane + SQLite-store + fake-provider reconstruction while the callback is still non-terminal, then consume the resulting steering only at a safe checkpoint after terminal reconciliation. The test also proves exactly-once callback call-attempt causality and privacy-safe audit behavior across that restart.
 
 ## Exact repo state inspected this run
 
-The run started from `main` HEAD `d97befeebb5157c940af7ebbb200b21298331a5b`.
+The run started from `main` HEAD `8d623ac595779d5e2e3fff2b81e20a3a5291c1e3`.
 
-Before making any change, inspected the complete recursive repository tree and current architecture, recent commits, repository issues, and pull requests. There were no open issues or pull requests.
+Before making any change, inspected the complete recursive repository tree and current architecture, recent commits, repository issues, and pull requests. The recursive tree response was complete (`truncated: false`). There were no open issues and no pull requests.
 
 Read in full before implementation:
 
@@ -28,78 +28,79 @@ Read in full before implementation:
 - `docs/OPERATOR_CONSOLE.md`
 - `deploy/README.md`
 
-Also inspected relevant implementation, test, and deployment surfaces, especially:
+Also inspected the relevant current implementation/test/deployment surfaces, especially:
 
-- `src/client.ts`, including the existing typed `getCallback` HTTP client contract;
-- `src/mcp-server.ts`, including current MCP tool/authorization boundaries and model-facing error redaction;
-- `src/http-server.ts`, including the `GET /v1/callbacks/:id` privacy-safe `agent:read` route;
-- `tests/mcp-server.test.ts`;
-- `tests/mcp-stdio-deployment-acceptance.ts`;
-- `tests/callback-call-audit-restart.test.ts`;
-- `.github/workflows/compose.yml`, including its active decision and active callback restart paths;
-- the full current test-file inventory and recent callback audit/restart commits.
+- `tests/mcp-stdio-deployment-acceptance.ts` — real built stdio MCP + deployed control-plane acceptance;
+- `.github/workflows/compose.yml` — scoped Docker/SQLite decision and callback restart acceptance;
+- `tests/mcp-stdio-call-audit-restart.test.ts` — long-lived MCP decision-call restart precedent;
+- `tests/callback-call-audit-restart.test.ts` — callback call-attempt restart/audit precedent;
+- `package.json` — available verification scripts and Node 24 requirement.
 
-The local automation container still could not clone the public repository because outbound DNS/network access to github.com was unavailable. Repository reads/writes therefore used the connected GitHub integration and executable verification used the repository's GitHub Actions workflows. No unsupported local execution claim is made.
+The automation container still cannot clone the public repository because DNS resolution for `github.com` fails, so repository mutation used the connected GitHub integration and executable verification used GitHub Actions. No unsupported local execution claim is made.
 
 ## Changes made this run
 
-### Added privacy-safe callback lifecycle observation to MCP
+### Added long-lived stdio MCP callback restart acceptance
 
-Implemented in commit `61bea843f7efb1154d401aa6e179ed5f49d91fd1` (`feat: expose callback lifecycle status over MCP`).
+Initial implementation commit: `77a912f4843f3f8f41ed7908dc7ea9fe38887b3f` (`test: prove callback recovery through long-lived MCP session`).
 
-`src/mcp-server.ts` now registers `get_callback_status` with a single durable `callbackId` input. The tool delegates to `CallYourAgentClient.getCallback`, so it reuses the existing authenticated `GET /v1/callbacks/:id` contract rather than introducing an MCP-specific state machine or provider lookup.
+Added `tests/mcp-stdio-callback-audit-restart.test.ts`. The regression:
 
-The tool is deliberately observational. With an `agent:read` credential it exposes the existing `OwnerCallbackView` lifecycle data but does not expose callback prompt text, raw phone task contents, CALL-E/provider metadata, transcripts, or queued owner instruction text.
+1. starts SQLite + deterministic fake provider + the real HTTP control plane;
+2. launches the compiled `dist/src/mcp-server.js` as a separate child using the official MCP stdio client;
+3. registers an agent and starts a run through MCP with `documentation` active;
+4. creates an owner-requested callback through the shared control-plane service, deliberately outside the agent/MCP authority path;
+5. observes that same callback through MCP `get_callback_status` while it is still `queued`/`in_progress`;
+6. verifies the running agent remains unblocked and has no steering before the callback is terminal;
+7. closes the HTTP server/store and reconstructs SQLite, a new `FakeCallProvider`, `ControlPlane`, and HTTP server on the same address while keeping the same MCP child/client session alive;
+8. observes the same durable callback through that unchanged MCP session after restart while it is still active;
+9. reconciles the original callback after restart and retries reconciliation to prove idempotency;
+10. observes the callback as `completed` through MCP;
+11. pulls exactly one durable steering instruction at a safe checkpoint, acknowledges exactly that instruction id, retries acknowledgement idempotently, and proves the queue is then empty;
+12. reads the audit timeline through MCP and proves one ordered callback chain: `call_attempt_created -> call_attempt_started -> owner_callback_requested -> call_attempt_completed -> owner_instruction_queued`, followed by exactly one `owner_instruction_consumed` for the resulting instruction;
+13. proves provider rehydration does not fabricate another start, terminal retries do not duplicate completion/steering, successful recovery creates no ambiguous/failed transition, and audit metadata does not contain the callback prompt or steering text.
 
-### Added MCP -> HTTP callback lifecycle regression
+### Corrected the audit-correlation assertion exposed by CI
 
-Implemented in commit `ce6732f3e06b483b466bf6a17457e6a4c3427883` (`test: cover callback status MCP tool`).
+CI for the first implementation correctly failed 1 of 101 tests. The production behavior was not failing: the test incorrectly expected `owner_instruction_consumed` to carry the originating `callAttemptId`.
 
-Extended `tests/mcp-server.test.ts` so the official MCP client connected to the CallYourAgent MCP server over the in-memory MCP transport and real HTTP control-plane boundary now:
+That event is intentionally instruction-correlated rather than phone-attempt-correlated. The callback-originated `owner_instruction_queued` event carries both `callAttemptId` and `instructionId`; later consumption is correlated by that durable `instructionId` because consumption is an agent checkpoint action, not a provider-call transition.
 
-1. discovers `get_callback_status`;
-2. registers/starts a run;
-3. creates an owner callback through the MCP adapter;
-4. reads that callback back through `get_callback_status`;
-5. requires the callback to remain in a legitimate active `queued`/`in_progress` state before reconciliation;
-6. verifies the MCP-returned lifecycle view contains no `prompt`, `task`, or `metadata` properties.
+Fix commit: `a3a7accf41aad8345f147bfababd45734b5bd9fe` (`test: correlate callback consumption by instruction id`). The regression now follows the correct causal bridge: callback `callAttemptId` -> queued event `instructionId` -> consumed event with the same `instructionId`, while preserving exact sequence assertions.
 
-Existing MCP upstream-error redaction coverage remains intact.
-
-### Documented the new shared integration surface
-
-Implemented in commit `1d3310dd746da57fafd304ca57191294ecf2815e` (`docs: document callback lifecycle MCP surface`).
-
-`docs/INTEGRATIONS.md` now lists and explains `get_callback_status`, including its `agent:read` authorization boundary, privacy guarantees, Claude/Claude Code callback-observation role, and compatibility with the same checkpoint/acknowledgement steering semantics used by Codex and generic agents.
+No production contract was weakened to make the test pass.
 
 ## Verification performed
 
-The substantive code/test state at commit `ce6732f3e06b483b466bf6a17457e6a4c3427883` passed every repository verification surface:
+The corrected substantive state at commit `a3a7accf41aad8345f147bfababd45734b5bd9fe` passed every repository verification surface:
 
-- CI run `34313057537` — **success**. The standard Node 24 CI workflow completed successfully, covering locked dependency install, TypeScript typecheck, build, and the full test suite including the extended MCP callback-status regression.
-- Container run `34313057517` — **success**. Production image build and deterministic fake-provider runtime smoke passed.
-- Compose deployment run `34313057510` — **success**. The complete Docker + SQLite + generated scoped-credential deployment acceptance passed, including the real built stdio MCP process and the existing active decision/callback restart recovery, branch-specific release, durable steering, safe-checkpoint consumption, and exact acknowledgement paths.
+- CI run `34317843384` — **success**. Node 24.20.0, TypeScript typecheck, build, and **101/101 tests passed**, 0 failures. This includes the new long-lived stdio MCP callback restart regression.
+- Container run `34317843387` — **success**. Production image/runtime smoke passed.
+- Compose deployment run `34317843393` — **success**. The full Docker + SQLite + generated scoped-credential deployment passed. Its job completed the real stdio MCP verification, restart while an owner decision call was active, branch-specific decision release, owner callback creation, restart while that callback call was active, exactly-once restored callback reconciliation/steering, another restart after steering became durable, and safe-checkpoint exact acknowledgement.
 
-`package.json` still has no separate lint script and no standalone migration/schema-check command. The available CI `check` path covers TypeScript typechecking, build, and tests; Container and Compose cover production-runtime/deployment verification.
+The earlier first-test CI run `34317581279` failed **100/101** only because of the incorrect audit correlation described above. That failure was inspected through the exact GitHub Actions job log and fixed before this progress update. The first implementation's Container run `34317581342` had already passed, further confirming the failure was test-assertion-specific rather than a production-image regression.
+
+`package.json` has no separate lint script and no standalone migration/schema-check command. The available `check` path covers typechecking, build, and tests; Container and Compose provide production runtime and deployment verification.
 
 No live CALL-E phone call was attempted or claimed.
 
 ## Architecture decisions made this run
 
-1. Callback lifecycle observation is a read concern distinct from callback creation or provider reconciliation. An agent/MCP host may need to know whether a requested callback is still active or terminal without acquiring `owner:callback` or `calls:reconcile` authority.
-2. MCP remains a thin integration layer. `get_callback_status` reuses `CallYourAgentClient.getCallback` and the existing HTTP authorization/view contract rather than adding adapter-owned state.
-3. `agent:read` is sufficient for privacy-safe callback lifecycle observation; adding the tool does not broaden owner or reconciler privileges.
-4. Callback lifecycle views must remain content-minimized. Prompt text, call-task contents, provider metadata, transcripts, and steering text do not belong in this observation surface.
-5. Lifecycle observation does not alter safe-checkpoint semantics: callback-derived steering still becomes durable queued state and is incorporated/acknowledged only at a later explicit agent work boundary.
-6. Deterministic fake-provider and deployment evidence remains distinct from live CALL-E evidence.
+1. A long-lived agent integration must survive control-plane/provider process restart without restarting the MCP host merely to rediscover durable callback state.
+2. `get_callback_status` remains a thin privacy-safe observation surface. It is sufficient for an agent host to observe an owner callback across restart without exposing the callback prompt, replayable phone task, provider metadata, transcript, or steering text.
+3. Owner callback creation remains an owner/control-plane concern, not ordinary agent authority. The regression intentionally creates the callback outside MCP and only lets MCP observe it and later consume durable steering.
+4. Fake-provider reconstruction must preserve the durable logical call identity and must not emit a second `call_attempt_started` event merely because provider process-local memory was rebuilt.
+5. Audit causality crosses subsystem boundaries by stable durable references: callback provider transitions use `callAttemptId`; callback-produced steering records both `callAttemptId` and `instructionId`; later agent consumption is correctly correlated by `instructionId` rather than pretending a checkpoint action is itself a provider-call event.
+6. Human steering remains queued until an explicit safe checkpoint. Neither callback completion nor MCP lifecycle observation is treated as mid-generation interruption.
+7. Deterministic fake-provider evidence remains separate from live CALL-E evidence.
 
 ## CALL-E integration status
 
-- **Fake provider:** deterministic, credential-free, restart-stable provider identities, provider-local rehydration for durable accepted `queued`/`in_progress` calls, optional observation-driven completion, duplicate prevention, decision/callback restart recovery, and causal audit correlation.
+- **Fake provider:** deterministic, credential-free, restart-stable provider identities, provider-local rehydration for durable accepted calls, duplicate prevention, decision/callback restart recovery, and causal audit correlation. The new regression now proves callback rehydration is observable from the same external stdio MCP session across control-plane reconstruction.
 - **Production CALL-E adapter:** implemented against the asynchronous Calls API with server-only `CALLE_API_KEY`, stable idempotency, structured result schemas, bounded create/poll requests, persisted correlation, polling/webhook convergence, duplicate prevention, fail-closed ambiguous/stalled handling, and privacy-safe provider error reporting.
-- **Shared surfaces:** HTTP, TypeScript SDK, stdio MCP, lifecycle worker, and deployment workflows share the same persistent `ControlPlane` semantics rather than adapter-specific state machines. MCP now supports both escalation lifecycle observation and callback lifecycle observation.
-- **Claude Code:** a concrete real-host acceptance procedure exists and the built stdio MCP process is exercised automatically, but an actual Claude Code host run has not yet been observed and must not be claimed.
-- **Live status:** no authorized real CALL-E phone call has been performed, so live provider success remains unverified.
+- **Shared surfaces:** HTTP, TypeScript SDK, stdio MCP, lifecycle worker, and deployment workflows share the same persistent control-plane semantics rather than adapter-specific state machines.
+- **Claude Code:** the built stdio MCP process is exercised as a real external child and now survives callback observation across backend restart; a concrete real-host acceptance procedure exists. An actual Claude Code host session still has not been observed and must not be claimed.
+- **Live status:** no authorized real CALL-E phone call has been performed, so live provider/phone/webhook success remains unverified.
 
 ## Current blockers / external prerequisites
 
@@ -111,9 +112,9 @@ Live CALL-E verification still requires user-controlled prerequisites: a valid/a
 
 ## Highest-value next actions
 
-1. Extend `tests/mcp-stdio-deployment-acceptance.ts` to include `get_callback_status`, create the callback through the separately scoped owner HTTP credential, and observe the same callback from the long-lived external stdio MCP agent session before and after a control-plane restart while the call is still non-terminal.
-2. In that same deployment acceptance, reconcile the restored original callback only after restart and correlate exactly one `call_attempt_created -> call_attempt_started -> owner_callback_requested -> call_attempt_completed -> owner_instruction_queued` chain by durable `callAttemptId`, then prove the same MCP session receives and acknowledges the resulting steering at a safe checkpoint.
-3. Document fake-provider `rehydrate` behavior more explicitly in `docs/ARCHITECTURE.md`, separating deterministic local provider-process reconstruction from production CALL-E's remotely durable call identity.
+1. Fold the new `get_callback_status` observations and exact callback `callAttemptId -> instructionId` causality directly into `tests/mcp-stdio-deployment-acceptance.ts`, so the full Docker/scoped-credential path itself keeps the same MCP session alive while the owner callback is non-terminal across restart and verifies the causal chain end-to-end.
+2. Update `docs/CLAUDE_CODE_ACCEPTANCE.md` to explicitly include `get_callback_status` in required tool discovery and to observe the owner callback lifecycle before consuming steering, matching the now-tested adapter behavior.
+3. Document fake-provider `rehydrate` behavior more explicitly in `docs/ARCHITECTURE.md`, separating deterministic local provider-process reconstruction from production CALL-E's remotely durable provider call identity.
 4. Continue auditing model-/operator-facing diagnostics and read views for accidental task-context, owner-phone, bearer-token, webhook-token, callback-prompt, or instruction disclosure.
-5. Run `docs/CLAUDE_CODE_ACCEPTANCE.md` in a genuine Claude Code host when that external prerequisite is available and record only observed results/version details.
+5. Run the Claude Code acceptance procedure in a genuine Claude Code host when that external prerequisite is available and record only observed results/version details.
 6. When the user-controlled CALL-E prerequisites are available, perform one tightly bounded live provider acceptance and record only observed behavior.
