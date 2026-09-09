@@ -6,11 +6,11 @@ CallYourAgent is a durable Node 24 TypeScript control plane for asynchronous two
 
 The repository includes deterministic fake and production CALL-E providers, SQLite persistence, replayable/idempotent call attempts, polling/webhook convergence, branch-scoped blocking, owner decision persistence, durable per-run instruction queues, exact instruction acknowledgement, quiet hours/call budgets, bounded lifecycle recovery, fail-closed ambiguous/stalled handling, privacy-aware audit history, scoped HTTP authentication, a typed TypeScript client, a real stdio MCP adapter, deterministic end-to-end/demo flows, an operator console, a Claude Code host-acceptance runbook, and a single-instance persistent-volume Compose reference deployment.
 
-This run extended the stale-recovery guarantee to the agent -> owner decision path. A terminal provider webhook can now be proven to win while an ambiguous decision-call recovery replay is still in flight: the webhook creates exactly one durable owner decision, resolves only that escalation's blocked scope, preserves unrelated active work, and a later recovery response cannot overwrite the terminal call or duplicate the decision.
+This run closed a real polling/webhook stale-object race. Provider `observe()` calls happen outside the durable store transaction, so a terminal webhook may legitimately complete a call while an earlier poll is still awaiting the provider. The shared active/terminal observation application paths now re-read the current durable `CallAttempt` before mutating anything. A late stale active or failed poll therefore cannot downgrade a completed callback, overwrite a completed decision call, duplicate steering/decisions, or fabricate later progress/failure audit transitions.
 
 ## Exact repo state inspected this run
 
-The run started from `main` HEAD `28539244b3c0a50818b0e64ae40c727386f13634`, the merge of PR #3 (`Race terminal webhook against ambiguous recovery`).
+The run started from `main` HEAD `771a0568e256dcfdddbf2ddd9d45fc7fc08f6b6c`, the merge of PR #4 (`Race terminal decision webhook against ambiguous recovery`).
 
 Before any change, inspected the recursive repository tree and current architecture, recent commits, and open repository issue/PR activity. There were no open issues or pull requests before this run's branch was created.
 
@@ -31,64 +31,92 @@ Read in full before implementation:
 Also inspected the relevant implementation and verification surfaces, especially:
 
 - `src/control-plane.ts`
-- `tests/sqlite-recovery-webhook-race.test.ts`
-- `tests/decision-call-audit-restart.test.ts`
-- `tests/control-plane.test.ts`
+- `src/call-provider.ts`
+- `tests/sqlite-decision-recovery-webhook-race.test.ts`
+- the repository-wide `tests/` inventory
+- `package.json`
 
-The relevant control-plane behavior already re-reads durable `CallAttempt` state after an awaited ambiguous-recovery provider replay and refuses to apply the stale result when another path has already moved the attempt out of `ambiguous`. The decision and callback flows share `applyTerminalOutcome`, while checkpoint blocking is derived only from unresolved blocking escalations.
+The audit found that `reconcileEscalation` and `reconcileCallback` correctly awaited provider polling outside SQLite transactions, but then passed the pre-await `CallAttempt` object into `applyActiveObservation` / `applyTerminalOutcome`. If a webhook committed terminal state during that await, the late poll could still apply against the stale snapshot. This was a genuine production-state race rather than only a missing regression.
 
 Repository mutation and executable verification used the connected GitHub integration and GitHub Actions.
 
 ## Changes made this run
 
-### SQLite owner-decision recovery-vs-terminal-webhook regression
+### Durable re-validation at the provider-observation boundary
 
-Added `tests/sqlite-decision-recovery-webhook-race.test.ts` in commit `3b0cc5b773150a53d62fb258815a0994857def2d` (`test: race decision recovery with terminal webhook`) on PR #4.
+Updated `src/control-plane.ts` on PR #5 so both shared provider-observation transition helpers re-read the current durable `CallAttempt` by id immediately before applying provider evidence.
 
-The deterministic test uses a real temporary `SqliteControlPlaneStore` and a gated fake provider:
+`applyActiveObservation` now:
 
-1. an agent run remains active in the independent `documentation` scope;
-2. the agent raises a blocking `release-approval` escalation and one durable decision-call attempt is accepted;
-3. the attempt is reconciled to `ambiguous` while retaining its original provider correlation;
-4. `recoverCallAttempt` begins replaying the exact persisted provider request and is deliberately held before the replay result returns;
-5. while recovery is still in flight, a terminal `completed` provider webhook is applied to the same call attempt;
-6. the webhook creates exactly one durable `OwnerDecision`, resolves the escalation, and releases `release-approval` while the run's unrelated current scope remains `documentation`;
-7. the recovery replay returns afterward and must re-read the completed durable attempt rather than writing a stale active state;
-8. the decision id, answer, and structured result remain unchanged and the decision store still contains exactly one decision;
-9. duplicate delivery of the same webhook event id is rejected and cannot replace or duplicate the owner decision.
+1. reloads the current attempt from the store;
+2. verifies provider correlation against the current durable attempt;
+3. returns the current attempt unchanged when it is no longer active;
+4. only permits the existing forward `queued -> in_progress` transition;
+5. derives audit metadata from that current durable state.
 
-The audit assertions require exactly one `call_attempt_created`, one initial `call_attempt_started`, one `call_attempt_ambiguous`, one `call_attempt_completed`, one `owner_decision_recorded`, and one `provider_webhook_reconciled` event for the logical decision call.
+`applyTerminalOutcome` now:
 
-No production-code rewrite was necessary: this regression proves the existing durable-state re-read protects decision semantics as well as callback steering under the same asynchronous interleaving.
+1. reloads the current attempt from the store;
+2. returns the already-terminal durable attempt unchanged if another delivery path won first;
+3. applies terminal/ambiguous state and business effects only from the current durable state;
+4. correlates owner decisions and callback steering using that current attempt rather than the stale pre-await object.
+
+This keeps provider network I/O outside the database transaction while making the post-I/O mutation conditional on fresh durable truth. HTTP reconciliation, lifecycle polling, decision calls, and owner callbacks all use the same shared protection.
+
+### SQLite polling-vs-webhook concurrency regressions
+
+Added `tests/sqlite-poll-webhook-race.test.ts` with two gated deterministic provider tests against a real temporary `SqliteControlPlaneStore`.
+
+The callback test forces:
+
+1. one owner callback is accepted;
+2. callback reconciliation begins `observe()` and is held in flight;
+3. a terminal webhook completes the same callback and queues exactly one steering instruction;
+4. the delayed poll returns stale `in_progress` evidence;
+5. the callback remains `completed`, steering remains exactly once, and no `call_attempt_progressed` event is fabricated after completion.
+
+The decision test forces:
+
+1. a blocking `release-approval` escalation is created while independent `documentation` work remains the run's current scope;
+2. reconciliation begins `observe()` and is held in flight;
+3. a terminal webhook completes the decision call, creates exactly one `OwnerDecision`, and releases only `release-approval`;
+4. the delayed poll returns stale `failed` evidence;
+5. the attempt remains `completed`, the escalation remains `resolved`, the original decision id/answer remains authoritative, no duplicate decision is created, and no `call_attempt_failed` event is fabricated.
+
+The first PR verification attempt exposed a test-only TypeScript mistake: the synthetic failed `CallOutcome` included an unsupported `error` property. That compile failure was corrected in commit `8f2c2d5560975208d9dbe77a4116cb178bdff656`; no production-code change was required by the failure.
 
 ## Verification performed
 
-PR #4 substantive head `3b0cc5b773150a53d62fb258815a0994857def2d` passed every repository verification surface:
+Corrected PR #5 head `8f2c2d5560975208d9dbe77a4116cb178bdff656` passed every repository verification surface:
 
-- CI run `34348633133` — **success**. Node 24 setup, locked dependency install, repository typecheck/build/test path, and the new SQLite decision webhook-vs-recovery regression passed.
-- Container run `34348633137` — **success**. Production image/runtime verification passed.
-- Compose deployment run `34348633141` — **success**. Generated scoped credentials, Compose validation, fake-provider deployment, SQLite persistence/restart behavior, real compiled stdio MCP verification, active decision/callback recovery paths, branch-specific resume semantics, exactly-once steering, and safe-checkpoint instruction consumption remained green.
+- CI run `34355108181` — **success**. Node `24.20.0`, locked dependency install, TypeScript typecheck, build, and **110/110 tests passed** with 0 failures. Both new SQLite race regressions passed.
+- Container run `34355108131` — **success**. Production image/runtime verification passed.
+- Compose deployment run `34355108051` — **success**. The full single-instance reference deployment remained green, including generated least-privilege credentials, Compose validation, deterministic fake-provider operation, SQLite persistence/restarts, real compiled stdio MCP acceptance, active decision/callback recovery, branch-specific resume behavior, exactly-once steering, and safe-checkpoint instruction acknowledgement.
 
-`package.json` has no separate lint script and no standalone migration/schema-check command. The available repository check path covers typechecking/build/tests; SQLite tests exercise durable schema/transaction behavior; Container and Compose exercise the production runtime/deployment path.
+The earlier PR-head runs `34354975693` (CI), `34354975746` (Container), and `34354976030` (Compose) failed because CI typechecking stopped on the invalid test-only `error` field described above. The corrected head was then fully green across all three workflows.
+
+`package.json` has no separate lint script and no standalone migration/schema-check command. The available `npm run check` path covers typechecking/build/tests; SQLite tests exercise durable schema/transaction behavior; Container and Compose exercise the production runtime/deployment path.
 
 No live CALL-E phone call was attempted or claimed.
 
 ## Architecture decisions made this run
 
-1. Terminal provider evidence wins over a stale in-flight ambiguous-recovery replay for owner-decision calls just as it does for owner callbacks.
-2. Call-attempt terminality and business effects must converge together: when the winning webhook resolves a decision call, exactly one `OwnerDecision` is durable before the late recovery result is allowed to observe state.
-3. Branch-level semantics remain explicit. Resolving `release-approval` removes only that blocked scope; the independent `documentation` scope is never presented as paused or restarted by the phone flow.
-4. Provider replay remains outside the SQLite transaction. Correctness comes from persisted call identity/idempotency plus durable state re-validation after provider I/O, not from holding a database transaction across a network wait.
-5. Webhook event-id deduplication remains an independent exactly-once layer. State re-validation prevents resurrection; event dedup prevents repeated terminal delivery from replacing or duplicating the decision.
-6. The proven concurrency guarantee remains for the documented single-process SQLite topology; process-local recovery single-flight is not represented as a distributed lease.
-7. Deterministic fake-provider evidence remains separate from live CALL-E evidence.
+1. Durable terminal state wins over stale provider observations regardless of whether the losing observation is active or terminal.
+2. Provider polling remains outside the SQLite transaction. Correctness comes from re-reading durable state after provider I/O, not from holding a database lock across network latency.
+3. The stale-state guard belongs in the shared observation-application boundary rather than separately in HTTP, lifecycle, callback, or decision adapters. This prevents semantic drift across integration surfaces.
+4. A late active poll cannot downgrade a terminal attempt, refresh its age, or emit a false `call_attempt_progressed` transition.
+5. A late terminal poll cannot replace the winning webhook's business effects. Exactly one owner decision or callback steering result remains durable.
+6. Branch-level semantics remain explicit: completing the `release-approval` decision removes only that blocked scope while unrelated `documentation` work is never represented as interrupted.
+7. Webhook event-id deduplication and durable state re-validation remain complementary layers: event dedup handles repeated webhook delivery, while fresh-state validation handles independently arriving stale polls.
+8. The concurrency guarantee remains scoped to the documented single-process SQLite topology; this change is not represented as distributed multi-instance coordination.
+9. Deterministic fake-provider evidence remains separate from live CALL-E evidence.
 
 ## CALL-E integration status
 
-- **Fake provider:** deterministic, credential-free, provider-idempotent, restart-rehydratable from durable accepted-call state, and now used with SQLite to prove terminal webhook precedence during ambiguous recovery for both callback and decision-call business effects.
-- **Production CALL-E adapter:** implemented against the asynchronous Calls API with server-only `CALLE_API_KEY`, stable `Idempotency-Key`, structured result schemas, bounded create/poll requests, persisted correlation, polling/webhook convergence, duplicate prevention, fail-closed ambiguous/stalled handling, and privacy-safe provider errors. This run did not alter or live-test the adapter.
-- **Control-plane concurrency:** initial callback/decision identities are reserved before provider awaits; ambiguous recovery is single-flight per durable call attempt within the supported process; recovery completion re-checks durable state; terminal webhook precedence is now regression-tested for both queued callback steering and durable owner decisions.
-- **Shared surfaces:** HTTP, TypeScript SDK, stdio MCP, lifecycle worker, and deployment verification continue to share the same persistent control-plane semantics rather than adapter-specific state machines.
+- **Fake provider:** deterministic, credential-free, provider-idempotent, restart-rehydratable from durable accepted-call state, and now used with SQLite to prove that terminal webhook state cannot be downgraded by a stale in-flight provider poll.
+- **Production CALL-E adapter:** implemented against the asynchronous Calls API with server-only `CALLE_API_KEY`, stable `Idempotency-Key`, structured result schemas, bounded create/poll requests, persisted correlation, polling/webhook convergence, duplicate prevention, fail-closed ambiguous/stalled handling, and privacy-safe provider errors. This run hardened shared control-plane reconciliation semantics but did not alter or live-test the provider adapter.
+- **Control-plane concurrency:** callback/decision identities are reserved before provider awaits; ambiguous recovery is single-flight per durable call attempt within the supported process; recovery and ordinary polling now both re-check durable state after provider I/O; terminal webhook precedence is regression-tested against ambiguous recovery and against stale active/terminal polling.
+- **Shared surfaces:** HTTP, TypeScript SDK, stdio MCP, lifecycle worker, operator/deployment paths continue to share the same persistent control-plane semantics rather than adapter-specific state machines.
 - **Claude Code:** the built stdio MCP process is exercised as a real external child and the documented host acceptance matches the tested lifecycle. An actual Claude Code host session still has not been observed and must not be claimed.
 - **Live status:** no authorized real CALL-E phone call has been performed, so live provider/phone/webhook success remains unverified.
 
@@ -102,8 +130,8 @@ Live CALL-E verification still requires user-controlled prerequisites: a valid/a
 
 ## Highest-value next actions
 
-1. Audit polling/webhook convergence for stale-object interleavings: begin a provider `observe()` from `queued`/`in_progress`, let a terminal webhook complete the durable attempt while the poll is in flight, then return stale active or terminal poll evidence. Add deterministic SQLite regressions before changing production code.
-2. Audit lifecycle stale marking against concurrent terminal webhook application so a call that completes while a stale-age sweep is evaluating cannot be incorrectly left `stalled` afterward.
+1. Audit lifecycle stale marking against concurrent terminal webhook application: make the stale-age sweep evaluate an accepted call while a webhook completes it, then prove the sweep cannot leave the newer terminal attempt in `stalled` or emit a false stale transition.
+2. Audit initial provider-start completion for the same stale-object pattern. In particular, determine whether a delayed create response can overwrite state changed by another legitimate reconciliation/recovery path, and add a deterministic regression before changing code.
 3. Document fake-provider `rehydrate` behavior more explicitly in `docs/ARCHITECTURE.md`, separating deterministic local reconstruction from production CALL-E's remotely durable provider identity.
 4. Continue auditing model-/operator-facing diagnostics and read projections for accidental task-context, owner-phone, bearer-token, webhook-token, callback-prompt, or instruction disclosure.
 5. Run the documented acceptance in a genuine Claude Code host when that external prerequisite is available and record only observed host/version behavior.
