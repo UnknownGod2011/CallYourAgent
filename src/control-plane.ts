@@ -259,10 +259,17 @@ export class ControlPlane {
       return escalation;
     }
     if (escalation.deferredReason) this.audit("call_policy_released", "control_plane", "Deferred owner call became eligible", { runId: escalation.runId, escalationId: escalation.id }, { previousReason: escalation.deferredReason, scopeId: escalation.scopeId });
-    const attempt = await this.startCall("owner_decision", escalation.id, `Decision needed from the agent owner. Question: ${escalation.question}${escalation.context ? `\nContext: ${escalation.context}` : ""}`, `decision:${escalation.idempotencyKey}`, { runId: escalation.runId, escalationId: escalation.id, scopeId: escalation.scopeId });
-    const next: Escalation = { ...escalation, status: "calling", callAttemptId: attempt.id, deferredReason: undefined, updatedAt: this.isoNow() };
-    this.store.escalations.set(next.id, next);
-    return next;
+    const attempt = this.store.transaction(() => {
+      const current = this.requireEscalation(escalation.id);
+      if (current.callAttemptId || current.status !== "pending") return undefined;
+      const reserved = this.persistCallAttempt("owner_decision", current.id, `Decision needed from the agent owner. Question: ${current.question}${current.context ? `\nContext: ${current.context}` : ""}`, `decision:${current.idempotencyKey}`, { runId: current.runId, escalationId: current.id, scopeId: current.scopeId });
+      const calling: Escalation = { ...current, status: "calling", callAttemptId: reserved.id, deferredReason: undefined, updatedAt: this.isoNow() };
+      this.store.escalations.set(calling.id, calling);
+      return reserved;
+    });
+    if (!attempt) return this.requireEscalation(escalation.id);
+    await this.dispatchCallAttempt(attempt);
+    return this.requireEscalation(escalation.id);
   }
 
   private applyActiveObservation(
