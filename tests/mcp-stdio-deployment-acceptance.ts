@@ -249,7 +249,7 @@ async function main(): Promise<void> {
     assert.notEqual(decisionResult.isError, true);
     const decisionState = parseToolText(decisionResult) as {
       escalation: { status: string };
-      decision?: { answer?: string; structured?: Record<string, unknown> };
+      decision?: { id?: string; answer?: string; structured?: Record<string, unknown> };
     };
     assert.equal(decisionState.escalation.status, "resolved");
     assert.equal(decisionState.decision?.answer, "Proceed with the requested scope.");
@@ -265,7 +265,7 @@ async function main(): Promise<void> {
       decision?: { id?: string; answer?: string };
     };
     assert.equal(repeatedDecisionState.escalation.status, "resolved");
-    assert.equal(repeatedDecisionState.decision?.id, decisionState.decision && "id" in decisionState.decision ? decisionState.decision.id : repeatedDecisionState.decision?.id);
+    assert.equal(repeatedDecisionState.decision?.id, decisionState.decision?.id);
     assert.equal(repeatedDecisionState.decision?.answer, "Proceed with the requested scope.");
 
     const releasedCheckpointResult = await client.callTool({
@@ -352,7 +352,12 @@ async function main(): Promise<void> {
       arguments: { runId: run.id, limit: 100 },
     });
     assert.notEqual(auditResult.isError, true);
-    const auditEvents = parseToolText(auditResult) as Array<{ type: string; escalationId?: string }>;
+    const auditEvents = parseToolText(auditResult) as Array<{
+      type: string;
+      sequence: number;
+      escalationId?: string;
+      callAttemptId?: string;
+    }>;
     const eventTypes = new Set(auditEvents.map((event) => event.type));
     for (const expected of [
       "escalation_created",
@@ -363,11 +368,55 @@ async function main(): Promise<void> {
     ]) {
       assert.ok(eventTypes.has(expected), `missing audit event ${expected}`);
     }
+
+    const decisionEvents = auditEvents.filter(
+      (event) => event.type === "owner_decision_recorded" && event.escalationId === escalation.id,
+    );
     assert.equal(
-      auditEvents.filter((event) => event.type === "owner_decision_recorded" && event.escalationId === escalation.id).length,
+      decisionEvents.length,
       1,
       "restart/retry must not duplicate the MCP-raised owner decision",
     );
+    const decisionCallAttemptId = decisionEvents[0]?.callAttemptId;
+    assert.equal(typeof decisionCallAttemptId, "string");
+
+    const decisionCallEvents = auditEvents.filter(
+      (event) => event.callAttemptId === decisionCallAttemptId,
+    );
+    const decisionCallCreated = decisionCallEvents.filter(
+      (event) => event.type === "call_attempt_created",
+    );
+    const decisionCallStarted = decisionCallEvents.filter(
+      (event) => event.type === "call_attempt_started",
+    );
+    const decisionCallCompleted = decisionCallEvents.filter(
+      (event) => event.type === "call_attempt_completed",
+    );
+    assert.equal(
+      decisionCallCreated.length,
+      1,
+      "MCP-raised decision must have exactly one durable call-attempt create event",
+    );
+    assert.equal(
+      decisionCallStarted.length,
+      1,
+      "control-plane restart/provider rehydration must not duplicate provider start",
+    );
+    assert.equal(
+      decisionCallCompleted.length,
+      1,
+      "terminal reconciliation must produce exactly one completion event",
+    );
+    assert.ok(decisionCallCreated[0]!.sequence < decisionCallStarted[0]!.sequence);
+    assert.ok(decisionCallStarted[0]!.sequence < decisionCallCompleted[0]!.sequence);
+    assert.equal(
+      decisionCallEvents.filter(
+        (event) => event.type === "call_attempt_ambiguous" || event.type === "call_attempt_failed",
+      ).length,
+      0,
+      "successful restart recovery must not fabricate ambiguous or failed call state",
+    );
+
     assert.equal(
       auditEvents.filter((event) => event.type === "owner_instruction_consumed").length,
       1,
@@ -380,6 +429,7 @@ async function main(): Promise<void> {
       restartedAfterCallback: steeringRestarted,
       runId: run.id,
       escalationId: escalation.id,
+      decisionCallAttemptId,
       callbackId: callback.id,
       instructionId: instruction.id,
       discoveredTools: listed.tools.length,
