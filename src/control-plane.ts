@@ -107,10 +107,15 @@ export class ControlPlane {
     const escalation = this.requireEscalation(escalationId);
     if (["resolved", "expired", "failed"].includes(escalation.status)) return escalation;
     if (escalation.expiresAt && new Date(escalation.expiresAt) <= this.clock.now()) {
-      const expired = { ...escalation, status: "expired" as const, updatedAt: this.isoNow() };
-      this.store.escalations.set(expired.id, expired);
-      this.audit("escalation_expired", "control_plane", "Escalation expired before resolution", { runId: expired.runId, escalationId: expired.id }, { scopeId: expired.scopeId });
-      return expired;
+      return this.store.transaction(() => {
+        const current = this.requireEscalation(escalationId);
+        if (["resolved", "expired", "failed"].includes(current.status)) return current;
+        if (!current.expiresAt || new Date(current.expiresAt) > this.clock.now()) return current;
+        const expired = { ...current, status: "expired" as const, updatedAt: this.isoNow() };
+        this.store.escalations.set(expired.id, expired);
+        this.audit("escalation_expired", "control_plane", "Escalation expired before resolution", { runId: expired.runId, escalationId: expired.id }, { scopeId: expired.scopeId });
+        return expired;
+      });
     }
     if (!escalation.callAttemptId) return this.startEscalationCallIfAllowed(escalation);
     let attempt = this.requireCallAttempt(escalation.callAttemptId);
@@ -275,17 +280,24 @@ export class ControlPlane {
     const decision = this.callPolicy.assessDecisionCall({ run, owner, priority: escalation.priority, now: this.clock.now(), attempts: this.store.callAttempts.values(), runs: this.store.runs, agents: this.store.agents });
     if (!decision.allowed) {
       if (decision.reason && escalation.deferredReason !== decision.reason) {
-        const deferred = { ...escalation, deferredReason: decision.reason, updatedAt: this.isoNow() };
-        this.store.escalations.set(deferred.id, deferred);
-        this.audit("call_policy_deferred", "control_plane", "Owner call deferred by policy", { runId: escalation.runId, escalationId: escalation.id }, { reason: decision.reason, scopeId: escalation.scopeId, priority: escalation.priority });
-        return deferred;
+        return this.store.transaction(() => {
+          const current = this.requireEscalation(escalation.id);
+          if (current.callAttemptId || current.status !== "pending") return current;
+          if (current.deferredReason === decision.reason) return current;
+          const deferred = { ...current, deferredReason: decision.reason, updatedAt: this.isoNow() };
+          this.store.escalations.set(deferred.id, deferred);
+          this.audit("call_policy_deferred", "control_plane", "Owner call deferred by policy", { runId: deferred.runId, escalationId: deferred.id }, { reason: decision.reason, scopeId: deferred.scopeId, priority: deferred.priority });
+          return deferred;
+        });
       }
       return escalation;
     }
-    if (escalation.deferredReason) this.audit("call_policy_released", "control_plane", "Deferred owner call became eligible", { runId: escalation.runId, escalationId: escalation.id }, { previousReason: escalation.deferredReason, scopeId: escalation.scopeId });
     const attempt = this.store.transaction(() => {
       const current = this.requireEscalation(escalation.id);
       if (current.callAttemptId || current.status !== "pending") return undefined;
+      if (current.deferredReason) {
+        this.audit("call_policy_released", "control_plane", "Deferred owner call became eligible", { runId: current.runId, escalationId: current.id }, { previousReason: current.deferredReason, scopeId: current.scopeId });
+      }
       const reserved = this.persistCallAttempt("owner_decision", current.id, `Decision needed from the agent owner. Question: ${current.question}${current.context ? `\nContext: ${current.context}` : ""}`, `decision:${current.idempotencyKey}`, { runId: current.runId, escalationId: current.id, scopeId: current.scopeId });
       const calling: Escalation = { ...current, status: "calling", callAttemptId: reserved.id, deferredReason: undefined, updatedAt: this.isoNow() };
       this.store.escalations.set(calling.id, calling);
