@@ -297,32 +297,34 @@ export class ControlPlane {
     attempt: CallAttempt,
     observation: Extract<CallProviderObservation, { status: "queued" | "in_progress" }>,
   ): CallAttempt {
-    if (attempt.providerCallId !== observation.providerCallId) {
-      throw new Error(`Provider observation id mismatch for call attempt ${attempt.id}`);
+    const current = this.requireCallAttempt(attempt.id);
+    if (current.providerCallId !== observation.providerCallId) {
+      throw new Error(`Provider observation id mismatch for call attempt ${current.id}`);
     }
-    if (attempt.status !== "queued" && attempt.status !== "in_progress") return attempt;
-    if (attempt.status === observation.status) return attempt;
-    if (attempt.status === "in_progress" && observation.status === "queued") return attempt;
+    if (current.status !== "queued" && current.status !== "in_progress") return current;
+    if (current.status === observation.status) return current;
+    if (current.status === "in_progress" && observation.status === "queued") return current;
 
-    const next: CallAttempt = { ...attempt, status: "in_progress", updatedAt: this.isoNow() };
+    const next: CallAttempt = { ...current, status: "in_progress", updatedAt: this.isoNow() };
     this.store.callAttempts.set(next.id, next);
     this.audit("call_attempt_progressed", "provider", "Phone provider reported call in progress", {
       runId: this.runIdForAttempt(next), callAttemptId: next.id,
     }, {
       purpose: next.purpose,
       provider: next.provider,
-      priorStatus: attempt.status,
+      priorStatus: current.status,
       status: next.status,
     });
     return next;
   }
 
   private applyTerminalOutcome(attempt: CallAttempt, outcome: CallOutcome): CallAttempt {
-    if (attempt.status === "completed" || attempt.status === "failed") return attempt;
-    if (outcome.status === "ambiguous") return this.finishAttempt(attempt, "ambiguous");
-    const finished = this.finishAttempt(attempt, outcome.status);
-    if (attempt.purpose === "owner_decision") {
-      const escalation = this.requireEscalation(attempt.correlationId);
+    const current = this.requireCallAttempt(attempt.id);
+    if (current.status === "completed" || current.status === "failed") return current;
+    if (outcome.status === "ambiguous") return this.finishAttempt(current, "ambiguous");
+    const finished = this.finishAttempt(current, outcome.status);
+    if (current.purpose === "owner_decision") {
+      const escalation = this.requireEscalation(current.correlationId);
       if (["resolved", "expired", "failed"].includes(escalation.status)) return finished;
       if (outcome.status === "failed") {
         const failed = { ...escalation, status: "failed" as const, updatedAt: this.isoNow() };
@@ -333,10 +335,10 @@ export class ControlPlane {
       this.store.decisions.set(decision.id, decision);
       const resolved = { ...escalation, status: "resolved" as const, decisionId: decision.id, updatedAt: this.isoNow() };
       this.store.escalations.set(resolved.id, resolved);
-      this.audit("owner_decision_recorded", "owner", "Owner decision recorded and blocked scope released", { runId: escalation.runId, escalationId: escalation.id, callAttemptId: attempt.id }, { scopeId: escalation.scopeId, blocking: escalation.blocking, structured: Boolean(outcome.structured) });
+      this.audit("owner_decision_recorded", "owner", "Owner decision recorded and blocked scope released", { runId: escalation.runId, escalationId: escalation.id, callAttemptId: current.id }, { scopeId: escalation.scopeId, blocking: escalation.blocking, structured: Boolean(outcome.structured) });
       return finished;
     }
-    if (outcome.status === "completed") for (const text of outcome.instructions ?? []) this.enqueueInstruction(attempt.correlationId, text, "callback", attempt.id);
+    if (outcome.status === "completed") for (const text of outcome.instructions ?? []) this.enqueueInstruction(current.correlationId, text, "callback", current.id);
     return finished;
   }
 
