@@ -235,7 +235,9 @@ test("long-lived stdio MCP observes restart-recovered owner callback and consume
     const requested = callbackEvents.filter((event) => event.type === "owner_callback_requested");
     const completedEvents = callbackEvents.filter((event) => event.type === "call_attempt_completed");
     const queued = callbackEvents.filter((event) => event.type === "owner_instruction_queued");
-    const consumed = callbackEvents.filter((event) => event.type === "owner_instruction_consumed");
+    const consumed = events.filter(
+      (event) => event.type === "owner_instruction_consumed" && event.instructionId === instruction.id,
+    );
 
     assert.equal(created.length, 1, "callback must have exactly one durable create event");
     assert.equal(started.length, 1, "provider rehydration must not emit another callback start event");
