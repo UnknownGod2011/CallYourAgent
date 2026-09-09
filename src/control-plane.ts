@@ -13,63 +13,32 @@ import type {
   OwnerDecisionRequest,
   OwnerInstruction,
 } from "./domain.js";
-import type { CallProvider, CallProviderObservation } from "./call-provider.js";
+import type { CallProvider, CallProviderObservation, StartCallResult } from "./call-provider.js";
 import { CallPolicy } from "./call-policy.js";
 import type { ControlPlaneStore } from "./store.js";
 
-export interface Clock {
-  now(): Date;
-}
-
-export interface ProviderWebhookInput {
-  eventId: string;
-  providerCallId: string;
-  outcome: CallOutcome;
-}
-
-export interface ProviderWebhookResult {
-  duplicate: boolean;
-  callAttempt: CallAttempt;
-}
-
+export interface Clock { now(): Date; }
+export interface ProviderWebhookInput { eventId: string; providerCallId: string; outcome: CallOutcome; }
+export interface ProviderWebhookResult { duplicate: boolean; callAttempt: CallAttempt; }
 const systemClock: Clock = { now: () => new Date() };
 
 export class ControlPlane {
   private readonly recoveryInFlight = new Map<string, Promise<CallAttempt>>();
-
-  constructor(
-    private readonly store: ControlPlaneStore,
-    private readonly calls: CallProvider,
-    private readonly clock: Clock = systemClock,
-    private readonly callPolicy: CallPolicy = new CallPolicy(),
-  ) {}
+  constructor(private readonly store: ControlPlaneStore, private readonly calls: CallProvider, private readonly clock: Clock = systemClock, private readonly callPolicy: CallPolicy = new CallPolicy()) {}
 
   registerAgent(input: Omit<AgentRegistration, "id" | "createdAt">): AgentRegistration {
     const agent: AgentRegistration = { ...input, id: randomUUID(), createdAt: this.isoNow() };
     this.store.agents.set(agent.id, agent);
-    this.audit("agent_registered", "control_plane", "Agent registered", { agentId: agent.id }, {
-      platform: agent.platform,
-      ownerId: agent.ownerId,
-    });
+    this.audit("agent_registered", "control_plane", "Agent registered", { agentId: agent.id }, { platform: agent.platform, ownerId: agent.ownerId });
     return agent;
   }
 
   startRun(agentId: string, summary: string, currentScope?: string): AgentRun {
     this.requireAgent(agentId);
     const now = this.isoNow();
-    const run: AgentRun = {
-      id: randomUUID(),
-      agentId,
-      status: "running",
-      summary,
-      currentScope,
-      startedAt: now,
-      updatedAt: now,
-    };
+    const run: AgentRun = { id: randomUUID(), agentId, status: "running", summary, currentScope, startedAt: now, updatedAt: now };
     this.store.runs.set(run.id, run);
-    this.audit("run_started", "agent", "Agent run started", { runId: run.id, agentId }, {
-      currentScope: run.currentScope,
-    });
+    this.audit("run_started", "agent", "Agent run started", { runId: run.id, agentId }, { currentScope: run.currentScope });
     return run;
   }
 
@@ -78,10 +47,7 @@ export class ControlPlane {
     if (run.status !== "running") throw new Error(`Run ${runId} is not running`);
     const next = { ...run, ...update, updatedAt: this.isoNow() };
     this.store.runs.set(runId, next);
-    this.audit("run_status_reported", "agent", "Agent reported progress", { runId, agentId: run.agentId }, {
-      currentScope: next.currentScope,
-      summaryChanged: update.summary !== undefined,
-    });
+    this.audit("run_status_reported", "agent", "Agent reported progress", { runId, agentId: run.agentId }, { currentScope: next.currentScope, summaryChanged: update.summary !== undefined });
     return next;
   }
 
@@ -90,16 +56,10 @@ export class ControlPlane {
     const existingId = this.store.escalationByIdempotencyKey.get(input.idempotencyKey);
     if (existingId) return this.store.escalations.get(existingId)!;
     const now = this.isoNow();
-    const escalation: Escalation = {
-      id: randomUUID(), runId: input.runId, scopeId: input.scopeId, question: input.question,
-      context: input.context, blocking: input.blocking, priority: input.priority ?? "normal", status: "pending",
-      idempotencyKey: input.idempotencyKey, createdAt: now, updatedAt: now, expiresAt: input.expiresAt,
-    };
+    const escalation: Escalation = { id: randomUUID(), runId: input.runId, scopeId: input.scopeId, question: input.question, context: input.context, blocking: input.blocking, priority: input.priority ?? "normal", status: "pending", idempotencyKey: input.idempotencyKey, createdAt: now, updatedAt: now, expiresAt: input.expiresAt };
     this.store.escalations.set(escalation.id, escalation);
     this.store.escalationByIdempotencyKey.set(input.idempotencyKey, escalation.id);
-    this.audit("escalation_created", "agent", "Owner decision requested", { runId: escalation.runId, escalationId: escalation.id }, {
-      scopeId: escalation.scopeId, blocking: escalation.blocking, priority: escalation.priority, expiresAt: escalation.expiresAt,
-    });
+    this.audit("escalation_created", "agent", "Owner decision requested", { runId: escalation.runId, escalationId: escalation.id }, { scopeId: escalation.scopeId, blocking: escalation.blocking, priority: escalation.priority, expiresAt: escalation.expiresAt });
     return this.startEscalationCallIfAllowed(escalation);
   }
 
@@ -118,10 +78,7 @@ export class ControlPlane {
     if (!attempt.providerCallId) return this.requireEscalation(escalationId);
     await this.rehydrateProviderCallIfSupported(attempt);
     const observation = await this.calls.observe(attempt.providerCallId);
-    if (observation.status === "queued" || observation.status === "in_progress") {
-      this.applyActiveObservation(attempt, observation);
-      return this.requireEscalation(escalationId);
-    }
+    if (observation.status === "queued" || observation.status === "in_progress") { this.applyActiveObservation(attempt, observation); return this.requireEscalation(escalationId); }
     this.applyTerminalOutcome(attempt, observation);
     return this.requireEscalation(escalationId);
   }
@@ -130,18 +87,8 @@ export class ControlPlane {
     const run = this.requireRunningRun(input.runId);
     const existingId = this.store.callbackByIdempotencyKey.get(input.idempotencyKey);
     if (existingId) return this.store.callAttempts.get(existingId)!;
-    const task = [
-      "The owner requested a callback with their running AI agent.",
-      `Current agent status: ${run.summary}`,
-      run.currentScope ? `Current scope: ${run.currentScope}` : "",
-      input.prompt ? `Owner request: ${input.prompt}` : "Ask what the owner wants to know or change.",
-      "Capture any new owner instructions as concise action items.",
-    ].filter(Boolean).join("\n");
-    const attempt = this.store.transaction(() => {
-      const reserved = this.persistCallAttempt("owner_callback", input.runId, task, `callback:${input.idempotencyKey}`, { runId: input.runId });
-      this.store.callbackByIdempotencyKey.set(input.idempotencyKey, reserved.id);
-      return reserved;
-    });
+    const task = ["The owner requested a callback with their running AI agent.", `Current agent status: ${run.summary}`, run.currentScope ? `Current scope: ${run.currentScope}` : "", input.prompt ? `Owner request: ${input.prompt}` : "Ask what the owner wants to know or change.", "Capture any new owner instructions as concise action items."].filter(Boolean).join("\n");
+    const attempt = this.store.transaction(() => { const reserved = this.persistCallAttempt("owner_callback", input.runId, task, `callback:${input.idempotencyKey}`, { runId: input.runId }); this.store.callbackByIdempotencyKey.set(input.idempotencyKey, reserved.id); return reserved; });
     const started = await this.dispatchCallAttempt(attempt);
     this.audit("owner_callback_requested", "owner", "Owner requested a callback to the running agent", { runId: input.runId, agentId: run.agentId, callAttemptId: started.id }, { currentScope: run.currentScope });
     return started;
@@ -155,9 +102,7 @@ export class ControlPlane {
     if (!attempt.providerCallId) return attempt;
     await this.rehydrateProviderCallIfSupported(attempt);
     const observation = await this.calls.observe(attempt.providerCallId);
-    if (observation.status === "queued" || observation.status === "in_progress") {
-      return this.applyActiveObservation(attempt, observation);
-    }
+    if (observation.status === "queued" || observation.status === "in_progress") return this.applyActiveObservation(attempt, observation);
     return this.applyTerminalOutcome(attempt, observation);
   }
 
@@ -178,32 +123,17 @@ export class ControlPlane {
   async recoverCallAttempt(callAttemptId: string): Promise<CallAttempt> {
     const inFlight = this.recoveryInFlight.get(callAttemptId);
     if (inFlight) return inFlight;
-
     const recovery = this.recoverCallAttemptOnce(callAttemptId);
     this.recoveryInFlight.set(callAttemptId, recovery);
-    try {
-      return await recovery;
-    } finally {
-      if (this.recoveryInFlight.get(callAttemptId) === recovery) {
-        this.recoveryInFlight.delete(callAttemptId);
-      }
-    }
+    try { return await recovery; } finally { if (this.recoveryInFlight.get(callAttemptId) === recovery) this.recoveryInFlight.delete(callAttemptId); }
   }
 
   private async recoverCallAttemptOnce(callAttemptId: string): Promise<CallAttempt> {
     const attempt = this.requireCallAttempt(callAttemptId);
-    if (attempt.status !== "ambiguous") return attempt;
-    if (attempt.automaticRecoveryExhaustedAt) return attempt;
+    if (attempt.status !== "ambiguous" || attempt.automaticRecoveryExhaustedAt) return attempt;
+    let started: StartCallResult;
     try {
-      const started = await this.calls.start({ idempotencyKey: attempt.idempotencyKey, purpose: attempt.purpose, task: attempt.request.task, metadata: attempt.request.metadata });
-      const current = this.requireCallAttempt(attempt.id);
-      if (current.status !== "ambiguous") return current;
-      const recovered: CallAttempt = { ...current, providerCallId: started.providerCallId, status: started.status, lastError: undefined, updatedAt: this.isoNow() };
-      return this.store.transaction(() => {
-        this.store.callAttempts.set(recovered.id, recovered);
-        this.audit("call_attempt_started", "control_plane", "Ambiguous call attempt safely recovered", { runId: this.runIdForAttempt(recovered), callAttemptId: recovered.id }, { purpose: recovered.purpose, provider: recovered.provider, recovered: true });
-        return recovered;
-      });
+      started = await this.calls.start({ idempotencyKey: attempt.idempotencyKey, purpose: attempt.purpose, task: attempt.request.task, metadata: attempt.request.metadata });
     } catch (error) {
       const current = this.requireCallAttempt(attempt.id);
       if (current.status !== "ambiguous") return current;
@@ -214,202 +144,81 @@ export class ControlPlane {
         return stillAmbiguous;
       });
     }
+    const current = this.requireCallAttempt(attempt.id);
+    if (current.status !== "ambiguous") return current;
+    const recovered: CallAttempt = { ...current, providerCallId: started.providerCallId, status: started.status, lastError: undefined, updatedAt: this.isoNow() };
+    return this.store.transaction(() => {
+      this.store.callAttempts.set(recovered.id, recovered);
+      this.audit("call_attempt_started", "control_plane", "Ambiguous call attempt safely recovered", { runId: this.runIdForAttempt(recovered), callAttemptId: recovered.id }, { purpose: recovered.purpose, provider: recovered.provider, recovered: true });
+      return recovered;
+    });
   }
 
   checkpoint(runId: string, consume = false): CheckpointResult {
     const run = this.requireRun(runId);
     const queuedInstructions = [...this.store.instructions.values()].filter((instruction) => instruction.runId === runId && instruction.status === "queued");
-    const unresolvedBlockingScopes = [...this.store.escalations.values()]
-      .filter((e) => e.runId === runId && e.blocking && (e.status === "pending" || e.status === "calling"))
-      .map((e) => e.scopeId);
+    const unresolvedBlockingScopes = [...this.store.escalations.values()].filter((e) => e.runId === runId && e.blocking && (e.status === "pending" || e.status === "calling")).map((e) => e.scopeId);
     if (consume) this.acknowledgeInstructions(runId, queuedInstructions.map((instruction) => instruction.id));
     return { run, queuedInstructions, unresolvedBlockingScopes };
   }
 
   acknowledgeInstructions(runId: string, instructionIds: string[]): OwnerInstruction[] {
-    const run = this.requireRun(runId);
-    const uniqueIds = [...new Set(instructionIds)];
-    const instructions = uniqueIds.map((id) => {
-      const instruction = this.store.instructions.get(id);
-      if (!instruction) throw new Error(`Unknown instruction: ${id}`);
-      if (instruction.runId !== runId) throw new Error(`Instruction ${id} does not belong to run ${runId}`);
-      return instruction;
-    });
+    const run = this.requireRun(runId); const uniqueIds = [...new Set(instructionIds)];
+    const instructions = uniqueIds.map((id) => { const instruction = this.store.instructions.get(id); if (!instruction) throw new Error(`Unknown instruction: ${id}`); if (instruction.runId !== runId) throw new Error(`Instruction ${id} does not belong to run ${runId}`); return instruction; });
     const now = this.isoNow();
-    return this.store.transaction(() => instructions.map((instruction) => {
-      if (instruction.status === "consumed") return instruction;
-      const consumed: OwnerInstruction = { ...instruction, status: "consumed", consumedAt: now };
-      this.store.instructions.set(consumed.id, consumed);
-      this.audit("owner_instruction_consumed", "agent", "Owner instruction acknowledged after safe-checkpoint incorporation", {
-        runId, agentId: run.agentId, instructionId: consumed.id,
-      }, { source: consumed.source, explicitAcknowledgement: true });
-      return consumed;
-    }));
+    return this.store.transaction(() => instructions.map((instruction) => { if (instruction.status === "consumed") return instruction; const consumed: OwnerInstruction = { ...instruction, status: "consumed", consumedAt: now }; this.store.instructions.set(consumed.id, consumed); this.audit("owner_instruction_consumed", "agent", "Owner instruction acknowledged after safe-checkpoint incorporation", { runId, agentId: run.agentId, instructionId: consumed.id }, { source: consumed.source, explicitAcknowledgement: true }); return consumed; }));
   }
 
   enqueueInstruction(runId: string, text: string, source: OwnerInstruction["source"] = "api", callAttemptId?: string): OwnerInstruction {
-    const run = this.requireRun(runId);
-    const instruction: OwnerInstruction = { id: randomUUID(), runId, text, source, status: "queued", createdAt: this.isoNow() };
-    this.store.instructions.set(instruction.id, instruction);
-    this.audit("owner_instruction_queued", source === "callback" ? "owner" : "control_plane", "Owner instruction queued for next safe checkpoint", { runId, agentId: run.agentId, callAttemptId, instructionId: instruction.id }, { source });
-    return instruction;
+    const run = this.requireRun(runId); const instruction: OwnerInstruction = { id: randomUUID(), runId, text, source, status: "queued", createdAt: this.isoNow() }; this.store.instructions.set(instruction.id, instruction); this.audit("owner_instruction_queued", source === "callback" ? "owner" : "control_plane", "Owner instruction queued for next safe checkpoint", { runId, agentId: run.agentId, callAttemptId, instructionId: instruction.id }, { source }); return instruction;
   }
 
   getRun(runId: string): AgentRun { return this.requireRun(runId); }
   getEscalation(escalationId: string): Escalation { return this.requireEscalation(escalationId); }
   getCallAttempt(callAttemptId: string): CallAttempt { return this.requireCallAttempt(callAttemptId); }
-  getDecision(escalationId: string): OwnerDecision | undefined {
-    const escalation = this.requireEscalation(escalationId);
-    return escalation.decisionId ? this.store.decisions.get(escalation.decisionId) : undefined;
-  }
-
-  listAuditEvents(runId: string, limit = 100): AuditEvent[] {
-    this.requireRun(runId);
-    if (!Number.isInteger(limit) || limit < 1 || limit > 500) throw new Error("Audit event limit must be an integer from 1 to 500");
-    return [...this.store.auditEvents.values()].filter((event) => event.runId === runId).sort((left, right) => left.sequence - right.sequence).slice(-limit);
-  }
+  getDecision(escalationId: string): OwnerDecision | undefined { const escalation = this.requireEscalation(escalationId); return escalation.decisionId ? this.store.decisions.get(escalation.decisionId) : undefined; }
+  listAuditEvents(runId: string, limit = 100): AuditEvent[] { this.requireRun(runId); if (!Number.isInteger(limit) || limit < 1 || limit > 500) throw new Error("Audit event limit must be an integer from 1 to 500"); return [...this.store.auditEvents.values()].filter((event) => event.runId === runId).sort((left, right) => left.sequence - right.sequence).slice(-limit); }
 
   private async startEscalationCallIfAllowed(escalation: Escalation): Promise<Escalation> {
     if (escalation.callAttemptId || escalation.status !== "pending") return escalation;
-    const run = this.requireRunningRun(escalation.runId);
-    const owner = this.requireAgent(run.agentId);
+    const run = this.requireRunningRun(escalation.runId); const owner = this.requireAgent(run.agentId);
     const decision = this.callPolicy.assessDecisionCall({ run, owner, priority: escalation.priority, now: this.clock.now(), attempts: this.store.callAttempts.values(), runs: this.store.runs, agents: this.store.agents });
-    if (!decision.allowed) {
-      if (decision.reason && escalation.deferredReason !== decision.reason) {
-        const deferred = { ...escalation, deferredReason: decision.reason, updatedAt: this.isoNow() };
-        this.store.escalations.set(deferred.id, deferred);
-        this.audit("call_policy_deferred", "control_plane", "Owner call deferred by policy", { runId: escalation.runId, escalationId: escalation.id }, { reason: decision.reason, scopeId: escalation.scopeId, priority: escalation.priority });
-        return deferred;
-      }
-      return escalation;
-    }
+    if (!decision.allowed) { if (decision.reason && escalation.deferredReason !== decision.reason) { const deferred = { ...escalation, deferredReason: decision.reason, updatedAt: this.isoNow() }; this.store.escalations.set(deferred.id, deferred); this.audit("call_policy_deferred", "control_plane", "Owner call deferred by policy", { runId: escalation.runId, escalationId: escalation.id }, { reason: decision.reason, scopeId: escalation.scopeId, priority: escalation.priority }); return deferred; } return escalation; }
     if (escalation.deferredReason) this.audit("call_policy_released", "control_plane", "Deferred owner call became eligible", { runId: escalation.runId, escalationId: escalation.id }, { previousReason: escalation.deferredReason, scopeId: escalation.scopeId });
-    const attempt = this.store.transaction(() => {
-      const current = this.requireEscalation(escalation.id);
-      if (current.callAttemptId || current.status !== "pending") return undefined;
-      const reserved = this.persistCallAttempt("owner_decision", current.id, `Decision needed from the agent owner. Question: ${current.question}${current.context ? `\nContext: ${current.context}` : ""}`, `decision:${current.idempotencyKey}`, { runId: current.runId, escalationId: current.id, scopeId: current.scopeId });
-      const calling: Escalation = { ...current, status: "calling", callAttemptId: reserved.id, deferredReason: undefined, updatedAt: this.isoNow() };
-      this.store.escalations.set(calling.id, calling);
-      return reserved;
-    });
-    if (!attempt) return this.requireEscalation(escalation.id);
-    await this.dispatchCallAttempt(attempt);
-    return this.requireEscalation(escalation.id);
+    const attempt = this.store.transaction(() => { const current = this.requireEscalation(escalation.id); if (current.callAttemptId || current.status !== "pending") return undefined; const reserved = this.persistCallAttempt("owner_decision", current.id, `Decision needed from the agent owner. Question: ${current.question}${current.context ? `\nContext: ${current.context}` : ""}`, `decision:${current.idempotencyKey}`, { runId: current.runId, escalationId: current.id, scopeId: current.scopeId }); const calling: Escalation = { ...current, status: "calling", callAttemptId: reserved.id, deferredReason: undefined, updatedAt: this.isoNow() }; this.store.escalations.set(calling.id, calling); return reserved; });
+    if (!attempt) return this.requireEscalation(escalation.id); await this.dispatchCallAttempt(attempt); return this.requireEscalation(escalation.id);
   }
 
-  private applyActiveObservation(
-    attempt: CallAttempt,
-    observation: Extract<CallProviderObservation, { status: "queued" | "in_progress" }>,
-  ): CallAttempt {
-    const current = this.requireCallAttempt(attempt.id);
-    if (current.providerCallId !== observation.providerCallId) {
-      throw new Error(`Provider observation id mismatch for call attempt ${current.id}`);
-    }
-    if (current.status !== "queued" && current.status !== "in_progress") return current;
-    if (current.status === observation.status) return current;
-    if (current.status === "in_progress" && observation.status === "queued") return current;
-
-    const next: CallAttempt = { ...current, status: "in_progress", updatedAt: this.isoNow() };
-    this.store.callAttempts.set(next.id, next);
-    this.audit("call_attempt_progressed", "provider", "Phone provider reported call in progress", {
-      runId: this.runIdForAttempt(next), callAttemptId: next.id,
-    }, {
-      purpose: next.purpose,
-      provider: next.provider,
-      priorStatus: current.status,
-      status: next.status,
-    });
-    return next;
+  private applyActiveObservation(attempt: CallAttempt, observation: Extract<CallProviderObservation, { status: "queued" | "in_progress" }>): CallAttempt {
+    const current = this.requireCallAttempt(attempt.id); if (current.providerCallId !== observation.providerCallId) throw new Error(`Provider observation id mismatch for call attempt ${current.id}`); if (current.status !== "queued" && current.status !== "in_progress") return current; if (current.status === observation.status) return current; if (current.status === "in_progress" && observation.status === "queued") return current;
+    const next: CallAttempt = { ...current, status: "in_progress", updatedAt: this.isoNow() }; this.store.callAttempts.set(next.id, next); this.audit("call_attempt_progressed", "provider", "Phone provider reported call in progress", { runId: this.runIdForAttempt(next), callAttemptId: next.id }, { purpose: next.purpose, provider: next.provider, priorStatus: current.status, status: next.status }); return next;
   }
 
   private applyTerminalOutcome(attempt: CallAttempt, outcome: CallOutcome): CallAttempt {
-    const current = this.requireCallAttempt(attempt.id);
-    if (current.status === "completed" || current.status === "failed") return current;
-    if (outcome.status === "ambiguous") return this.finishAttempt(current, "ambiguous");
-    const finished = this.finishAttempt(current, outcome.status);
-    if (current.purpose === "owner_decision") {
-      const escalation = this.requireEscalation(current.correlationId);
-      if (["resolved", "expired", "failed"].includes(escalation.status)) return finished;
-      if (outcome.status === "failed") {
-        const failed = { ...escalation, status: "failed" as const, updatedAt: this.isoNow() };
-        this.store.escalations.set(failed.id, failed);
-        return finished;
-      }
-      const decision: OwnerDecision = { id: randomUUID(), escalationId: escalation.id, answer: outcome.answer ?? "", structured: outcome.structured, createdAt: this.isoNow() };
-      this.store.decisions.set(decision.id, decision);
-      const resolved = { ...escalation, status: "resolved" as const, decisionId: decision.id, updatedAt: this.isoNow() };
-      this.store.escalations.set(resolved.id, resolved);
-      this.audit("owner_decision_recorded", "owner", "Owner decision recorded and blocked scope released", { runId: escalation.runId, escalationId: escalation.id, callAttemptId: current.id }, { scopeId: escalation.scopeId, blocking: escalation.blocking, structured: Boolean(outcome.structured) });
-      return finished;
-    }
-    if (outcome.status === "completed") for (const text of outcome.instructions ?? []) this.enqueueInstruction(current.correlationId, text, "callback", current.id);
-    return finished;
+    const current = this.requireCallAttempt(attempt.id); if (current.status === "completed" || current.status === "failed") return current; if (outcome.status === "ambiguous") return this.finishAttempt(current, "ambiguous"); const finished = this.finishAttempt(current, outcome.status);
+    if (current.purpose === "owner_decision") { const escalation = this.requireEscalation(current.correlationId); if (["resolved", "expired", "failed"].includes(escalation.status)) return finished; if (outcome.status === "failed") { const failed = { ...escalation, status: "failed" as const, updatedAt: this.isoNow() }; this.store.escalations.set(failed.id, failed); return finished; } const decision: OwnerDecision = { id: randomUUID(), escalationId: escalation.id, answer: outcome.answer ?? "", structured: outcome.structured, createdAt: this.isoNow() }; this.store.decisions.set(decision.id, decision); const resolved = { ...escalation, status: "resolved" as const, decisionId: decision.id, updatedAt: this.isoNow() }; this.store.escalations.set(resolved.id, resolved); this.audit("owner_decision_recorded", "owner", "Owner decision recorded and blocked scope released", { runId: escalation.runId, escalationId: escalation.id, callAttemptId: current.id }, { scopeId: escalation.scopeId, blocking: escalation.blocking, structured: Boolean(outcome.structured) }); return finished; }
+    if (outcome.status === "completed") for (const text of outcome.instructions ?? []) this.enqueueInstruction(current.correlationId, text, "callback", current.id); return finished;
   }
 
-  private async rehydrateProviderCallIfSupported(attempt: CallAttempt): Promise<void> {
-    if (!this.calls.rehydrate || !attempt.providerCallId) return;
-    if (attempt.status !== "queued" && attempt.status !== "in_progress") return;
-    await this.calls.rehydrate({
-      providerCallId: attempt.providerCallId,
-      status: attempt.status,
-      idempotencyKey: attempt.idempotencyKey,
-      purpose: attempt.purpose,
-      task: attempt.request.task,
-      metadata: { ...attempt.request.metadata },
-    });
-  }
-
-  private persistCallAttempt(purpose: CallAttempt["purpose"], correlationId: string, task: string, idempotencyKey: string, metadata: Record<string, string>): CallAttempt {
-    const now = this.isoNow();
-    const attempt: CallAttempt = { id: randomUUID(), purpose, correlationId, provider: this.calls.name, status: "queued", idempotencyKey, request: { task, metadata: { ...metadata } }, createdAt: now, updatedAt: now };
-    this.store.callAttempts.set(attempt.id, attempt);
-    this.audit("call_attempt_created", "control_plane", "Phone call attempt persisted before provider side effect", { runId: this.runIdForAttempt(attempt), callAttemptId: attempt.id }, { purpose, provider: attempt.provider });
-    return attempt;
-  }
+  private async rehydrateProviderCallIfSupported(attempt: CallAttempt): Promise<void> { if (!this.calls.rehydrate || !attempt.providerCallId) return; if (attempt.status !== "queued" && attempt.status !== "in_progress") return; await this.calls.rehydrate({ providerCallId: attempt.providerCallId, status: attempt.status, idempotencyKey: attempt.idempotencyKey, purpose: attempt.purpose, task: attempt.request.task, metadata: { ...attempt.request.metadata } }); }
+  private persistCallAttempt(purpose: CallAttempt["purpose"], correlationId: string, task: string, idempotencyKey: string, metadata: Record<string, string>): CallAttempt { const now = this.isoNow(); const attempt: CallAttempt = { id: randomUUID(), purpose, correlationId, provider: this.calls.name, status: "queued", idempotencyKey, request: { task, metadata: { ...metadata } }, createdAt: now, updatedAt: now }; this.store.callAttempts.set(attempt.id, attempt); this.audit("call_attempt_created", "control_plane", "Phone call attempt persisted before provider side effect", { runId: this.runIdForAttempt(attempt), callAttemptId: attempt.id }, { purpose, provider: attempt.provider }); return attempt; }
 
   private async dispatchCallAttempt(attempt: CallAttempt): Promise<CallAttempt> {
+    let started: StartCallResult;
     try {
-      const started = await this.calls.start({ idempotencyKey: attempt.idempotencyKey, purpose: attempt.purpose, task: attempt.request.task, metadata: attempt.request.metadata });
-      const next: CallAttempt = { ...attempt, providerCallId: started.providerCallId, status: started.status, updatedAt: this.isoNow() };
-      return this.store.transaction(() => {
-        this.store.callAttempts.set(next.id, next);
-        this.audit("call_attempt_started", "provider", "Phone provider accepted call attempt", { runId: this.runIdForAttempt(next), callAttemptId: next.id }, { purpose: next.purpose, provider: next.provider, status: next.status });
-        return next;
-      });
+      started = await this.calls.start({ idempotencyKey: attempt.idempotencyKey, purpose: attempt.purpose, task: attempt.request.task, metadata: attempt.request.metadata });
     } catch (error) {
       const ambiguous: CallAttempt = { ...attempt, status: "ambiguous", lastError: errorMessage(error), updatedAt: this.isoNow() };
-      return this.store.transaction(() => {
-        this.store.callAttempts.set(ambiguous.id, ambiguous);
-        this.audit("call_attempt_ambiguous", "control_plane", "Phone call outcome is ambiguous and will be safely reconciled", { runId: this.runIdForAttempt(ambiguous), callAttemptId: ambiguous.id }, { purpose: ambiguous.purpose, provider: ambiguous.provider });
-        return ambiguous;
-      });
+      return this.store.transaction(() => { this.store.callAttempts.set(ambiguous.id, ambiguous); this.audit("call_attempt_ambiguous", "control_plane", "Phone call outcome is ambiguous and will be safely reconciled", { runId: this.runIdForAttempt(ambiguous), callAttemptId: ambiguous.id }, { purpose: ambiguous.purpose, provider: ambiguous.provider }); return ambiguous; });
     }
+    const next: CallAttempt = { ...attempt, providerCallId: started.providerCallId, status: started.status, updatedAt: this.isoNow() };
+    return this.store.transaction(() => { this.store.callAttempts.set(next.id, next); this.audit("call_attempt_started", "provider", "Phone provider accepted call attempt", { runId: this.runIdForAttempt(next), callAttemptId: next.id }, { purpose: next.purpose, provider: next.provider, status: next.status }); return next; });
   }
 
-  private async startCall(purpose: CallAttempt["purpose"], correlationId: string, task: string, idempotencyKey: string, metadata: Record<string, string>): Promise<CallAttempt> {
-    return this.dispatchCallAttempt(this.persistCallAttempt(purpose, correlationId, task, idempotencyKey, metadata));
-  }
-
-  private finishAttempt(attempt: CallAttempt, status: "completed" | "failed" | "ambiguous"): CallAttempt {
-    const next = { ...attempt, status, updatedAt: this.isoNow() };
-    this.store.callAttempts.set(next.id, next);
-    const type = status === "completed" ? "call_attempt_completed" : status === "failed" ? "call_attempt_failed" : "call_attempt_ambiguous";
-    this.audit(type, status === "ambiguous" ? "control_plane" : "provider", `Phone call attempt ${status}`, { runId: this.runIdForAttempt(next), callAttemptId: next.id }, { purpose: next.purpose, provider: next.provider });
-    return next;
-  }
-
-  private audit(type: AuditEvent["type"], actor: AuditActor, summary: string, refs: Pick<AuditEvent, "runId" | "agentId" | "escalationId" | "callAttemptId" | "instructionId"> = {}, details?: Record<string, unknown>): AuditEvent {
-    let sequence = 1;
-    for (const existing of this.store.auditEvents.values()) sequence = Math.max(sequence, existing.sequence + 1);
-    const event: AuditEvent = { id: randomUUID(), sequence, type, actor, summary, ...refs, details, createdAt: this.isoNow() };
-    this.store.auditEvents.set(event.id, event);
-    return event;
-  }
-
-  private runIdForAttempt(attempt: CallAttempt): string | undefined {
-    if (attempt.purpose === "owner_callback") return attempt.correlationId;
-    return this.store.escalations.get(attempt.correlationId)?.runId ?? attempt.request.metadata.runId;
-  }
+  private async startCall(purpose: CallAttempt["purpose"], correlationId: string, task: string, idempotencyKey: string, metadata: Record<string, string>): Promise<CallAttempt> { return this.dispatchCallAttempt(this.persistCallAttempt(purpose, correlationId, task, idempotencyKey, metadata)); }
+  private finishAttempt(attempt: CallAttempt, status: "completed" | "failed" | "ambiguous"): CallAttempt { const next = { ...attempt, status, updatedAt: this.isoNow() }; this.store.callAttempts.set(next.id, next); const type = status === "completed" ? "call_attempt_completed" : status === "failed" ? "call_attempt_failed" : "call_attempt_ambiguous"; this.audit(type, status === "ambiguous" ? "control_plane" : "provider", `Phone call attempt ${status}`, { runId: this.runIdForAttempt(next), callAttemptId: next.id }, { purpose: next.purpose, provider: next.provider }); return next; }
+  private audit(type: AuditEvent["type"], actor: AuditActor, summary: string, refs: Pick<AuditEvent, "runId" | "agentId" | "escalationId" | "callAttemptId" | "instructionId"> = {}, details?: Record<string, unknown>): AuditEvent { let sequence = 1; for (const existing of this.store.auditEvents.values()) sequence = Math.max(sequence, existing.sequence + 1); const event: AuditEvent = { id: randomUUID(), sequence, type, actor, summary, ...refs, details, createdAt: this.isoNow() }; this.store.auditEvents.set(event.id, event); return event; }
+  private runIdForAttempt(attempt: CallAttempt): string | undefined { if (attempt.purpose === "owner_callback") return attempt.correlationId; return this.store.escalations.get(attempt.correlationId)?.runId ?? attempt.request.metadata.runId; }
   private requireAgent(id: string): AgentRegistration { const value = this.store.agents.get(id); if (!value) throw new Error(`Unknown agent: ${id}`); return value; }
   private requireRun(id: string): AgentRun { const value = this.store.runs.get(id); if (!value) throw new Error(`Unknown run: ${id}`); return value; }
   private requireRunningRun(id: string): AgentRun { const run = this.requireRun(id); if (run.status !== "running") throw new Error(`Run ${id} is not running`); return run; }
@@ -417,5 +226,4 @@ export class ControlPlane {
   private requireCallAttempt(id: string): CallAttempt { const value = this.store.callAttempts.get(id); if (!value) throw new Error(`Unknown call attempt: ${id}`); return value; }
   private isoNow(): string { return this.clock.now().toISOString(); }
 }
-
 function errorMessage(error: unknown): string { return error instanceof Error ? error.message : String(error); }
