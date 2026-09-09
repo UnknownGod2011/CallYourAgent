@@ -135,10 +135,14 @@ export class ControlPlane {
       input.prompt ? `Owner request: ${input.prompt}` : "Ask what the owner wants to know or change.",
       "Capture any new owner instructions as concise action items.",
     ].filter(Boolean).join("\n");
-    const attempt = await this.startCall("owner_callback", input.runId, task, `callback:${input.idempotencyKey}`, { runId: input.runId });
-    this.store.callbackByIdempotencyKey.set(input.idempotencyKey, attempt.id);
-    this.audit("owner_callback_requested", "owner", "Owner requested a callback to the running agent", { runId: input.runId, agentId: run.agentId, callAttemptId: attempt.id }, { currentScope: run.currentScope });
-    return attempt;
+    const attempt = this.store.transaction(() => {
+      const reserved = this.persistCallAttempt("owner_callback", input.runId, task, `callback:${input.idempotencyKey}`, { runId: input.runId });
+      this.store.callbackByIdempotencyKey.set(input.idempotencyKey, reserved.id);
+      return reserved;
+    });
+    const started = await this.dispatchCallAttempt(attempt);
+    this.audit("owner_callback_requested", "owner", "Owner requested a callback to the running agent", { runId: input.runId, agentId: run.agentId, callAttemptId: started.id }, { currentScope: run.currentScope });
+    return started;
   }
 
   async reconcileCallback(callAttemptId: string): Promise<CallAttempt> {
@@ -255,10 +259,17 @@ export class ControlPlane {
       return escalation;
     }
     if (escalation.deferredReason) this.audit("call_policy_released", "control_plane", "Deferred owner call became eligible", { runId: escalation.runId, escalationId: escalation.id }, { previousReason: escalation.deferredReason, scopeId: escalation.scopeId });
-    const attempt = await this.startCall("owner_decision", escalation.id, `Decision needed from the agent owner. Question: ${escalation.question}${escalation.context ? `\nContext: ${escalation.context}` : ""}`, `decision:${escalation.idempotencyKey}`, { runId: escalation.runId, escalationId: escalation.id, scopeId: escalation.scopeId });
-    const next: Escalation = { ...escalation, status: "calling", callAttemptId: attempt.id, deferredReason: undefined, updatedAt: this.isoNow() };
-    this.store.escalations.set(next.id, next);
-    return next;
+    const attempt = this.store.transaction(() => {
+      const current = this.requireEscalation(escalation.id);
+      if (current.callAttemptId || current.status !== "pending") return undefined;
+      const reserved = this.persistCallAttempt("owner_decision", current.id, `Decision needed from the agent owner. Question: ${current.question}${current.context ? `\nContext: ${current.context}` : ""}`, `decision:${current.idempotencyKey}`, { runId: current.runId, escalationId: current.id, scopeId: current.scopeId });
+      const calling: Escalation = { ...current, status: "calling", callAttemptId: reserved.id, deferredReason: undefined, updatedAt: this.isoNow() };
+      this.store.escalations.set(calling.id, calling);
+      return reserved;
+    });
+    if (!attempt) return this.requireEscalation(escalation.id);
+    await this.dispatchCallAttempt(attempt);
+    return this.requireEscalation(escalation.id);
   }
 
   private applyActiveObservation(
@@ -321,23 +332,31 @@ export class ControlPlane {
     });
   }
 
-  private async startCall(purpose: CallAttempt["purpose"], correlationId: string, task: string, idempotencyKey: string, metadata: Record<string, string>): Promise<CallAttempt> {
+  private persistCallAttempt(purpose: CallAttempt["purpose"], correlationId: string, task: string, idempotencyKey: string, metadata: Record<string, string>): CallAttempt {
     const now = this.isoNow();
     const attempt: CallAttempt = { id: randomUUID(), purpose, correlationId, provider: this.calls.name, status: "queued", idempotencyKey, request: { task, metadata: { ...metadata } }, createdAt: now, updatedAt: now };
     this.store.callAttempts.set(attempt.id, attempt);
     this.audit("call_attempt_created", "control_plane", "Phone call attempt persisted before provider side effect", { runId: this.runIdForAttempt(attempt), callAttemptId: attempt.id }, { purpose, provider: attempt.provider });
+    return attempt;
+  }
+
+  private async dispatchCallAttempt(attempt: CallAttempt): Promise<CallAttempt> {
     try {
-      const started = await this.calls.start({ idempotencyKey, purpose, task, metadata });
+      const started = await this.calls.start({ idempotencyKey: attempt.idempotencyKey, purpose: attempt.purpose, task: attempt.request.task, metadata: attempt.request.metadata });
       const next: CallAttempt = { ...attempt, providerCallId: started.providerCallId, status: started.status, updatedAt: this.isoNow() };
       this.store.callAttempts.set(next.id, next);
-      this.audit("call_attempt_started", "provider", "Phone provider accepted call attempt", { runId: this.runIdForAttempt(next), callAttemptId: next.id }, { purpose, provider: next.provider, status: next.status });
+      this.audit("call_attempt_started", "provider", "Phone provider accepted call attempt", { runId: this.runIdForAttempt(next), callAttemptId: next.id }, { purpose: next.purpose, provider: next.provider, status: next.status });
       return next;
     } catch (error) {
       const ambiguous: CallAttempt = { ...attempt, status: "ambiguous", lastError: errorMessage(error), updatedAt: this.isoNow() };
       this.store.callAttempts.set(ambiguous.id, ambiguous);
-      this.audit("call_attempt_ambiguous", "control_plane", "Phone call outcome is ambiguous and will be safely reconciled", { runId: this.runIdForAttempt(ambiguous), callAttemptId: ambiguous.id }, { purpose, provider: ambiguous.provider });
+      this.audit("call_attempt_ambiguous", "control_plane", "Phone call outcome is ambiguous and will be safely reconciled", { runId: this.runIdForAttempt(ambiguous), callAttemptId: ambiguous.id }, { purpose: ambiguous.purpose, provider: ambiguous.provider });
       return ambiguous;
     }
+  }
+
+  private async startCall(purpose: CallAttempt["purpose"], correlationId: string, task: string, idempotencyKey: string, metadata: Record<string, string>): Promise<CallAttempt> {
+    return this.dispatchCallAttempt(this.persistCallAttempt(purpose, correlationId, task, idempotencyKey, metadata));
   }
 
   private finishAttempt(attempt: CallAttempt, status: "completed" | "failed" | "ambiguous"): CallAttempt {
