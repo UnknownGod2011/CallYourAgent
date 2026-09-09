@@ -122,7 +122,7 @@ export class ControlPlane {
       this.applyActiveObservation(attempt, observation);
       return this.requireEscalation(escalationId);
     }
-    this.applyTerminalOutcome(attempt, observation);
+    this.store.transaction(() => this.applyTerminalOutcome(attempt, observation));
     return this.requireEscalation(escalationId);
   }
 
@@ -158,7 +158,7 @@ export class ControlPlane {
     if (observation.status === "queued" || observation.status === "in_progress") {
       return this.applyActiveObservation(attempt, observation);
     }
-    return this.applyTerminalOutcome(attempt, observation);
+    return this.store.transaction(() => this.applyTerminalOutcome(attempt, observation));
   }
 
   ingestProviderWebhook(input: ProviderWebhookInput): ProviderWebhookResult {
