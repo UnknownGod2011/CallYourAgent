@@ -21,6 +21,23 @@ class AlwaysAmbiguousProvider extends FakeCallProvider {
   }
 }
 
+class RecoverOnSecondStartProvider extends FakeCallProvider {
+  startCalls = 0;
+  override async start(input: StartCallInput): Promise<StartCallResult> {
+    this.startCalls += 1;
+    if (this.startCalls === 1) throw new Error("connection lost after send");
+    return super.start(input);
+  }
+}
+
+class RehydrateOnlyProvider extends FakeCallProvider {
+  startCalls = 0;
+  override async start(_input: StartCallInput): Promise<StartCallResult> {
+    this.startCalls += 1;
+    throw new Error("start must not be replayed after durable recovery");
+  }
+}
+
 function tempDatabase(prefix: string): { directory: string; databasePath: string } {
   const directory = mkdtempSync(join(tmpdir(), prefix));
   return { directory, databasePath: join(directory, "state.db") };
@@ -114,6 +131,60 @@ test("SQLite restart preserves recovery exhaustion state and its audit event tog
     assert.equal(restartedAttempt.nextAutomaticRecoveryAt, undefined);
     assert.equal(restartedAttempt.automaticRecoveryExhaustedAt, "2026-09-09T04:00:00.000Z");
     assert.equal(restartedControl.listAuditEvents(run.id).filter((event) => event.type === "call_recovery_exhausted").length, 1);
+  } finally {
+    store.close();
+    rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+test("restart after successful ambiguous recovery does not replay provider create when lifecycle bookkeeping was not written", async () => {
+  const { directory, databasePath } = tempDatabase("cya-lifecycle-restart-recovered-");
+  const clock = new FixedClock(new Date("2026-09-09T05:00:00.000Z"));
+  const recoveringProvider = new RecoverOnSecondStartProvider();
+  let store = SqliteControlPlaneStore.open(databasePath);
+
+  try {
+    const control = new ControlPlane(store, recoveringProvider, clock);
+    const agent = control.registerAgent({ name: "restart-recovered", platform: "test", ownerId: "owner-1" });
+    const run = control.startRun(agent.id, "Working", "documentation");
+    const callback = await control.requestOwnerCallback({
+      runId: run.id,
+      idempotencyKey: "restart-recovered-callback",
+    });
+    assert.equal(callback.status, "ambiguous");
+
+    const recovered = await control.recoverCallAttempt(callback.id);
+    assert.equal(recoveringProvider.startCalls, 2);
+    assert.equal(recovered.status, "queued");
+    assert.ok(recovered.providerCallId);
+    assert.equal(recovered.automaticRecoveryAttempts, undefined);
+    const providerCallId = recovered.providerCallId;
+
+    // Simulate process exit at the exact bookkeeping boundary: provider recovery
+    // has been durably persisted, but LifecycleManager has not yet written its
+    // automaticRecoveryAttempts metadata.
+    store.close();
+    store = SqliteControlPlaneStore.open(databasePath);
+    const restartedProvider = new RehydrateOnlyProvider();
+    const restartedControl = new ControlPlane(store, restartedProvider, clock);
+    const lifecycle = new LifecycleManager(restartedControl, store, clock, {
+      maxAutomaticRecoveryAttempts: 2,
+      baseBackoffMs: 1_000,
+      maxBackoffMs: 1_000,
+      maxInProgressCallAgeMs: 60_000,
+    });
+
+    const beforeSweep = restartedControl.getCallAttempt(callback.id);
+    assert.equal(beforeSweep.status, "queued");
+    assert.equal(beforeSweep.providerCallId, providerCallId);
+    assert.equal(beforeSweep.automaticRecoveryAttempts, undefined);
+
+    const sweep = await lifecycle.sweep();
+    assert.equal(sweep.errors.length, 0);
+    assert.equal(sweep.recoveriesAttempted, 0);
+    assert.equal(restartedProvider.startCalls, 0);
+    assert.equal(restartedControl.getCallAttempt(callback.id).providerCallId, providerCallId);
+    assert.equal(restartedControl.getCallAttempt(callback.id).status, "queued");
   } finally {
     store.close();
     rmSync(directory, { recursive: true, force: true });
