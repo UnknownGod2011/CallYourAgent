@@ -124,13 +124,15 @@ export class LifecycleManager {
       stalledAt,
       updatedAt: stalledAt,
     };
-    this.store.callAttempts.set(stalled.id, stalled);
-    this.auditLifecycle("call_attempt_stalled", stalled, "Phone call exceeded its in-progress timeout; automatic polling paused for review", {
-      priorStatus: attempt.status,
-      ageMs,
-      maxInProgressCallAgeMs: this.maxInProgressCallAgeMs,
-      providerCallIdPresent: Boolean(attempt.providerCallId),
-      failClosed: true,
+    this.store.transaction(() => {
+      this.store.callAttempts.set(stalled.id, stalled);
+      this.auditLifecycle("call_attempt_stalled", stalled, "Phone call exceeded its in-progress timeout; automatic polling paused for review", {
+        priorStatus: attempt.status,
+        ageMs,
+        maxInProgressCallAgeMs: this.maxInProgressCallAgeMs,
+        providerCallIdPresent: Boolean(attempt.providerCallId),
+        failClosed: true,
+      });
     });
     result.staleCallsMarked += 1;
     return true;
@@ -187,11 +189,13 @@ export class LifecycleManager {
       nextAutomaticRecoveryAt,
       automaticRecoveryExhaustedAt: undefined,
     };
-    this.store.callAttempts.set(scheduled.id, scheduled);
-    this.auditLifecycle("call_recovery_scheduled", scheduled, "Ambiguous phone-call recovery scheduled with bounded backoff", {
-      attemptNumber,
-      nextAutomaticRecoveryAt,
-      delayMs,
+    this.store.transaction(() => {
+      this.store.callAttempts.set(scheduled.id, scheduled);
+      this.auditLifecycle("call_recovery_scheduled", scheduled, "Ambiguous phone-call recovery scheduled with bounded backoff", {
+        attemptNumber,
+        nextAutomaticRecoveryAt,
+        delayMs,
+      });
     });
     return { readyForReconcile: false };
   }
@@ -205,10 +209,12 @@ export class LifecycleManager {
       nextAutomaticRecoveryAt: undefined,
       updatedAt: exhaustedAt,
     };
-    this.store.callAttempts.set(exhausted.id, exhausted);
-    this.auditLifecycle("call_recovery_exhausted", exhausted, "Automatic phone-call recovery exhausted; manual review required", {
-      automaticRecoveryAttempts: exhausted.automaticRecoveryAttempts ?? 0,
-      failClosed: true,
+    this.store.transaction(() => {
+      this.store.callAttempts.set(exhausted.id, exhausted);
+      this.auditLifecycle("call_recovery_exhausted", exhausted, "Automatic phone-call recovery exhausted; manual review required", {
+        automaticRecoveryAttempts: exhausted.automaticRecoveryAttempts ?? 0,
+        failClosed: true,
+      });
     });
   }
 
