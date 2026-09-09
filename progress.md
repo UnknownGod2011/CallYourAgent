@@ -69,17 +69,19 @@ No production logic was rewritten because the audit did not reproduce a producti
 
 ## Verification performed
 
-Repository-local execution is unavailable in this automation environment because direct network access to GitHub is not available to the container, so verification is being delegated to the repository's GitHub Actions surfaces after opening the PR.
+Direct repository execution in this automation container is unavailable because its network namespace cannot resolve `github.com`, so verification used the repository's GitHub Actions execution surfaces.
 
-The repository provides these authoritative checks:
+The substantive PR #14 head `e020946c68fbd14d58a59795486375398c2bb914` passed every repository verification surface before merge:
 
-- CI: locked install, Node 24 typecheck, build, and the complete Node test suite;
-- Container: production image build/runtime smoke;
-- Compose deployment: authenticated single-instance SQLite deployment plus restart/recovery acceptance, compiled stdio MCP, branch-specific owner-decision release, callback restart, exactly-once steering, and safe-checkpoint acknowledgement.
+- CI run `34410600503` — **success**. Locked dependencies installed under Node 24; the `Typecheck and test` step completed successfully, covering TypeScript validation, build, and the complete Node test suite including both new CALL-E restart regressions.
+- Container run `34410600502` — **success**. The production image built successfully and the fake-provider runtime smoke test passed.
+- Compose deployment run `34410600445` — **success**. The full reference acceptance remained green: generated scoped credentials, Compose validation, fake-provider boot/readiness, credential capability checks, the real compiled stdio MCP against the deployed control plane, SQLite restart during an active branch-blocking owner decision, release of only that blocked branch, owner-requested context-aware callback, SQLite restart during the active callback, exactly-once restored callback steering, another restart after durable steering, and steering consumption only at a safe checkpoint.
 
-`package.json` has no separate lint script and no standalone migration/schema-check command. `npm run check` covers typechecking/build/tests; SQLite tests exercise the durable schema/transaction path.
+`package.json` still has no separate lint script and no standalone migration/schema-check command. The normal repository check path covers typechecking/build/tests, while SQLite tests execute the durable schema/transaction path and Container/Compose cover production runtime/deployment behavior.
 
-Final workflow results for this run must be recorded before merge. No live CALL-E phone call was attempted or claimed.
+PR #14 was squash-merged as `01c08df1e29f187ecb14b6f93a261ba3decd609e`.
+
+No live CALL-E phone call was attempted or claimed.
 
 ## Architecture decisions made this run
 
