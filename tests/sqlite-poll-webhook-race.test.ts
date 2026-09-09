@@ -87,7 +87,7 @@ test("late failed decision poll cannot overwrite a decision completed by webhook
     override async observe(providerCallId: string): Promise<CallProviderObservation> {
       gate.signalObserve();
       await gate.release;
-      return { providerCallId, status: "failed", error: "stale provider poll" };
+      return { providerCallId, status: "failed" };
     }
   }
 
