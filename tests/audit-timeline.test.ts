@@ -56,6 +56,23 @@ test("audit timeline explains asynchronous decision and callback steering withou
   assert.ok(types.includes("owner_instruction_queued"));
   assert.ok(types.includes("owner_instruction_consumed"));
 
+  const callbackEvents = events.filter((event) => event.callAttemptId === callback.id);
+  const callbackCreated = callbackEvents.filter((event) => event.type === "call_attempt_created");
+  const callbackStarted = callbackEvents.filter((event) => event.type === "call_attempt_started");
+  const callbackRequested = callbackEvents.filter((event) => event.type === "owner_callback_requested");
+  const callbackCompleted = callbackEvents.filter((event) => event.type === "call_attempt_completed");
+  const callbackInstructions = callbackEvents.filter((event) => event.type === "owner_instruction_queued");
+  assert.equal(callbackCreated.length, 1);
+  assert.equal(callbackStarted.length, 1);
+  assert.equal(callbackRequested.length, 1);
+  assert.equal(callbackCompleted.length, 1);
+  assert.equal(callbackInstructions.length, 1);
+  assert.ok(callbackCreated[0].sequence < callbackStarted[0].sequence);
+  assert.ok(callbackStarted[0].sequence < callbackRequested[0].sequence);
+  assert.ok(callbackRequested[0].sequence < callbackCompleted[0].sequence);
+  assert.ok(callbackCompleted[0].sequence < callbackInstructions[0].sequence);
+  assert.ok(callbackInstructions[0].instructionId);
+
   const serialized = JSON.stringify(events);
   assert.equal(serialized.includes("Sensitive customer-specific context"), false);
   assert.equal(serialized.includes("Yes, use the new enterprise price"), false);
