@@ -6,13 +6,13 @@ CallYourAgent is a durable Node 24 TypeScript control plane for asynchronous two
 
 The repository includes deterministic fake and production CALL-E providers, SQLite persistence, replayable/idempotent call attempts, polling/webhook convergence, branch-scoped blocking, owner decision persistence, durable per-run instruction queues, exact instruction acknowledgement, quiet hours/call budgets, bounded lifecycle recovery, fail-closed ambiguous/stalled handling, privacy-aware audit history, scoped HTTP authentication, a typed TypeScript client, a real stdio MCP adapter, deterministic end-to-end/demo flows, an operator console, a Claude Code host-acceptance runbook, and a single-instance persistent-volume Compose reference deployment.
 
-This run strengthened the accepted-call timeout guarantee on the actual durable SQLite path. The prior run fixed lifecycle semantics so a `CallAttempt` persisted as local `queued` state before `CallProvider.start()` completes is not considered a provider-accepted call until a durable `providerCallId` exists. This run added a deterministic SQLite-backed concurrency regression proving that transactionally persisted reservation survives a lifecycle sweep past the stale threshold without being mislabeled `stalled`, and that the same durable attempt receives exactly one provider identity/start transition once provider creation completes.
+This run strengthened the accepted-call timeout guarantee through the complete durable lifecycle-worker path. It added deterministic SQLite races for both owner callbacks and blocking owner decisions where a call is already overdue, `LifecycleManager.sweep()` is waiting on provider observation, and a terminal webhook wins before the stale observation returns. The completed terminal state remains authoritative, no false `call_attempt_stalled` transition is emitted, callback steering/owner decisions remain exactly once, and unrelated branch work remains active.
 
 ## Exact repo state inspected this run
 
-The run started from `main` HEAD `18af2d50f7acf411ce1177448492d3c5faaac225`, which recorded the accepted-call stall guard merged in PR #6.
+The run started from `main` HEAD `711b38f9220a731e8d97a131fdf9500342cb2e08`, which recorded the SQLite in-flight provider-create coverage merged in PR #7.
 
-Before any change, inspected the full recursive repository tree (`truncated: false`), current architecture, recent commits, repository issue activity, and pull-request history. There were no open repository issues. PRs #1-#6 were already merged and collectively covered call identity reservation, ambiguous-recovery single-flight, recovery-vs-webhook precedence, stale poll-vs-webhook protection, and the pre-provider-acceptance stale-timeout guard.
+Before any change, inspected the recursive repository tree and current architecture, recent commits, repository issue activity, and pull-request history. There were no open repository issues. PRs #1-#7 were already merged and collectively covered transactional logical call reservation, ambiguous-recovery single-flight, recovery-vs-webhook precedence, stale poll-vs-webhook protection, provider-acceptance stale-timeout semantics, and SQLite coverage for a provider create still in flight past the stale threshold.
 
 Read in full before implementation:
 
@@ -28,75 +28,90 @@ Read in full before implementation:
 - `docs/OPERATOR_CONSOLE.md`
 - `deploy/README.md`
 
-Also inspected the full source/test inventory from the recursive tree and the implementation/verification surfaces relevant to the next action, especially:
+Also inspected the complete source/test inventory from the recursive tree and the implementation/verification surfaces relevant to the next action, especially:
 
-- `src/control-plane.ts`, including `persistCallAttempt`, `dispatchCallAttempt`, active/terminal reconciliation, callback reservation, and escalation call reservation;
-- `tests/lifecycle-inflight-create-stall.test.ts`;
-- `tests/sqlite-call-reservation-concurrency.test.ts`;
+- `src/lifecycle.ts`, including the escalation/callback sweep, provider reconciliation await boundary, accepted-call timeout, recovery bookkeeping, and lifecycle audit writes;
+- `src/store.ts` and `src/sqlite-store.ts`, including the synchronous transaction contract and SQLite-backed maps;
+- `tests/lifecycle.test.ts` for ordinary stale/stalled semantics;
+- `tests/sqlite-poll-webhook-race.test.ts` for the existing direct-reconciliation poll-vs-webhook races;
+- the existing SQLite recovery, reservation, restart, and in-flight-create concurrency tests;
 - `package.json` and the repository verification commands.
 
-The audit explicitly revisited the previous highest-value action: `dispatchCallAttempt()` constructs its post-network write from the pre-await attempt. In the current architecture, however, there is no normal externally reachable transition that can legitimately make a just-reserved call terminal while provider creation is still unresolved: the durable attempt has no `providerCallId`, provider webhook correlation therefore cannot find it yet, ordinary reconciliation returns without polling it, and the accepted-call lifecycle timeout now ignores it. Rather than add a speculative production rewrite without a reproducible competing transition, this run chose the next concrete gap: prove the reservation-vs-provider-accepted distinction through the durable SQLite adapter itself.
+The audit refined the previously stated target. In the supported single Node control-plane process, the final `markStalledIfOverdue()` state mutation itself is synchronous, so a webhook cannot literally interleave inside that small write after the function begins. The real concurrency boundary is earlier: `LifecycleManager.sweep()` awaits provider `observe()` through reconciliation, a terminal webhook can complete the durable call during that await, and the stale provider observation can then return before the sweep reaches its age check. That is the interleaving exercised this run. It is materially different from inventing a fake multi-threaded race the current topology does not support.
 
-Repository mutation and executable verification used the connected GitHub integration and GitHub Actions. A local container clone attempt was also made for independent execution, but the automation container could not resolve `github.com`; this did not block verification because the repository's GitHub Actions checks executed successfully against the PR merge ref.
+Repository mutation and executable verification used the connected GitHub integration and GitHub Actions. A direct local clone attempt from the automation container again failed because that environment could not resolve `github.com`; this did not block repository work because the connected GitHub integration and all repository Actions workflows were available.
 
-The coherent test increment was merged as PR #7, merge commit `8f8d389c3bfda73f295de01b31762f5fb354a094`.
+The coherent increment was merged as PR #8, merge commit `0ee57e6f0f62fe4859813c7fc01bbddc212267c3`.
 
 ## Changes made this run
 
-### Durable SQLite in-flight provider-create regression
+### Durable lifecycle stale-sweep vs terminal-webhook regressions
 
-Added `tests/sqlite-lifecycle-inflight-create-stall.test.ts`.
+Added `tests/sqlite-lifecycle-webhook-stall-race.test.ts` with two deterministic tests using the real `SqliteControlPlaneStore`, a mutable clock, the real `LifecycleManager`, the real `ControlPlane`, and a gated deterministic fake provider.
 
-The test uses the real `SqliteControlPlaneStore`, a mutable clock, and a gated deterministic fake provider. It forces this exact interleaving:
+#### Owner callback path
 
-1. an owner callback is requested while the run continues unrelated `documentation` work;
-2. the callback identity and `CallAttempt` are durably reserved in SQLite before provider I/O completes;
-3. provider `start()` is deliberately held in flight, leaving the durable attempt `queued` with no `providerCallId`;
-4. the callback idempotency mapping already points to that same durable attempt;
-5. the clock advances beyond `maxInProgressCallAgeMs`;
-6. the lifecycle sweep runs while provider creation is still unresolved;
-7. the sweep must report zero stale calls, preserve `queued` state, preserve the missing provider identity, emit no `call_attempt_stalled`, and leave the unrelated `documentation` scope active;
-8. provider creation is released;
-9. the exact same durable attempt receives one provider identity and remains `queued` as a genuinely provider-accepted call;
-10. the audit timeline contains exactly one `call_attempt_started` and one `owner_callback_requested` transition, with only one durable call attempt in the store.
+The first regression forces this exact sequence:
 
-This is not a new demo-only path. It exercises the same control-plane, lifecycle manager, fake provider, SQLite transaction/store, idempotency mapping, and audit machinery used by the reference deployment.
+1. an active run continues unrelated `documentation` work;
+2. the owner requests a callback and the provider accepts it, giving the durable attempt a provider call id;
+3. time advances beyond `maxInProgressCallAgeMs`, so the accepted call is objectively overdue;
+4. `LifecycleManager.sweep()` begins callback reconciliation and is deliberately held inside provider `observe()`;
+5. while the poll is in flight, a terminal webhook completes the original callback and queues one durable owner instruction;
+6. the stale provider poll is released and returns `in_progress`;
+7. the lifecycle sweep resumes and must report zero stale calls;
+8. the call must remain `completed`, exactly one steering instruction must exist, and `documentation` must remain the current unrelated scope;
+9. the audit timeline must contain exactly one `call_attempt_completed`, zero `call_attempt_stalled`, zero stale `call_attempt_progressed`, and exactly one `owner_instruction_queued` for that call.
 
-No production API, MCP, SDK, CALL-E adapter, schema, or UI contract changed in this run.
+#### Blocking owner-decision path
+
+The second regression forces the same lifecycle interleaving for a branch-blocking `release-approval` decision while `documentation` remains the active independent scope:
+
+1. the accepted decision call becomes overdue;
+2. lifecycle polling is held in flight;
+3. a terminal webhook records the owner's durable answer first;
+4. only `release-approval` is released while `documentation` remains the current scope;
+5. the stale provider poll is released and returns `in_progress`;
+6. the lifecycle sweep must record zero stale calls and preserve the terminal call/escalation state;
+7. exactly one `OwnerDecision` remains authoritative;
+8. the audit timeline must contain one completion and one owner-decision event, with zero stalled/progressed events for the stale poll.
+
+No production API, HTTP, MCP, SDK, persistence schema, CALL-E adapter, or UI contract changed. The existing post-provider-I/O durable re-read introduced by earlier poll/webhook hardening was already correct; this run extends evidence to the full background lifecycle worker and its subsequent stale-age check rather than adding speculative production complexity.
 
 ## Verification performed
 
-PR #7 head `8d24825fdd5887ad74d661f9c31255e265f11295` passed every repository verification surface before merge:
+PR #8 head `4cf4a5422060670aa0c646580fc479133f66f485` passed every repository verification surface before merge:
 
-- CI run `34367924253` — **success**. Node `24.20.0`, locked dependency install, TypeScript typecheck, build, and **112/112 tests passed** with 0 failures. The new `SQLite lifecycle does not stall a durable callback reservation while provider create is in flight` regression passed.
-- Container run `34367924075` — **success**. Production image build and deterministic fake-provider runtime smoke remained green.
-- Compose deployment run `34367924491` — **success**. The full reference deployment acceptance remained green, including generated least-privilege credentials, SQLite persistence, fake-provider deployment, authenticated HTTP state, the real compiled stdio MCP process, restart during an active branch-blocking owner-decision call, branch-specific release, restart during an active owner callback, exactly-once callback steering, subsequent persistence restart, and safe-checkpoint instruction acknowledgement.
+- CI run `34374192899` — **success**. Node `24.20.0`, locked dependency install, TypeScript typecheck, build, and **114/114 tests passed** with 0 failures, 0 cancelled, and 0 skipped. Both new SQLite lifecycle/webhook/stall race tests passed.
+- Container run `34374192993` — **success**. The production image build and deterministic fake-provider runtime smoke remained green.
+- Compose deployment run `34374192944` — **success**. The full reference deployment acceptance remained green, preserving the generated least-privilege credential split, durable SQLite state, authenticated HTTP control plane, real compiled stdio MCP process, branch-specific blocking/release, restart during an active decision call, restart during an active owner callback, exactly-once steering, persistence across another restart, and safe-checkpoint instruction acknowledgement.
 
-`package.json` still has no separate lint script and no standalone migration/schema-check command. `npm run check` covers typechecking/build/tests; SQLite tests exercise the durable schema/transaction path; Container and Compose cover the production runtime/deployment path.
+`package.json` still has no separate lint script and no standalone migration/schema-check command. `npm run check` covers typechecking/build/tests; SQLite tests execute the durable schema/transaction path; Container and Compose cover the production runtime/deployment path.
 
-A direct local clone/check attempt from the automation container failed before checkout because DNS could not resolve `github.com`. No local test result is therefore claimed; GitHub Actions is the executable verification evidence for this run.
+The automation container could not independently clone from `github.com` because DNS resolution failed there, so no local test result is claimed. GitHub Actions is the executable verification evidence for this run.
 
 No live CALL-E phone call was attempted or claimed.
 
 ## Architecture decisions made this run
 
-1. The pre-provider `queued` attempt remains an intentional durable reservation state. Persist-before-side-effect is preserved rather than moving persistence after network I/O.
-2. A durable `providerCallId` remains the explicit boundary between local reservation and provider-accepted active call for stale-timeout purposes.
-3. The reservation-vs-accepted invariant is now covered against both the in-memory store and the actual SQLite adapter used by the reference deployment.
-4. Provider I/O remains outside SQLite transactions. The test proves correctness through durable state and lifecycle guards rather than a database lock held across network latency.
-5. Branch-level non-disturbance remains part of the regression: provider creation delay does not freeze the unrelated active scope.
-6. `dispatchCallAttempt()` was audited for a post-await stale-object class, but no currently reachable competing domain transition was found during the pre-acceptance window. No speculative production rewrite was introduced without a reproducible race.
-7. The single-instance SQLite topology remains the supported guarantee. This test does not imply distributed multi-process coordination.
-8. Deterministic fake-provider evidence remains separate from live CALL-E evidence.
+1. Terminal provider evidence remains authoritative over a local age threshold when it arrives while lifecycle polling is in flight.
+2. The meaningful stale-sweep concurrency boundary is the asynchronous provider observation, not an invented concurrent interleaving inside the synchronous stale-state write of the supported single-process topology.
+3. The existing durable re-read after provider I/O is now covered not only by direct `reconcileCallback` / `reconcileEscalation` tests but by the complete `LifecycleManager.sweep()` path followed by its overdue-call check.
+4. The accepted-call timeout remains fail-closed: genuinely overdue calls without terminal evidence still become `stalled`; this run does not weaken that safety behavior.
+5. Branch-scoped semantics remain explicit in the decision regression: terminal resolution releases only the owner-gated scope and does not disturb independent current work.
+6. Provider I/O remains outside SQLite transactions. Correctness is achieved by durable state convergence after I/O rather than holding a DB transaction across a network request.
+7. Exactly-once human state remains the invariant: callback completion queues one instruction; decision completion records one owner decision; a stale observation cannot duplicate either.
+8. The supported guarantee remains one control-plane process backed by SQLite. These tests do not imply distributed multi-process safety.
+9. Deterministic fake-provider evidence remains separate from live CALL-E evidence.
 
 ## CALL-E integration status
 
-- **Fake provider:** deterministic, credential-free, provider-idempotent, restart-rehydratable from durable accepted-call state, and now used with the SQLite adapter to prove a provider-create request may remain in flight past the accepted-call timeout without corrupting local call state or unrelated agent progress.
+- **Fake provider:** deterministic, credential-free, idempotent, restart-rehydratable from durable accepted-call state, and now used with SQLite plus the real lifecycle manager to prove terminal webhook precedence even when an accepted call is already past the local stale threshold while provider polling is in flight.
 - **Production CALL-E adapter:** implemented against the asynchronous Calls API with server-only `CALLE_API_KEY`, stable `Idempotency-Key`, structured result schemas, bounded create/poll requests, persisted correlation, polling/webhook convergence, duplicate prevention, fail-closed ambiguous/stalled handling, and privacy-safe provider errors. This run did not alter or live-test that adapter.
-- **Control-plane concurrency:** callback/decision identities are reserved before provider awaits; ambiguous recovery is single-flight per durable call attempt within the supported process; recovery and ordinary polling re-check durable state after provider I/O; terminal webhook precedence is covered against ambiguous recovery and stale polling; both memory and SQLite now prove that unresolved provider creation cannot be mislabeled as a stale accepted call.
+- **Control-plane concurrency:** callback/decision identities are reserved before provider awaits; ambiguous recovery is single-flight per durable call attempt within the supported process; recovery and ordinary polling re-check durable state after provider I/O; terminal webhook precedence is covered against ambiguous recovery, stale direct reconciliation polls, and now the full overdue lifecycle sweep for both callbacks and decisions.
 - **Shared surfaces:** HTTP, TypeScript SDK, stdio MCP, lifecycle worker, operator/deployment paths continue to share one persistent control-plane state machine rather than adapter-specific behavior.
 - **Claude Code:** the built stdio MCP process is exercised as a real external child in repository/deployment tests and the host-acceptance runbook remains aligned. An actual Claude Code host session still has not been observed and must not be claimed.
-- **Live status:** no authorized real CALL-E phone call has been performed, so live provider, phone, and public-webhook success remain unverified.
+- **Live status:** no authorized real CALL-E phone call has been performed, so live provider connectivity, owner-phone authorization, and public webhook success remain unverified.
 
 ## Current blockers / external prerequisites
 
@@ -110,10 +125,10 @@ The automation container's inability to resolve `github.com` prevented an additi
 
 ## Highest-value next actions
 
-1. Audit the **accepted-call stale sweep vs terminal webhook** boundary on the durable SQLite path. Force an accepted `queued`/`in_progress` attempt to become overdue while terminal webhook evidence races the stale transition; prove terminal completion cannot be overwritten and no false `call_attempt_stalled` event survives when terminal evidence wins.
-2. Continue the `dispatchCallAttempt()` audit only with a reproducible competing transition. If a future/current path can mutate the same durable attempt while provider `start()` is in flight, add a deterministic race first and then re-read durable state before applying the create result; avoid speculative state-machine complexity otherwise.
-3. Add process-restart coverage specifically around the reservation/acceptance boundary if a realistic restart interleaving can be modeled without pretending an in-flight network request survives process death. Recovery must reuse the original logical identity rather than create a replacement call.
-4. Document fake-provider `rehydrate` behavior more explicitly in `docs/ARCHITECTURE.md`, separating deterministic local reconstruction from production CALL-E's remotely durable provider identity.
-5. Continue auditing model-/operator-facing diagnostics and read projections for accidental task-context, owner-phone, bearer-token, webhook-token, callback-prompt, or instruction disclosure.
+1. Audit lifecycle **state + audit atomicity** on SQLite. `markStalledIfOverdue`, recovery scheduling, and recovery exhaustion currently perform a durable call-attempt write and the matching lifecycle audit write as separate map operations. The next strongest reliability increment is to make each local lifecycle transition atomic through `store.transaction()` and add a deterministic rollback/failure regression, while keeping provider I/O outside the transaction.
+2. Add process-restart coverage specifically around the reservation/acceptance boundary if a realistic restart interleaving can be modeled without pretending an in-flight network request survives process death. Recovery must reuse the original logical identity rather than create a replacement call.
+3. Document fake-provider `rehydrate` behavior more explicitly in `docs/ARCHITECTURE.md`, separating deterministic local reconstruction from production CALL-E's remotely durable provider identity.
+4. Continue auditing model-/operator-facing diagnostics and read projections for accidental task-context, owner-phone, bearer-token, webhook-token, callback-prompt, or instruction disclosure.
+5. Continue the `dispatchCallAttempt()` stale-object audit only if a genuinely reachable competing transition is found; do not add speculative state-machine complexity without a reproducible race.
 6. Run the documented acceptance in a genuine Claude Code host when that external prerequisite is available and record only observed host/version behavior.
 7. When the user-controlled CALL-E prerequisites are available, perform one tightly bounded live provider acceptance and record only observed behavior.
