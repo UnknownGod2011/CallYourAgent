@@ -6,13 +6,13 @@ CallYourAgent is a durable Node 24 TypeScript control plane for asynchronous two
 
 The repository includes deterministic fake and production CALL-E providers, SQLite persistence, replayable/idempotent call attempts, polling/webhook convergence, branch-scoped blocking, owner decision persistence, durable per-run instruction queues, exact instruction acknowledgement, quiet hours/call budgets, bounded lifecycle recovery, fail-closed ambiguous/stalled handling, privacy-aware audit history, scoped HTTP authentication, a typed TypeScript client, a real stdio MCP adapter, deterministic end-to-end/demo flows, an operator console, a Claude Code host-acceptance runbook, and a single-instance persistent-volume Compose reference deployment.
 
-This run closed a durability gap in lifecycle bookkeeping. The local lifecycle transitions that mark a call stalled, schedule another bounded ambiguous-call recovery, or mark automatic recovery exhausted now persist the CallAttempt mutation and its matching audit event inside one `store.transaction()` boundary. Provider network I/O remains outside the transaction. Deterministic SQLite failure-injection tests prove that if the matching audit write fails, the CallAttempt mutation rolls back in both SQLite and the in-memory mirror, and the same transition can then succeed exactly once after the injected failure is removed.
+This run audited the previously flagged successful ambiguous-recovery bookkeeping boundary and found no reproducible correctness failure that justified a production rewrite. Once `recoverCallAttempt()` successfully persists a non-ambiguous provider state with a durable `providerCallId`, a restart no longer treats that call as ambiguous, so lifecycle reconciliation rehydrates/polls the existing call rather than replaying provider create merely because `automaticRecoveryAttempts` was not yet updated. A new deterministic SQLite restart regression now proves that exact crash boundary. Two additional restart tests prove that the newly atomic recovery-scheduled and recovery-exhausted state/audit pairs survive close/reopen together.
 
 ## Exact repo state inspected this run
 
-The run started from `main` HEAD `bbe248b8b3ff3746df9bad0ce49afdb54ca6f9b6`, which recorded the accepted-call lifecycle sweep vs terminal-webhook race coverage merged in PR #8.
+The run started from `main` HEAD `205ddf4b3e482e191abdcddd82fdce5559d19c4b`, which recorded the lifecycle state/audit atomicity hardening merged in PR #9.
 
-Before any change, inspected the recursive repository tree and current architecture, recent commits, open repository issues, and open pull requests. There were no open issues or PRs. The recent history showed PRs #1-#8 already merged, covering transactional logical call reservation, ambiguous-recovery single-flight, recovery-vs-webhook precedence, stale poll-vs-webhook protection, provider-acceptance stale-timeout semantics, SQLite coverage for in-flight provider creation, and overdue lifecycle sweep vs terminal webhook races.
+Before any change, inspected the recursive repository tree/current architecture, recent commits, open issues, and open pull requests. There were no open issues or PRs at the start of the run. Recent history showed PRs #1-#9 already merged, covering transactional logical call reservation, ambiguous-recovery single-flight, recovery-vs-webhook precedence, stale poll-vs-webhook protection, provider-acceptance stale-timeout semantics, SQLite in-flight provider-create coverage, overdue lifecycle sweep vs terminal webhook races, and atomic lifecycle state/audit writes.
 
 Read in full before implementation:
 
@@ -28,94 +28,79 @@ Read in full before implementation:
 - `docs/OPERATOR_CONSOLE.md`
 - `deploy/README.md`
 
-Also inspected the complete source/test inventory from the recursive repository tree and the implementation surfaces relevant to the selected increment, especially:
+Also inspected the source/test inventory and the implementation surfaces relevant to the selected increment, especially:
 
-- `src/lifecycle.ts` for stale-call, recovery scheduling, recovery exhaustion, and lifecycle audit writes;
-- `src/store.ts` for the synchronous transaction contract;
-- `src/sqlite-store.ts` for `BEGIN IMMEDIATE`, rollback, and mirror reload semantics;
-- `tests/lifecycle.test.ts` and the existing SQLite lifecycle/concurrency/restart tests;
+- `src/lifecycle.ts` for ambiguous recovery scheduling/exhaustion and successful-recovery bookkeeping;
+- `src/control-plane.ts` for `recoverCallAttempt`, provider rehydration, reconciliation, durable state re-reads, and the no-replay semantics once provider identity is durable;
+- `src/call-provider.ts` for deterministic fake-provider identity and `rehydrate` behavior;
+- `tests/sqlite-lifecycle-atomicity.test.ts` and existing restart/concurrency/provider tests;
 - `package.json` and the repository verification workflow behavior.
 
-The audit confirmed the next reliability gap described by the previous run: `markStalledIfOverdue`, recovery scheduling, and `markRecoveryExhausted` wrote the durable CallAttempt first and the corresponding lifecycle audit event second. On SQLite, a failure between those map operations could leave a state transition without the audit record intended to explain it. This is a local synchronous mutation boundary and therefore can be made atomic without holding a database transaction across provider network I/O.
-
-The coherent implementation was merged as PR #9, merge commit `9f2e99eff19ed9afa058b242ad751421c04795a3`.
+Direct unauthenticated cloning from the automation container was unavailable because that runtime could not resolve `github.com`; repository inspection, writes, PR creation, CI inspection, and merge operations therefore used the authenticated GitHub integration instead. This did not prevent repository progress or external CI verification.
 
 ## Changes made this run
 
-### Atomic lifecycle state + audit transitions
+### Successful ambiguous-recovery crash-boundary regression
 
-Updated `src/lifecycle.ts` so these three local lifecycle transitions execute inside `store.transaction()`:
+Added a deterministic SQLite restart test in `tests/sqlite-lifecycle-restart.test.ts` that reproduces the exact bookkeeping boundary flagged by the prior run:
 
-1. accepted call becomes `stalled` + `call_attempt_stalled` audit event;
-2. ambiguous recovery receives `automaticRecoveryAttempts` / `nextAutomaticRecoveryAt` + `call_recovery_scheduled` audit event;
-3. automatic recovery becomes exhausted + `call_recovery_exhausted` audit event.
+1. a callback create becomes `ambiguous`;
+2. `recoverCallAttempt()` retries the exact same logical create and successfully persists `providerCallId` + `queued` state;
+3. no lifecycle `automaticRecoveryAttempts` bookkeeping is written, simulating process exit at that exact boundary;
+4. SQLite is closed and reopened with a fresh fake-provider process;
+5. lifecycle sweep runs against the restarted control plane.
 
-The transaction boundary begins only after any provider request/recovery await has completed. No CALL-E/fake-provider network or provider I/O occurs inside the SQLite transaction.
+The restarted provider is deliberately implemented so any call to `start()` fails the test. The test proves:
 
-The existing successful-recovery path that updates automatic-recovery bookkeeping without a lifecycle audit event was intentionally left unchanged; there is no matching two-write audit invariant to couple there.
+- the recovered call remains non-ambiguous with the same durable provider id after reopen;
+- lifecycle reports zero new recoveries attempted;
+- provider `start()` is called zero times after restart;
+- fake-provider `rehydrate` plus ordinary observation handles the existing call;
+- missing automatic-recovery bookkeeping at this successful boundary is conservative metadata loss, not duplicate-call risk.
 
-### Deterministic SQLite rollback regressions
+This evidence is why no production state-machine rewrite was added.
 
-Added `tests/sqlite-lifecycle-atomicity.test.ts` with three failure-injection tests against the real `SqliteControlPlaneStore`.
+### Restart durability for recovery scheduling
 
-#### Stalled transition rollback
+Added a SQLite close/reopen regression that creates an ambiguous owner-decision call, lets lifecycle perform one bounded recovery attempt, persists `automaticRecoveryAttempts=1` and `nextAutomaticRecoveryAt` together with one `call_recovery_scheduled` audit event, then reopens the database.
 
-The test creates an accepted callback, advances beyond the stale threshold, injects a failure only when `call_attempt_stalled` is written, and runs the real lifecycle sweep. It proves:
+The test proves the scheduling metadata and matching audit event survive restart together exactly once.
 
-- the sweep reports the injected lifecycle error;
-- the CallAttempt rolls back from the attempted `stalled` mutation to `queued`;
-- `stalledAt` is absent;
-- no `call_attempt_stalled` audit event survives;
-- after restoring normal audit writes, the next sweep marks the same call stalled exactly once and records exactly one audit event.
+### Restart durability for recovery exhaustion
 
-#### Recovery scheduling rollback
+Added a SQLite close/reopen regression with `maxAutomaticRecoveryAttempts=0`. Lifecycle marks the ambiguous call exhausted and writes one `call_recovery_exhausted` audit event; after reopening SQLite, the exact `automaticRecoveryExhaustedAt` marker and the audit event are both still present.
 
-The test uses an always-ambiguous provider, lets lifecycle perform the provider recovery attempt outside the transaction, then injects a failure only for `call_recovery_scheduled`. It proves:
-
-- the call remains durably `ambiguous`;
-- `automaticRecoveryAttempts` and `nextAutomaticRecoveryAt` from the failed local scheduling transition are rolled back;
-- no scheduling audit event survives;
-- after removing the injected failure, the next sweep persists attempt number 1, the expected backoff timestamp, and exactly one scheduling audit event;
-- provider retries continue to reuse the same logical idempotency identity rather than creating a replacement call.
-
-#### Recovery exhaustion rollback
-
-The test configures zero automatic recovery attempts, injects a failure only for `call_recovery_exhausted`, and proves:
-
-- `automaticRecoveryExhaustedAt` does not survive the failed transition;
-- no exhaustion audit event survives;
-- after restoring normal writes, the next sweep persists the exhaustion marker and exactly one exhaustion audit event.
+This complements the prior rollback/failure-injection tests by proving both sides of the invariant: state + audit roll back together on failure and survive restart together on success.
 
 ## Verification performed
 
-PR #9 substantive head `cce1b64f6e801ea47296be6ff90e86a67cca8d94` passed every repository verification surface before merge:
+The substantive PR #10 head `74e772afe29afd160fe7fe4804879823b4db6df3` passed every repository verification surface:
 
-- CI run `34380273943` — **success**. Node `24.20.0`, locked dependency install, TypeScript typecheck, build, and **117/117 tests passed** with 0 failures, 0 cancelled, and 0 skipped. All three new SQLite lifecycle atomicity regressions passed.
-- Container run `34380273996` — **success**. Production image build/runtime smoke remained green.
-- Compose deployment run `34380273947` — **success**. The full reference deployment acceptance remained green, preserving generated least-privilege credentials, durable SQLite state, authenticated HTTP control plane, the real compiled stdio MCP process, branch-specific blocking/release, restart during active decision and callback calls, exactly-once steering, persistence across restart, and safe-checkpoint acknowledgement.
+- CI run `34386979395` — **success**. GitHub Actions used Node `24.20.0`, installed locked dependencies, completed TypeScript typecheck and build, and passed **120/120 tests** with 0 failures, 0 cancelled, and 0 skipped. All three new SQLite restart regressions passed.
+- Container run `34386979320` — **success**. The production image build/runtime smoke remained green.
+- Compose deployment run `34386979303` — **success**. The full reference deployment acceptance remained green, preserving durable SQLite state, generated least-privilege credentials, authenticated HTTP control plane, real compiled stdio MCP process, branch-specific blocking/release, restart during active decision and callback calls, exactly-once steering, persistence across restart, and safe-checkpoint acknowledgement.
 
-`package.json` still has no separate lint script and no standalone migration/schema-check command. `npm run check` covers typechecking/build/tests; SQLite tests execute the durable schema/transaction path; Container and Compose cover the production runtime/deployment path.
+`package.json` still has no separate lint script and no standalone migration/schema-check command. `npm run check` covers typechecking/build/tests; SQLite tests execute the durable schema/transaction path; Container and Compose cover production runtime/deployment behavior.
 
 No live CALL-E phone call was attempted or claimed.
 
 ## Architecture decisions made this run
 
-1. Lifecycle state and the lifecycle audit event that explains that state are one local durability invariant and should commit or roll back together.
-2. Provider network I/O must remain outside the database transaction. Atomicity is applied only to the synchronous post-I/O local mutation boundary.
-3. SQLite rollback must restore both SQL rows and in-memory mirrors; the regression tests intentionally verify state through the same live store after rollback rather than reopening only from disk.
-4. A lifecycle audit failure is treated as a failed local transition rather than silently accepting unaudited state.
-5. Retry after a rolled-back local transition remains safe because the logical call identity and provider idempotency state are unchanged.
-6. The accepted-call stale timeout remains fail-closed, but a failed audit write cannot leave an unexplained `stalled` state behind.
-7. Automatic-recovery scheduling/exhaustion remains bounded and durable, but scheduling metadata is not allowed to outlive its corresponding audit event.
-8. Existing branch/scope semantics, owner-decision exactly-once semantics, callback steering exactly-once semantics, and safe-checkpoint consumption are unchanged.
-9. The supported durable topology remains one control-plane process backed by SQLite; this work does not claim multi-instance/distributed transaction safety.
-10. Fake-provider verification remains separate from live CALL-E evidence.
+1. A successful ambiguous recovery becomes authoritative when the recovered non-ambiguous `CallAttempt` with durable `providerCallId` is persisted. Lifecycle retry bookkeeping is secondary metadata and must not be allowed to force another provider create after restart.
+2. The existing state machine already satisfies that invariant: after recovery succeeds, restart reconciliation follows the accepted-call path and provider rehydration/observation rather than the ambiguous-create replay path.
+3. Do not add a transaction spanning `recoverCallAttempt()` provider I/O and lifecycle bookkeeping. Network I/O must remain outside SQLite transactions.
+4. Missing `automaticRecoveryAttempts` metadata after a crash at the successful-recovery boundary is conservative bookkeeping, not a duplicate-call or retry-budget correctness failure, because the call is no longer ambiguous.
+5. Recovery-scheduled and recovery-exhausted metadata remain paired with their lifecycle audit events as one local durability invariant. New restart tests now complement the prior rollback tests.
+6. Fake-provider `rehydrate` is a deterministic local reconstruction mechanism for process-local fake state. Production CALL-E does not depend on this local reconstruction because its provider identity/state is remotely durable and observed through the Calls API.
+7. Existing branch/scope semantics, owner-decision exactly-once semantics, callback steering exactly-once semantics, and safe-checkpoint consumption are unchanged.
+8. The supported durable topology remains one control-plane process backed by SQLite; this work does not claim multi-instance/distributed safety.
+9. Fake-provider verification remains separate from live CALL-E evidence.
 
 ## CALL-E integration status
 
-- **Fake provider:** deterministic, credential-free, idempotent, restart-rehydratable from durable accepted-call state, and exercised across the full control-plane/lifecycle/SQLite test suite.
+- **Fake provider:** deterministic, credential-free, idempotent, restart-rehydratable from durable accepted-call state, and exercised across the full control-plane/lifecycle/SQLite test suite. This run explicitly proves rehydration after the successful-ambiguous-recovery bookkeeping crash boundary without replaying provider create.
 - **Production CALL-E adapter:** implemented against the asynchronous Calls API with server-only `CALLE_API_KEY`, stable `Idempotency-Key`, structured result schemas, bounded create/poll requests, persisted correlation, polling/webhook convergence, duplicate prevention, fail-closed ambiguous/stalled handling, and privacy-safe provider errors. This run did not alter or live-test that adapter.
-- **Control-plane concurrency/durability:** logical callback/decision call identities are reserved before provider awaits; ambiguous recovery is single-flight per durable call attempt within the supported process; recovery and ordinary polling re-check durable state after provider I/O; terminal webhook precedence is covered against ambiguous recovery, stale direct polls, and overdue lifecycle sweeps; local stalled/schedule/exhausted state is now transactionally coupled to its audit event.
+- **Control-plane concurrency/durability:** logical callback/decision call identities are reserved before provider awaits; ambiguous recovery is single-flight per durable call attempt within the supported process; recovery and ordinary polling re-check durable state after provider I/O; terminal webhook precedence is covered against ambiguous recovery, stale direct polls, and overdue lifecycle sweeps; lifecycle state/audit pairs are atomic and now explicitly restart-tested.
 - **Shared surfaces:** HTTP, TypeScript SDK, stdio MCP, lifecycle worker, operator/deployment paths continue to share one persistent control-plane state machine rather than adapter-specific behavior.
 - **Claude Code:** the built stdio MCP process is exercised as a real external child in repository/deployment tests and the host-acceptance runbook remains aligned. An actual Claude Code host session still has not been observed and must not be claimed.
 - **Live status:** no authorized real CALL-E phone call has been performed, so live provider connectivity, owner-phone authorization, and public webhook success remain unverified.
@@ -130,10 +115,9 @@ Live CALL-E verification still requires user-controlled prerequisites: a valid/a
 
 ## Highest-value next actions
 
-1. Audit the **successful ambiguous-recovery bookkeeping** path. When provider recovery returns a non-ambiguous attempt, lifecycle currently applies automatic-recovery attempt metadata in a separate local write after `recoverCallAttempt()` has already persisted the provider-state transition. Determine whether restart between those writes can produce incorrect retry accounting or merely conservative bookkeeping; add a regression only if a real correctness issue is reproducible.
-2. Add process-restart coverage around recovery scheduling/exhaustion so the newly atomic state+audit pair is explicitly shown to survive close/reopen together.
-3. Document fake-provider `rehydrate` behavior more explicitly in `docs/ARCHITECTURE.md`, separating deterministic local reconstruction from production CALL-E's remotely durable provider identity.
-4. Continue auditing operator/model-facing diagnostics and read projections for accidental task-context, owner-phone, bearer-token, webhook-token, callback-prompt, or instruction disclosure.
-5. Continue the `dispatchCallAttempt()` stale-object audit only if a genuinely reachable competing transition is found; do not add speculative state-machine complexity without a reproducible race.
-6. Run the documented acceptance in a genuine Claude Code host when that external prerequisite is available and record only observed host/version behavior.
-7. When the user-controlled CALL-E prerequisites are available, perform one tightly bounded live provider acceptance and record only observed behavior.
+1. Add explicit documentation to `docs/ARCHITECTURE.md` distinguishing fake-provider `rehydrate` reconstruction from production CALL-E's remotely durable provider state, now that the restart behavior has direct regression evidence.
+2. Continue auditing operator/model-facing diagnostics and read projections for accidental task-context, owner-phone, bearer-token, webhook-token, callback-prompt, or instruction disclosure.
+3. Audit whether the successful recovery state transition and its `call_attempt_started` audit event should be transactionally coupled as a local post-provider-I/O invariant; only change production logic if a failure-injection regression demonstrates meaningful unaudited durable state.
+4. Continue the `dispatchCallAttempt()` stale-object audit only if a genuinely reachable competing transition is found; do not add speculative state-machine complexity without a reproducible race.
+5. Run the documented acceptance in a genuine Claude Code host when that external prerequisite is available and record only observed host/version behavior.
+6. When the user-controlled CALL-E prerequisites are available, perform one tightly bounded live provider acceptance and record only observed behavior.
