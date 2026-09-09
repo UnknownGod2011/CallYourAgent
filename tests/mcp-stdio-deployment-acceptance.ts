@@ -107,6 +107,7 @@ async function main(): Promise<void> {
       "checkpoint",
       "acknowledge_owner_instructions",
       "request_owner_callback",
+      "get_callback_status",
       "get_audit_timeline",
     ]) {
       assert.ok(toolNames.has(required), `missing stdio MCP tool ${required}`);
@@ -291,6 +292,56 @@ async function main(): Promise<void> {
     const callback = callbackRequest.body as { id: string; status: string };
     assert.equal(typeof callback.id, "string");
 
+    const callbackBeforeRestartResult = await client.callTool({
+      name: "get_callback_status",
+      arguments: { callbackId: callback.id },
+    });
+    assert.notEqual(callbackBeforeRestartResult.isError, true);
+    const callbackBeforeRestart = parseToolText(callbackBeforeRestartResult) as {
+      id: string;
+      runId: string;
+      status: string;
+    };
+    assert.equal(callbackBeforeRestart.id, callback.id);
+    assert.equal(callbackBeforeRestart.runId, run.id);
+    assert.ok(
+      callbackBeforeRestart.status === "queued" || callbackBeforeRestart.status === "in_progress",
+      `expected active callback before restart, got ${callbackBeforeRestart.status}`,
+    );
+
+    const callbackRestarted = await restartControlPlaneIfRequested(baseUrl);
+
+    if (callbackRestarted) {
+      const callbackAfterRestartResult = await client.callTool({
+        name: "get_callback_status",
+        arguments: { callbackId: callback.id },
+      });
+      assert.notEqual(callbackAfterRestartResult.isError, true);
+      const callbackAfterRestart = parseToolText(callbackAfterRestartResult) as {
+        id: string;
+        runId: string;
+        status: string;
+      };
+      assert.equal(callbackAfterRestart.id, callback.id);
+      assert.equal(callbackAfterRestart.runId, run.id);
+      assert.ok(
+        callbackAfterRestart.status === "queued" || callbackAfterRestart.status === "in_progress",
+        `expected restored active callback after restart, got ${callbackAfterRestart.status}`,
+      );
+
+      const noPrematureSteeringResult = await client.callTool({
+        name: "checkpoint",
+        arguments: { runId: run.id, consume: false },
+      });
+      assert.notEqual(noPrematureSteeringResult.isError, true);
+      const noPrematureSteering = parseToolText(noPrematureSteeringResult) as {
+        queuedInstructions: unknown[];
+        unresolvedBlockingScopes: string[];
+      };
+      assert.deepEqual(noPrematureSteering.queuedInstructions, []);
+      assert.deepEqual(noPrematureSteering.unresolvedBlockingScopes, []);
+    }
+
     const reconciledCallback = await jsonRequest(
       baseUrl,
       reconcilerToken,
@@ -298,6 +349,28 @@ async function main(): Promise<void> {
       { method: "POST" },
     );
     assert.equal(reconciledCallback.status, 200);
+
+    const repeatedCallbackReconcile = await jsonRequest(
+      baseUrl,
+      reconcilerToken,
+      `/v1/callbacks/${encodeURIComponent(callback.id)}/reconcile`,
+      { method: "POST" },
+    );
+    assert.equal(repeatedCallbackReconcile.status, 200);
+
+    const completedCallbackResult = await client.callTool({
+      name: "get_callback_status",
+      arguments: { callbackId: callback.id },
+    });
+    assert.notEqual(completedCallbackResult.isError, true);
+    const completedCallback = parseToolText(completedCallbackResult) as {
+      id: string;
+      runId: string;
+      status: string;
+    };
+    assert.equal(completedCallback.id, callback.id);
+    assert.equal(completedCallback.runId, run.id);
+    assert.equal(completedCallback.status, "completed");
 
     const steeringRestarted = await restartControlPlaneIfRequested(baseUrl);
 
@@ -357,6 +430,7 @@ async function main(): Promise<void> {
       sequence: number;
       escalationId?: string;
       callAttemptId?: string;
+      instructionId?: string;
     }>;
     const eventTypes = new Set(auditEvents.map((event) => event.type));
     for (const expected of [
@@ -417,20 +491,65 @@ async function main(): Promise<void> {
       "successful restart recovery must not fabricate ambiguous or failed call state",
     );
 
+    const callbackRequested = auditEvents.filter(
+      (event) => event.type === "owner_callback_requested" && event.callAttemptId === callback.id,
+    );
+    assert.equal(callbackRequested.length, 1, "owner callback request must be recorded exactly once");
+    const callbackCallAttemptId = callbackRequested[0]?.callAttemptId;
+    assert.equal(callbackCallAttemptId, callback.id);
+
+    const callbackCallEvents = auditEvents.filter(
+      (event) => event.callAttemptId === callbackCallAttemptId,
+    );
+    const callbackCallCreated = callbackCallEvents.filter(
+      (event) => event.type === "call_attempt_created",
+    );
+    const callbackCallStarted = callbackCallEvents.filter(
+      (event) => event.type === "call_attempt_started",
+    );
+    const callbackCallCompleted = callbackCallEvents.filter(
+      (event) => event.type === "call_attempt_completed",
+    );
+    const callbackInstructionQueued = callbackCallEvents.filter(
+      (event) => event.type === "owner_instruction_queued",
+    );
+    assert.equal(callbackCallCreated.length, 1, "owner callback must have exactly one durable create event");
+    assert.equal(callbackCallStarted.length, 1, "callback restart/provider rehydration must not duplicate provider start");
+    assert.equal(callbackCallCompleted.length, 1, "callback reconciliation retry must not duplicate completion");
+    assert.equal(callbackInstructionQueued.length, 1, "callback reconciliation retry must queue steering exactly once");
+    assert.ok(callbackCallCreated[0]!.sequence < callbackCallStarted[0]!.sequence);
+    assert.ok(callbackCallStarted[0]!.sequence < callbackRequested[0]!.sequence);
+    assert.ok(callbackRequested[0]!.sequence < callbackCallCompleted[0]!.sequence);
+    assert.ok(callbackCallCompleted[0]!.sequence < callbackInstructionQueued[0]!.sequence);
+    assert.equal(callbackInstructionQueued[0]?.instructionId, instruction.id);
     assert.equal(
-      auditEvents.filter((event) => event.type === "owner_instruction_consumed").length,
+      callbackCallEvents.filter(
+        (event) => event.type === "call_attempt_ambiguous" || event.type === "call_attempt_failed",
+      ).length,
+      0,
+      "successful callback restart recovery must not fabricate ambiguous or failed state",
+    );
+
+    const consumedInstructionEvents = auditEvents.filter(
+      (event) => event.type === "owner_instruction_consumed" && event.instructionId === instruction.id,
+    );
+    assert.equal(
+      consumedInstructionEvents.length,
       1,
       "repeated exact acknowledgement must not duplicate consumption audit state",
     );
+    assert.ok(callbackInstructionQueued[0]!.sequence < consumedInstructionEvents[0]!.sequence);
 
     process.stdout.write(JSON.stringify({
       ok: true,
       restartedDuringDecision: decisionRestarted,
+      restartedDuringCallback: callbackRestarted,
       restartedAfterCallback: steeringRestarted,
       runId: run.id,
       escalationId: escalation.id,
       decisionCallAttemptId,
       callbackId: callback.id,
+      callbackCallAttemptId,
       instructionId: instruction.id,
       discoveredTools: listed.tools.length,
     }) + "\n");
