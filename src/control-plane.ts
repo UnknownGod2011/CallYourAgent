@@ -218,11 +218,11 @@ export class ControlPlane {
     }));
   }
 
-  enqueueInstruction(runId: string, text: string, source: OwnerInstruction["source"] = "api"): OwnerInstruction {
+  enqueueInstruction(runId: string, text: string, source: OwnerInstruction["source"] = "api", callAttemptId?: string): OwnerInstruction {
     const run = this.requireRun(runId);
     const instruction: OwnerInstruction = { id: randomUUID(), runId, text, source, status: "queued", createdAt: this.isoNow() };
     this.store.instructions.set(instruction.id, instruction);
-    this.audit("owner_instruction_queued", source === "callback" ? "owner" : "control_plane", "Owner instruction queued for next safe checkpoint", { runId, agentId: run.agentId, instructionId: instruction.id }, { source });
+    this.audit("owner_instruction_queued", source === "callback" ? "owner" : "control_plane", "Owner instruction queued for next safe checkpoint", { runId, agentId: run.agentId, callAttemptId, instructionId: instruction.id }, { source });
     return instruction;
   }
 
@@ -304,7 +304,7 @@ export class ControlPlane {
       this.audit("owner_decision_recorded", "owner", "Owner decision recorded and blocked scope released", { runId: escalation.runId, escalationId: escalation.id, callAttemptId: attempt.id }, { scopeId: escalation.scopeId, blocking: escalation.blocking, structured: Boolean(outcome.structured) });
       return finished;
     }
-    if (outcome.status === "completed") for (const text of outcome.instructions ?? []) this.enqueueInstruction(attempt.correlationId, text, "callback");
+    if (outcome.status === "completed") for (const text of outcome.instructions ?? []) this.enqueueInstruction(attempt.correlationId, text, "callback", attempt.id);
     return finished;
   }
 
