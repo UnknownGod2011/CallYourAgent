@@ -6,11 +6,11 @@ CallYourAgent is a durable Node 24 TypeScript control plane for asynchronous two
 
 The repository currently includes deterministic fake and production CALL-E providers, SQLite persistence, replayable/idempotent call attempts, polling/webhook convergence, branch-scoped blocking, owner decision persistence, durable per-run instruction queues, exact instruction acknowledgement, call policy/quiet hours/budgets, bounded lifecycle recovery, fail-closed ambiguous/stalled handling, privacy-aware audit history, scoped HTTP authentication, a typed TypeScript client, a real stdio MCP adapter, deterministic end-to-end/demo flows, an operator console, a Claude Code real-host acceptance runbook, and a single-instance persistent-volume Compose reference deployment.
 
-This run improved the causal audit model for the owner -> agent callback path. Callback-originated `owner_instruction_queued` events now carry the originating durable `callAttemptId`, allowing a privacy-safe timeline to prove which exact phone interaction produced which exact queued steering item without copying the instruction text or callback transcript into audit metadata. A focused regression now proves one ordered callback chain from call creation through provider acceptance, owner callback request, provider completion, and durable instruction queuing.
+This run strengthened restart safety for the owner -> agent callback path. A new focused SQLite regression now reconstructs both the durable store and the deterministic fake CALL-E provider while an owner callback is still non-terminal, then proves that reconciliation after restart and a deliberate reconciliation retry produce exactly one causal `call_attempt_created -> call_attempt_started -> owner_callback_requested -> call_attempt_completed -> owner_instruction_queued` chain and exactly one queued steering item.
 
 ## Exact repo state inspected this run
 
-The run started from `main` HEAD `e8e9ea18bfaca188a6aa81351cce5a4bfa39ed0d`.
+The run started from `main` HEAD `de7e794741c713174e3f7a836e9ab0ba0d0781de`.
 
 Before making any change, inspected the complete recursive repository tree and current architecture, recent commits, repository issues, and pull requests. There were no open issues or pull requests.
 
@@ -30,76 +30,61 @@ Read in full before implementation:
 
 Also inspected the relevant implementation/test/deployment surfaces, especially:
 
-- `src/control-plane.ts`, including callback creation, reconciliation, terminal outcome application, instruction queuing, and audit references;
-- `tests/audit-timeline.test.ts`;
-- `.github/workflows/compose.yml`, including active callback restart recovery and exactly-once steering checks;
-- the existing decision-call audit restart tests and prior MCP/Compose correlation commits;
-- `package.json` and the available verification commands.
+- `tests/audit-timeline.test.ts`, including callback causal correlation;
+- `tests/fake-provider-rehydration.test.ts`, including process-style provider reconstruction semantics;
+- `tests/sqlite-owner-callback-http-restart.test.ts`;
+- `tests/mcp-stdio-deployment-acceptance.ts`, including the existing exact decision-call audit chain and owner steering flow;
+- the current Compose deployment acceptance and recent callback correlation commits.
 
-The automation runtime could not execute a local repository checkout, so repository reads/writes used the connected GitHub integration and executable verification used the repository's GitHub Actions workflows. No unsupported local execution claim is made.
+The automation runtime could not clone the public repository because outbound DNS/network access from the local container was unavailable. Repository reads/writes therefore used the connected GitHub integration, and executable verification used the repository's GitHub Actions workflows. No unsupported local execution claim is made.
 
 ## Changes made this run
 
-### 1. Correlated callback steering to its durable phone attempt
+### Added restart-recovered callback call-attempt audit regression
 
-Implemented in commit `2bd0e84b331d6da41386d40ccfaec8c36485d9ce` (`feat: correlate callback steering audit to call attempt`).
+Implemented in commit `72b712c289678077d4aa43bcd45c8e253e3d1d03` (`test: prove callback call audit correlation across restart`).
 
-`ControlPlane.enqueueInstruction` now accepts an optional `callAttemptId` solely for causal audit correlation. Normal API-originated instructions remain unchanged. When a completed owner callback produces instructions, `applyTerminalOutcome` passes the callback's durable `CallAttempt.id` into `enqueueInstruction`.
+Added `tests/callback-call-audit-restart.test.ts`.
 
-The resulting `owner_instruction_queued` audit event carries:
+The test:
 
-- `runId`;
-- `agentId`;
-- `callAttemptId` for callback-originated steering;
-- `instructionId`;
-- privacy-safe source metadata.
+1. creates an owner callback against SQLite while the fake provider reports a non-terminal accepted call;
+2. verifies only one create/start/request audit chain exists before restart and no completion/steering has yet been fabricated;
+3. closes the SQLite store and constructs a fresh store plus a fresh fake provider, modeling a process restart rather than reusing provider-local state;
+4. reconciles the original durable callback so provider rehydration uses the existing persisted provider identity and idempotency state;
+5. intentionally reconciles the already-terminal callback a second time;
+6. verifies exactly one queued owner instruction exists at the agent checkpoint;
+7. correlates the entire callback by its durable `callAttemptId` and requires exactly one each of `call_attempt_created`, `call_attempt_started`, `owner_callback_requested`, `call_attempt_completed`, and `owner_instruction_queued`;
+8. requires strict durable sequence ordering across those events;
+9. verifies successful restart recovery did not fabricate `call_attempt_ambiguous` or `call_attempt_failed` state;
+10. verifies callback prompt text and generated steering text are absent from serialized audit metadata.
 
-It still does not copy the owner instruction text, callback transcript, replayable phone task, owner phone number, provider credentials, or webhook capability material into the audit timeline.
-
-This closes an observability gap: operators can now correlate `call_attempt_completed` to the exact instruction(s) produced by that callback rather than relying only on temporal proximity.
-
-### 2. Added callback causal-chain regression coverage
-
-Implemented in commit `f6a3f240abd87d3c3c2b8fb32110f922fdd395e3` (`test: prove callback steering causal audit correlation`).
-
-The audit timeline test now filters by the callback's durable `callAttemptId` and requires exactly one each of:
-
-1. `call_attempt_created`;
-2. `call_attempt_started`;
-3. `owner_callback_requested`;
-4. `call_attempt_completed`;
-5. `owner_instruction_queued`.
-
-It also requires durable audit ordering:
-
-`created < started < callback requested < completed < instruction queued`
-
-and verifies the queued event has an `instructionId`. Existing privacy checks still prove sensitive escalation context, decision answers, and callback instruction text are absent from serialized audit output.
+This complements the existing decision-call restart correlation and callback causal-correlation tests by combining callback causal auditability with actual provider/store reconstruction and terminal retry idempotency.
 
 ## Verification performed
 
-The final substantive state at commit `f6a3f240abd87d3c3c2b8fb32110f922fdd395e3` passed every repository verification surface:
+The substantive commit `72b712c289678077d4aa43bcd45c8e253e3d1d03` passed every repository verification surface:
 
-- CI run `34305512672` / `check` job `102321261734` — **success** on Node 24.20.0. Locked dependency install, TypeScript typecheck, build, and all **99/99 tests** passed with 0 failures. The new callback causal-correlation regression passed.
-- Container run `34305512719` — **success**. Production image build and deterministic fake-provider runtime smoke passed.
-- Compose deployment run `34305512678` — **success**. The full Docker/SQLite/scoped-credential path passed, including generated least-privilege credentials, real built stdio MCP process, decision-call restart recovery, branch-specific release, owner callback restart recovery, exactly-once steering, SQLite restart, safe-checkpoint consumption, and exact acknowledgement.
+- CI run `34309465667` — **success**. The standard Node 24 CI path completed successfully, covering locked dependency install, TypeScript typecheck, build, and the full test suite including the new callback restart regression.
+- Container run `34309465681` — **success**. Production image build and deterministic fake-provider runtime smoke passed.
+- Compose deployment run `34309465650` — **success**. The full Docker/SQLite/scoped-credential deployment acceptance passed, preserving the existing real built stdio MCP path, active decision restart recovery, branch-specific release, owner callback/steering flow, persistent restart behavior, safe-checkpoint consumption, and exact acknowledgement.
 
-`package.json` still has no separate lint script and no standalone migration/schema-check command. The available `npm run check` path covers TypeScript typechecking, build, and tests; Container and Compose cover production-runtime/deployment verification.
+`package.json` still has no separate lint script and no standalone migration/schema-check command. The available CI `check` path covers TypeScript typechecking, build, and tests; Container and Compose cover production-runtime/deployment verification.
 
 No live CALL-E phone call was attempted or claimed.
 
 ## Architecture decisions made this run
 
-1. A callback's durable call attempt and the structured steering it produces should be causally linked in audit state by identifiers, not by timestamps or inferred event adjacency.
-2. `callAttemptId` is privacy-safe operational correlation metadata; owner instruction text and callback transcript content remain excluded from audit events.
-3. Instruction persistence remains independent of phone-transport lifecycle: provider completion creates durable queued state, and consumption still happens only at a later explicit safe checkpoint.
-4. The optional correlation parameter belongs in the shared control-plane instruction path rather than an adapter-specific log, so HTTP, MCP, lifecycle polling, and webhook reconciliation keep one causal model.
-5. Existing idempotency semantics remain unchanged: a retry of an already-terminal callback cannot queue another instruction because terminal call attempts are no-ops in `applyTerminalOutcome`.
-6. Fake-provider success and deployment acceptance are not evidence of live CALL-E success.
+1. Callback restart correctness must be proven by reconstructing both the durable store and provider-local fake state, not merely by closing/reopening SQLite while retaining the same provider object.
+2. Provider rehydration is recovery of the same logical phone interaction, not another provider create. Therefore exactly one `call_attempt_started` event is a key invariant.
+3. Terminal callback reconciliation is idempotent: retrying an already-terminal attempt must not emit another completion or enqueue another owner instruction.
+4. Callback steering remains asynchronous durable state. Recovery completes the phone interaction and queues steering; the agent still observes it only at a later explicit checkpoint.
+5. `callAttemptId` is the causal join key for operational auditability; sensitive callback prompt/instruction content remains excluded from audit metadata.
+6. Deterministic fake-provider recovery evidence is not evidence of live CALL-E success.
 
 ## CALL-E integration status
 
-- **Fake provider:** deterministic, credential-free, restart-stable provider identities, provider-local rehydration for durable accepted `queued`/`in_progress` calls, optional observation-driven completion, duplicate prevention, decision/callback restart recovery, and exact causal audit correlation from callback phone attempt to queued steering.
+- **Fake provider:** deterministic, credential-free, restart-stable provider identities, provider-local rehydration for durable accepted `queued`/`in_progress` calls, optional observation-driven completion, duplicate prevention, decision/callback restart recovery, callback causal audit correlation, and now explicit callback restart + terminal retry exactly-once regression coverage.
 - **Production CALL-E adapter:** implemented against the asynchronous Calls API with server-only `CALLE_API_KEY`, stable idempotency, structured result schemas, bounded create/poll requests, persisted metadata/correlation, polling/webhook convergence, duplicate prevention, fail-closed ambiguous/stalled handling, and privacy-safe non-2xx provider error reporting.
 - **Shared surfaces:** HTTP, TypeScript SDK, stdio MCP, lifecycle worker, and deployment workflows share the same persistent `ControlPlane` semantics rather than adapter-specific state machines.
 - **Claude Code:** a concrete real-host acceptance procedure exists, but an actual Claude Code host run has not yet been observed and must not be claimed.
@@ -115,8 +100,9 @@ Live CALL-E verification still requires user-controlled prerequisites: a valid/a
 
 ## Highest-value next actions
 
-1. Strengthen the full Compose callback acceptance so the restart-recovered owner callback explicitly proves the same `callAttemptId` has exactly one ordered `created -> started -> owner_callback_requested -> completed -> owner_instruction_queued` chain, complementing this focused domain regression and the existing decision-call deployment correlation.
-2. Document fake-provider `rehydrate` behavior more explicitly in `docs/ARCHITECTURE.md`, clearly separating deterministic local provider reconstruction from production CALL-E's remotely durable call identity.
-3. Continue auditing model-/operator-facing diagnostics for accidental task-context, owner-phone, bearer-token, webhook-token, or instruction disclosure.
-4. Run `docs/CLAUDE_CODE_ACCEPTANCE.md` in a genuine Claude Code host when that external prerequisite is available and record only observed results/version details.
-5. When the user-controlled CALL-E prerequisites are available, perform one tightly bounded live provider acceptance and record only observed behavior.
+1. Move this exact callback `callAttemptId` chain assertion into `tests/mcp-stdio-deployment-acceptance.ts` so the full Docker + SQLite + scoped-credential + real stdio MCP path itself proves callback restart recovery and exactly-once steering correlation end-to-end.
+2. In that deployment acceptance, restart the control plane while the owner callback is still non-terminal, then reconcile the restored original callback rather than restarting only after callback completion.
+3. Document fake-provider `rehydrate` behavior more explicitly in `docs/ARCHITECTURE.md`, clearly separating deterministic local provider reconstruction from production CALL-E's remotely durable call identity.
+4. Continue auditing model-/operator-facing diagnostics for accidental task-context, owner-phone, bearer-token, webhook-token, or instruction disclosure.
+5. Run `docs/CLAUDE_CODE_ACCEPTANCE.md` in a genuine Claude Code host when that external prerequisite is available and record only observed results/version details.
+6. When the user-controlled CALL-E prerequisites are available, perform one tightly bounded live provider acceptance and record only observed behavior.
