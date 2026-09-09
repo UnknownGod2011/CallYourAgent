@@ -6,13 +6,13 @@ CallYourAgent is a durable Node 24 TypeScript control plane for asynchronous two
 
 The repository includes deterministic fake and production CALL-E providers, SQLite persistence, replayable/idempotent call attempts, polling/webhook convergence, branch-scoped blocking, owner decision persistence, durable per-run instruction queues, exact instruction acknowledgement, quiet hours/call budgets, bounded lifecycle recovery, fail-closed ambiguous/stalled handling, privacy-aware audit history, scoped HTTP authentication, a typed TypeScript client, a real stdio MCP adapter, deterministic end-to-end/demo flows, an operator console, a Claude Code host-acceptance runbook, and a single-instance persistent-volume Compose reference deployment.
 
-This run closed the remaining known check-before-await duplication windows in both real-world phone-call creation paths. Owner callbacks now reserve their durable local `CallAttempt` and callback idempotency mapping transactionally before awaiting the provider. Owner-decision calls now reserve their durable `CallAttempt` and link the escalation to that attempt as `calling` transactionally before awaiting the provider. Concurrent duplicate requests or reconciliation therefore converge on one local call identity and one audit chain instead of relying only on provider-side idempotency to prevent a second physical phone call.
+This run strengthened the previous call-identity reservation hardening by proving the same concurrent owner-callback retry and owner-decision reconciliation races against the real SQLite transaction adapter. The deterministic tests hold the provider create request open while a competing operation runs, and require SQLite to expose exactly one durable local `CallAttempt`, one logical mapping/link, one provider start, and one audit chain before and after the provider side effect completes.
 
 ## Exact repo state inspected this run
 
-The run started from `main` HEAD `c318800a8c925acb0e8e1c25b7625f819b834055`.
+The run started from `main` HEAD `9e21627c724f864b43b1ed03979a6610cd4348cc`.
 
-Before any change, inspected the complete recursive repository tree and current architecture. The recursive Git tree response was complete (`truncated: false`). Inspected recent commits and searched repository issues and pull requests; there were no open issues and no open PRs before this run.
+Before any change, inspected the complete recursive repository tree and current architecture. The recursive Git tree response was complete (`truncated: false`). Inspected recent commits and repository issues/pull requests; there were no open issues or open PRs at the start of this run.
 
 Read in full before implementation:
 
@@ -28,81 +28,85 @@ Read in full before implementation:
 - `docs/OPERATOR_CONSOLE.md`
 - `deploy/README.md`
 
-Also inspected the relevant implementation and verification surfaces, especially `src/control-plane.ts`, `src/store.ts`, `tests/control-plane.test.ts`, the restart/audit regressions, and `package.json`.
+Also inspected the relevant implementation and verification surfaces, especially:
 
-The automation container still could not clone the repository because DNS resolution for `github.com` failed. Repository mutation therefore used the connected GitHub integration and executable verification used GitHub Actions. No unsupported local-execution claim is made.
+- `src/control-plane.ts`
+- `src/store.ts`
+- `src/sqlite-store.ts`
+- `src/lifecycle.ts`
+- `tests/callback-idempotency-concurrency.test.ts`
+- `tests/decision-idempotency-concurrency.test.ts`
+- `tests/sqlite-store.test.ts`
+- `package.json`
+
+Repository mutation and executable verification used the connected GitHub integration and GitHub Actions. No unsupported local-execution claim is made.
 
 ## Changes made this run
 
-### Transactional owner-callback identity reservation
+### SQLite-backed concurrent call-reservation regressions
 
-Merged implementation: `465d929e21f890c50d83c1aa95ef0baf7fce1316` (`fix: reserve call identities before provider awaits`).
+Implementation/test commit: `142b75a051b7d503e92030f1479a7cb64534fb0b` (`test: prove call reservation races on sqlite`).
 
-`ControlPlane.requestOwnerCallback` previously checked `callbackByIdempotencyKey`, then awaited `startCall`, and only afterward persisted the callback idempotency mapping. Two truly concurrent requests with the same logical callback key could therefore create two local `CallAttempt`/audit records while the first provider call was still being created. The fake/real provider idempotency key protected the physical call, but the control plane could still have duplicate local identities.
+Added `tests/sqlite-call-reservation-concurrency.test.ts` with two deterministic gated-provider tests using a real temporary `SqliteControlPlaneStore`.
 
-The callback path now:
+#### Owner callback retry race
 
-1. checks the existing callback idempotency mapping;
-2. inside one synchronous store transaction, persists the replayable `CallAttempt`, records `call_attempt_created`, and stores the callback idempotency mapping;
-3. only then awaits the provider side effect;
-4. updates that same reserved attempt to started or ambiguous.
+The first callback request is allowed to persist its logical callback identity and enter `CallProvider.start`, then the provider start is deliberately held open. A concurrent retry with the same callback idempotency key must immediately converge on the already-reserved SQLite-backed attempt rather than create another local attempt.
 
-Added `tests/callback-idempotency-concurrency.test.ts` with a gated provider that deliberately holds the first `start()` call open. A concurrent retry must return the already-reserved local attempt immediately. The test proves one provider start, one local call attempt, one callback mapping, one `call_attempt_created`, one `call_attempt_started`, and one `owner_callback_requested` audit event.
+The test requires, while provider creation is still in flight:
 
-### Transactional owner-decision call reservation
+- exactly one provider `start()` invocation;
+- exactly one persisted `CallAttempt`;
+- the callback idempotency mapping to reference that attempt;
+- no `providerCallId` yet on the retry-visible durable attempt;
+- exactly one `call_attempt_created` audit event;
+- zero `call_attempt_started` events before the provider is released.
 
-The audit found the equivalent race in `startEscalationCallIfAllowed`. `requestOwnerDecision` already persisted the escalation/idempotency key before awaiting the provider, but the escalation's `callAttemptId` was not linked until after provider start returned. A concurrent `reconcileEscalation` during that await could therefore see a pending escalation with no attempt and start a second local call attempt using the same provider idempotency key.
+After provider release it requires the original request and retry to share the same attempt id, exactly one accepted provider call, and one each of `call_attempt_created`, `call_attempt_started`, and `owner_callback_requested`.
 
-The decision path now, after policy allows a call:
+#### Owner-decision reconciliation race
 
-1. enters a store transaction;
-2. rereads the current escalation and exits if another path already linked an attempt;
-3. persists exactly one replayable `CallAttempt`;
-4. atomically changes the escalation to `calling` and stores that exact `callAttemptId`;
-5. exits the transaction and only then awaits provider start;
-6. returns the durable escalation linked to the reserved call attempt.
+The first blocking owner-decision request similarly holds provider creation open after SQLite has transactionally persisted the `CallAttempt` and changed the escalation to `calling` with that exact `callAttemptId`.
 
-Added `tests/decision-idempotency-concurrency.test.ts` with the same deterministic gated-provider pattern. While the first provider start is held open, reconciliation sees the already-linked call attempt and cannot create another local attempt or provider start. The affected `release-approval` branch remains blocking while unrelated run work remains independent.
+A concurrent `reconcileEscalation` must observe the already-linked attempt and cannot reserve or dispatch another call. The test requires:
 
-### Shared call-start refactor
+- escalation status `calling` with a durable `callAttemptId` before provider completion;
+- exactly one SQLite-backed call attempt;
+- exactly one provider `start()` invocation even after concurrent reconciliation;
+- the `release-approval` branch to remain the unresolved blocking scope while unrelated run work remains independent;
+- one `call_attempt_created` and zero `call_attempt_started` before provider release;
+- one `escalation_created`, one `call_attempt_created`, and one `call_attempt_started` after completion.
 
-Split the former `startCall` implementation into:
-
-- `persistCallAttempt(...)` — creates replayable durable local identity and `call_attempt_created` audit state without contacting the provider;
-- `dispatchCallAttempt(...)` — performs the external provider start and transitions the same attempt to accepted or ambiguous;
-- `startCall(...)` — retains the existing convenience behavior by composing the two helpers for paths that do not need a larger atomic reservation transaction.
-
-This keeps provider retry/ambiguity semantics unchanged while making the persistence-before-side-effect ordering explicit and reusable.
+No production HTTP, MCP, SDK, state-machine, CALL-E adapter, branch-blocking, or safe-checkpoint behavior was changed in this run. The increment adds durable SQL-path evidence for the existing persistence-before-side-effect invariant.
 
 ## Verification performed
 
-The final PR head `c62ccf5722242a8c0b889b6c16c683982c5a909d` passed every repository verification surface before merge:
+Substantive commit `142b75a051b7d503e92030f1479a7cb64534fb0b` passed every repository verification surface:
 
-- CI run `34327780582` — **success**. Node `24.20.0`; `npm run check` completed TypeScript typecheck, build, and **103/103 tests passed**, 0 failures. Both new deterministic concurrency regressions passed.
-- Container run `34327780593` — **success**. Production image build and fake-provider runtime smoke passed.
-- Compose deployment run `34327780592` — **success**. Generated least-privilege credentials, Compose validation, fake-provider deployment, real built stdio MCP verification, restart while an owner-decision call was active, branch-specific release, owner callback creation, restart while the callback was active, exactly-once restored callback reconciliation/steering, restart after steering became durable, and safe-checkpoint exact acknowledgement all passed.
+- CI run `34332572512` — **success**. Node `24.20.0`; `npm run check` completed TypeScript typecheck, build, and **105/105 tests passed**, 0 failures. Both new SQLite concurrency regressions passed.
+- Container run `34332572539` — **success**. Production image build and fake-provider runtime smoke both passed.
+- Compose deployment run `34332572554` — **success**. Generated least-privilege credentials, Compose validation, fake-provider deployment, real built stdio MCP verification, restart while an owner-decision call was active, branch-specific release, owner callback creation, restart while the callback was active, exactly-once restored callback reconciliation/steering, restart after steering became durable, and safe-checkpoint exact acknowledgement all passed.
 
-The callback-only intermediate state at `ee2fb8b9f40046a3a4f2f2ea76efbe891211101c` had also passed CI (**102/102 tests**), Container, and Compose before the owner-decision race was subsequently fixed in the same coherent PR.
-
-`package.json` has no separate lint script and no standalone migration/schema-check command. The available `check` path covers typechecking, build, and tests; Container and Compose provide the production runtime/deployment checks.
+`package.json` has no separate lint script and no standalone migration/schema-check command. The available `check` path covers typechecking, build, and tests; the SQLite tests exercise schema creation/transaction behavior, while Container and Compose provide production runtime/deployment checks.
 
 No live CALL-E phone call was attempted or claimed.
 
 ## Architecture decisions made this run
 
-1. Provider idempotency is a second line of defense, not the control plane's only concurrency mechanism. One logical call must first have one durable local identity before any external await.
-2. For owner callbacks, `CallAttempt` creation and `callbackByIdempotencyKey` reservation belong in the same transaction so a concurrent duplicate can immediately converge on the reserved attempt.
-3. For owner decisions, `CallAttempt` creation and escalation `pending -> calling` linkage belong in the same transaction so lifecycle reconciliation cannot mistake an in-flight provider create for an escalation that still needs a call.
-4. External provider I/O remains outside the store transaction. The transaction protects durable local intent/identity; provider timeout or transport uncertainty is still represented as `ambiguous` and recovered with the exact original provider idempotency key.
-5. Branch-specific semantics are unchanged: only the affected blocking scope waits for owner judgment; unrelated scopes remain free to continue.
-6. Callback steering and owner decisions remain durable structured state. Steering is still consumed only at explicit safe checkpoints; no path pretends to interrupt in-flight model/token generation.
-7. Deterministic fake-provider evidence remains distinct from live CALL-E evidence.
+1. The persistence-before-provider-side-effect invariant must be proven against the durable SQL adapter, not only against the in-memory reference store.
+2. A callback logical identity is not considered safely reserved until the SQLite transaction contains both the durable `CallAttempt` and callback idempotency mapping before external provider I/O begins.
+3. An owner-decision call is not considered safely reserved until the SQLite transaction contains both the `CallAttempt` and escalation `pending -> calling` linkage before external provider I/O begins.
+4. External provider I/O remains outside the SQLite transaction. The transaction protects local intent/identity; provider uncertainty is still modeled through the existing ambiguous/recovery state machine and the exact original provider idempotency key.
+5. These tests strengthen the supported **single-instance SQLite** topology only. They are not evidence of multi-instance/distributed safety and do not change the documented requirement for a shared transactional store before horizontal scaling.
+6. Provider idempotency remains a second line of defense. The control plane must independently converge concurrent local operations on one durable call identity.
+7. Branch-specific semantics and safe-checkpoint steering are unchanged: only the affected blocking scope waits for owner judgment, and owner instructions are consumed only at explicit work boundaries.
+8. Deterministic fake-provider evidence remains separate from live CALL-E evidence.
 
 ## CALL-E integration status
 
-- **Fake provider:** deterministic, credential-free, provider-idempotent, restart-rehydratable from durable accepted-call state, and now explicitly covered for simultaneous callback retry and decision-reconciliation races before provider start completes.
-- **Production CALL-E adapter:** implemented against the asynchronous Calls API with server-only `CALLE_API_KEY`, stable `Idempotency-Key`, structured result schemas, bounded create/poll requests, persisted correlation, polling/webhook convergence, duplicate prevention, fail-closed ambiguous/stalled handling, and privacy-safe provider errors.
-- **Control-plane concurrency:** callback logical identity and owner-decision call linkage are now reserved before provider awaits in the supported single-instance SQLite topology. Provider idempotency still protects retries/recovery across process/network uncertainty.
+- **Fake provider:** deterministic, credential-free, provider-idempotent, restart-rehydratable from durable accepted-call state, and now used to prove the callback/decision simultaneous-start reservation races through the actual SQLite transaction adapter.
+- **Production CALL-E adapter:** implemented against the asynchronous Calls API with server-only `CALLE_API_KEY`, stable `Idempotency-Key`, structured result schemas, bounded create/poll requests, persisted correlation, polling/webhook convergence, duplicate prevention, fail-closed ambiguous/stalled handling, and privacy-safe provider errors. This run did not alter or live-test the adapter.
+- **Control-plane concurrency:** callback logical identity and owner-decision call linkage are reserved before provider awaits, with matching deterministic evidence for both in-memory and SQLite stores in the supported single-instance topology.
 - **Shared surfaces:** HTTP, TypeScript SDK, stdio MCP, lifecycle worker, and deployment verification continue to share the same persistent control-plane semantics rather than adapter-specific state machines.
 - **Claude Code:** the built stdio MCP process is exercised as a real external child and the documented host acceptance matches the tested lifecycle. An actual Claude Code host session still has not been observed and must not be claimed.
 - **Live status:** no authorized real CALL-E phone call has been performed, so live provider/phone/webhook success remains unverified.
@@ -117,8 +121,8 @@ Live CALL-E verification still requires user-controlled prerequisites: a valid/a
 
 ## Highest-value next actions
 
-1. Add a SQLite-backed concurrency regression for the new reservation semantics so the same simultaneous callback/decision-start race is proven against the durable SQL transaction adapter, not only the deterministic in-memory store.
-2. Re-audit other asynchronous state transitions for check-then-await races, especially ambiguous recovery/reconciliation paths, while preserving the rule that external provider I/O stays outside database transactions.
+1. Re-audit concurrent ambiguous-call recovery. In particular, test whether lifecycle recovery and explicit reconciliation can enter `recoverCallAttempt` for the same ambiguous attempt at the same time before either provider replay returns. If the race is reproducible, add a durable single-flight/claim transition that preserves the rule that provider I/O stays outside the database transaction and that every replay uses the original idempotency key.
+2. Audit concurrent terminal polling/webhook application and lifecycle stale marking for any remaining stale-object overwrites or duplicate audit transitions under asynchronous interleavings, while preserving the existing shared `applyTerminalOutcome` convergence path.
 3. Document fake-provider `rehydrate` behavior more explicitly in `docs/ARCHITECTURE.md`, separating deterministic process-local reconstruction from production CALL-E's remotely durable provider call identity.
 4. Continue auditing model-/operator-facing diagnostics and read projections for accidental task-context, owner-phone, bearer-token, webhook-token, callback-prompt, or instruction disclosure.
 5. Run the documented acceptance in a genuine Claude Code host when that external prerequisite is available and record only observed host/version behavior.
