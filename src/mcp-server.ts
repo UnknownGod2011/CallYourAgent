@@ -17,8 +17,11 @@ function asToolResult(value: unknown) {
 
 function asToolError(error: unknown) {
   const detail = error instanceof CallYourAgentHttpError
-    ? { message: error.message, status: error.status, body: error.body }
-    : { message: error instanceof Error ? error.message : String(error) };
+    ? {
+        message: `CallYourAgent request failed with HTTP ${error.status}`,
+        status: error.status,
+      }
+    : { message: "CallYourAgent request failed" };
   return {
     content: [{ type: "text" as const, text: JSON.stringify(detail) }],
     isError: true,
