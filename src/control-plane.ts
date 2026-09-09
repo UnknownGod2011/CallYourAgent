@@ -35,6 +35,8 @@ export interface ProviderWebhookResult {
 const systemClock: Clock = { now: () => new Date() };
 
 export class ControlPlane {
+  private readonly recoveryInFlight = new Map<string, Promise<CallAttempt>>();
+
   constructor(
     private readonly store: ControlPlaneStore,
     private readonly calls: CallProvider,
@@ -174,17 +176,36 @@ export class ControlPlane {
   }
 
   async recoverCallAttempt(callAttemptId: string): Promise<CallAttempt> {
+    const inFlight = this.recoveryInFlight.get(callAttemptId);
+    if (inFlight) return inFlight;
+
+    const recovery = this.recoverCallAttemptOnce(callAttemptId);
+    this.recoveryInFlight.set(callAttemptId, recovery);
+    try {
+      return await recovery;
+    } finally {
+      if (this.recoveryInFlight.get(callAttemptId) === recovery) {
+        this.recoveryInFlight.delete(callAttemptId);
+      }
+    }
+  }
+
+  private async recoverCallAttemptOnce(callAttemptId: string): Promise<CallAttempt> {
     const attempt = this.requireCallAttempt(callAttemptId);
     if (attempt.status !== "ambiguous") return attempt;
     if (attempt.automaticRecoveryExhaustedAt) return attempt;
     try {
       const started = await this.calls.start({ idempotencyKey: attempt.idempotencyKey, purpose: attempt.purpose, task: attempt.request.task, metadata: attempt.request.metadata });
-      const recovered: CallAttempt = { ...attempt, providerCallId: started.providerCallId, status: started.status, lastError: undefined, updatedAt: this.isoNow() };
+      const current = this.requireCallAttempt(attempt.id);
+      if (current.status !== "ambiguous") return current;
+      const recovered: CallAttempt = { ...current, providerCallId: started.providerCallId, status: started.status, lastError: undefined, updatedAt: this.isoNow() };
       this.store.callAttempts.set(recovered.id, recovered);
       this.audit("call_attempt_started", "control_plane", "Ambiguous call attempt safely recovered", { runId: this.runIdForAttempt(recovered), callAttemptId: recovered.id }, { purpose: recovered.purpose, provider: recovered.provider, recovered: true });
       return recovered;
     } catch (error) {
-      const stillAmbiguous: CallAttempt = { ...attempt, status: "ambiguous", lastError: errorMessage(error), updatedAt: this.isoNow() };
+      const current = this.requireCallAttempt(attempt.id);
+      if (current.status !== "ambiguous") return current;
+      const stillAmbiguous: CallAttempt = { ...current, status: "ambiguous", lastError: errorMessage(error), updatedAt: this.isoNow() };
       this.store.callAttempts.set(stillAmbiguous.id, stillAmbiguous);
       this.audit("call_attempt_ambiguous", "control_plane", "Call recovery remains ambiguous", { runId: this.runIdForAttempt(stillAmbiguous), callAttemptId: stillAmbiguous.id }, { purpose: stillAmbiguous.purpose, provider: stillAmbiguous.provider });
       return stillAmbiguous;
