@@ -147,6 +147,14 @@ export function createCallYourAgentMcpServer(config: McpServerConfig): McpServer
     catch (error) { return asToolError(error); }
   });
 
+  server.registerTool("get_callback_status", {
+    description: "Read privacy-safe lifecycle metadata for an owner callback by its durable callback/call-attempt id. Requires only agent:read and does not expose callback prompt text, transcripts, or queued instruction text.",
+    inputSchema: z.object({ callbackId: z.string().min(1) }),
+  }, async ({ callbackId }) => {
+    try { return asToolResult(await client.getCallback(callbackId)); }
+    catch (error) { return asToolError(error); }
+  });
+
   server.registerTool("reconcile_escalation", {
     description: "Reconcile a pending escalation with the phone provider when webhook delivery is delayed or unavailable.",
     inputSchema: z.object({ escalationId: z.string().min(1) }),
