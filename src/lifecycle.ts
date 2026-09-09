@@ -109,6 +109,10 @@ export class LifecycleManager {
 
   private markStalledIfOverdue(attempt: CallAttempt, result: LifecycleSweepResult): boolean {
     if (attempt.status !== "queued" && attempt.status !== "in_progress") return false;
+    // `queued` is also the local reservation state before CallProvider.start()
+    // returns. The accepted-call timeout begins only once provider identity is
+    // durable; an in-flight create request must not be mislabeled as stalled.
+    if (!attempt.providerCallId) return false;
     const now = this.clock.now();
     const ageMs = now.getTime() - new Date(attempt.updatedAt).getTime();
     if (ageMs < this.maxInProgressCallAgeMs) return false;
