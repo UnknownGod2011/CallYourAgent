@@ -119,7 +119,7 @@ export class ControlPlane {
     await this.rehydrateProviderCallIfSupported(attempt);
     const observation = await this.calls.observe(attempt.providerCallId);
     if (observation.status === "queued" || observation.status === "in_progress") {
-      this.applyActiveObservation(attempt, observation);
+      this.store.transaction(() => this.applyActiveObservation(attempt, observation));
       return this.requireEscalation(escalationId);
     }
     this.store.transaction(() => this.applyTerminalOutcome(attempt, observation));
@@ -156,7 +156,7 @@ export class ControlPlane {
     await this.rehydrateProviderCallIfSupported(attempt);
     const observation = await this.calls.observe(attempt.providerCallId);
     if (observation.status === "queued" || observation.status === "in_progress") {
-      return this.applyActiveObservation(attempt, observation);
+      return this.store.transaction(() => this.applyActiveObservation(attempt, observation));
     }
     return this.store.transaction(() => this.applyTerminalOutcome(attempt, observation));
   }
