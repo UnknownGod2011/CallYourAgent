@@ -13,7 +13,7 @@ import type {
   OwnerDecisionRequest,
   OwnerInstruction,
 } from "./domain.js";
-import type { CallProvider, CallProviderObservation } from "./call-provider.js";
+import type { CallProvider, CallProviderObservation, StartCallResult } from "./call-provider.js";
 import { CallPolicy } from "./call-policy.js";
 import type { ControlPlaneStore } from "./store.js";
 
@@ -194,14 +194,10 @@ export class ControlPlane {
     const attempt = this.requireCallAttempt(callAttemptId);
     if (attempt.status !== "ambiguous") return attempt;
     if (attempt.automaticRecoveryExhaustedAt) return attempt;
+
+    let started: StartCallResult;
     try {
-      const started = await this.calls.start({ idempotencyKey: attempt.idempotencyKey, purpose: attempt.purpose, task: attempt.request.task, metadata: attempt.request.metadata });
-      const current = this.requireCallAttempt(attempt.id);
-      if (current.status !== "ambiguous") return current;
-      const recovered: CallAttempt = { ...current, providerCallId: started.providerCallId, status: started.status, lastError: undefined, updatedAt: this.isoNow() };
-      this.store.callAttempts.set(recovered.id, recovered);
-      this.audit("call_attempt_started", "control_plane", "Ambiguous call attempt safely recovered", { runId: this.runIdForAttempt(recovered), callAttemptId: recovered.id }, { purpose: recovered.purpose, provider: recovered.provider, recovered: true });
-      return recovered;
+      started = await this.calls.start({ idempotencyKey: attempt.idempotencyKey, purpose: attempt.purpose, task: attempt.request.task, metadata: attempt.request.metadata });
     } catch (error) {
       const current = this.requireCallAttempt(attempt.id);
       if (current.status !== "ambiguous") return current;
@@ -210,6 +206,13 @@ export class ControlPlane {
       this.audit("call_attempt_ambiguous", "control_plane", "Call recovery remains ambiguous", { runId: this.runIdForAttempt(stillAmbiguous), callAttemptId: stillAmbiguous.id }, { purpose: stillAmbiguous.purpose, provider: stillAmbiguous.provider });
       return stillAmbiguous;
     }
+
+    const current = this.requireCallAttempt(attempt.id);
+    if (current.status !== "ambiguous") return current;
+    const recovered: CallAttempt = { ...current, providerCallId: started.providerCallId, status: started.status, lastError: undefined, updatedAt: this.isoNow() };
+    this.store.callAttempts.set(recovered.id, recovered);
+    this.audit("call_attempt_started", "control_plane", "Ambiguous call attempt safely recovered", { runId: this.runIdForAttempt(recovered), callAttemptId: recovered.id }, { purpose: recovered.purpose, provider: recovered.provider, recovered: true });
+    return recovered;
   }
 
   checkpoint(runId: string, consume = false): CheckpointResult {
@@ -364,18 +367,20 @@ export class ControlPlane {
   }
 
   private async dispatchCallAttempt(attempt: CallAttempt): Promise<CallAttempt> {
+    let started: StartCallResult;
     try {
-      const started = await this.calls.start({ idempotencyKey: attempt.idempotencyKey, purpose: attempt.purpose, task: attempt.request.task, metadata: attempt.request.metadata });
-      const next: CallAttempt = { ...attempt, providerCallId: started.providerCallId, status: started.status, updatedAt: this.isoNow() };
-      this.store.callAttempts.set(next.id, next);
-      this.audit("call_attempt_started", "provider", "Phone provider accepted call attempt", { runId: this.runIdForAttempt(next), callAttemptId: next.id }, { purpose: next.purpose, provider: next.provider, status: next.status });
-      return next;
+      started = await this.calls.start({ idempotencyKey: attempt.idempotencyKey, purpose: attempt.purpose, task: attempt.request.task, metadata: attempt.request.metadata });
     } catch (error) {
       const ambiguous: CallAttempt = { ...attempt, status: "ambiguous", lastError: errorMessage(error), updatedAt: this.isoNow() };
       this.store.callAttempts.set(ambiguous.id, ambiguous);
       this.audit("call_attempt_ambiguous", "control_plane", "Phone call outcome is ambiguous and will be safely reconciled", { runId: this.runIdForAttempt(ambiguous), callAttemptId: ambiguous.id }, { purpose: ambiguous.purpose, provider: ambiguous.provider });
       return ambiguous;
     }
+
+    const next: CallAttempt = { ...attempt, providerCallId: started.providerCallId, status: started.status, updatedAt: this.isoNow() };
+    this.store.callAttempts.set(next.id, next);
+    this.audit("call_attempt_started", "provider", "Phone provider accepted call attempt", { runId: this.runIdForAttempt(next), callAttemptId: next.id }, { purpose: next.purpose, provider: next.provider, status: next.status });
+    return next;
   }
 
   private async startCall(purpose: CallAttempt["purpose"], correlationId: string, task: string, idempotencyKey: string, metadata: Record<string, string>): Promise<CallAttempt> {
