@@ -36,7 +36,15 @@ test("MCP tools drive the real HTTP control-plane contract", async () => {
 
     const listed = await mcpClient.listTools();
     const names = listed.tools.map((tool) => tool.name);
-    for (const required of ["register_agent", "start_run", "report_status", "request_owner_decision", "checkpoint", "request_owner_callback"]) {
+    for (const required of [
+      "register_agent",
+      "start_run",
+      "report_status",
+      "request_owner_decision",
+      "checkpoint",
+      "request_owner_callback",
+      "get_callback_status",
+    ]) {
       assert.ok(names.includes(required), `missing MCP tool ${required}`);
     }
 
@@ -73,6 +81,33 @@ test("MCP tools drive the real HTTP control-plane contract", async () => {
     });
     const checkpoint = parseTextResult(checkpointResult);
     assert.deepEqual(checkpoint.unresolvedBlockingScopes, []);
+
+    const callbackResult = await mcpClient.callTool({
+      name: "request_owner_callback",
+      arguments: {
+        runId: run.id,
+        idempotencyKey: "mcp-callback-status-1",
+        prompt: "Give me current progress.",
+      },
+    });
+    assert.notEqual(callbackResult.isError, true);
+    const callback = parseTextResult(callbackResult);
+    assert.equal(typeof callback.id, "string");
+
+    const callbackStatusResult = await mcpClient.callTool({
+      name: "get_callback_status",
+      arguments: { callbackId: callback.id },
+    });
+    assert.notEqual(callbackStatusResult.isError, true);
+    const callbackStatus = parseTextResult(callbackStatusResult);
+    assert.equal(callbackStatus.id, callback.id);
+    assert.ok(
+      callbackStatus.status === "queued" || callbackStatus.status === "in_progress",
+      `expected active callback status, got ${String(callbackStatus.status)}`,
+    );
+    assert.equal("prompt" in callbackStatus, false);
+    assert.equal("task" in callbackStatus, false);
+    assert.equal("metadata" in callbackStatus, false);
   } finally {
     await mcpClient.close();
     await mcpServer.close();
