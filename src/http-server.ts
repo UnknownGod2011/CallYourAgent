@@ -236,11 +236,29 @@ export function createControlPlaneHttpServer(controlPlane: ControlPlane, options
 
       return json(res, 404, { error: "not_found" });
     } catch (error) {
-      const message = error instanceof Error ? error.message : String(error);
-      const status = message.startsWith("Unknown ") ? 404 : 400;
-      return json(res, status, { error: message });
+      const response = publicHttpError(error);
+      return json(res, response.status, { error: response.error });
     }
   });
+}
+
+function publicHttpError(error: unknown): { status: number; error: string } {
+  const message = error instanceof Error ? error.message : "";
+  if (message.startsWith("Unknown ")) return { status: 404, error: "not_found" };
+  if (message === "request_body_too_large") return { status: 413, error: message };
+  if (message === "Run is not running" || /^Run .+ is not running$/.test(message)) return { status: 409, error: "run_not_running" };
+  if (
+    message === "invalid_json"
+    || message === "JSON object body required"
+    || message === "Call attempt is not an owner callback"
+    || message === "Provider webhook event id is required"
+    || message === "Provider call id is required"
+    || message === "Audit event limit must be an integer from 1 to 500"
+    || /^[A-Za-z][A-Za-z0-9]* is required$/.test(message)
+    || /^[A-Za-z][A-Za-z0-9]* must be boolean$/.test(message)
+    || /^[A-Za-z][A-Za-z0-9]* must be an array of non-empty strings$/.test(message)
+  ) return { status: 400, error: message };
+  return { status: 500, error: "internal_error" };
 }
 
 function normalizeCredentials(options: HttpServerOptions): ApiCredential[] {
