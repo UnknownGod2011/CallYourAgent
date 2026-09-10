@@ -477,14 +477,3 @@ function html(res: ServerResponse, status: number, body: string): void {
   });
   res.end(body);
 }
-function html(res: ServerResponse, status: number, body: string): void {
-  res.writeHead(status, {
-    "content-type": "text/html; charset=utf-8",
-    "content-length": Buffer.byteLength(body),
-    "cache-control": "no-store",
-    "content-security-policy": "default-src 'none'; style-src 'unsafe-inline'; script-src 'unsafe-inline'; connect-src 'self'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'",
-    "referrer-policy": "no-referrer",
-    "x-content-type-options": "nosniff",
-  });
-  res.end(body);
-}
