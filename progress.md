@@ -6,13 +6,13 @@ CallYourAgent is a durable Node 24 TypeScript control plane for asynchronous two
 
 The repository includes deterministic fake and production CALL-E providers, SQLite persistence, replayable/idempotent call attempts, polling/webhook convergence, branch-scoped blocking, owner decision persistence, durable per-run instruction queues with exact acknowledgement, quiet hours/call budgets, bounded lifecycle recovery, fail-closed ambiguous/stalled handling, privacy-aware audit history, scoped HTTP authentication, a typed TypeScript client, a real stdio MCP adapter, deterministic end-to-end/demo flows, an operator console, a Claude Code host-acceptance runbook, and a single-instance persistent-volume Compose reference deployment.
 
-This run continued the HTTP transport-validation audit. PR #37 hardened `GET /v1/runs/:runId/audit?limit=...` so query cardinality and numeric syntax are explicit rather than relying on first-value-wins `URLSearchParams.get()` and JavaScript numeric coercion.
+This run continued the HTTP transport-validation audit. PR #38 hardened every dynamic run/escalation/callback path identifier so malformed percent-encoding becomes a stable privacy-safe client error rather than falling into the generic internal-error path.
 
 ## Exact repo state inspected this run
 
-The run started from `main` HEAD `7b2341d80d2f66eb3dccb193e9e1acfc64a0665c`, the progress handoff after PR #36 (`15d107eb1b620195aad14dcf3e9feb2cd1dec4b7`).
+The run started from `main` HEAD `f22e831aa1c974adad86c2664957ace417acfdc9`, the progress handoff after PR #37 (`08628aac99897b2cc8f0591f23b9656c3ecc1adf`).
 
-Before any change, inspected the complete recursive repository tree and current source/test inventory, recent commits, current issue state, and recent pull requests. There were no open issues and no pre-existing open pull requests.
+Before any change, inspected the complete recursive repository tree and current source/test inventory, recent commits, current issue state, and recent pull requests. The recursive Git tree was complete (`truncated: false`). There were no open issues and no pre-existing open pull requests.
 
 Read in full during the mandatory pre-implementation audit:
 
@@ -29,38 +29,37 @@ Read in full during the mandatory pre-implementation audit:
 - `docs/PROVIDER_RESTART_SEMANTICS.md`
 - `deploy/README.md`
 
-Also inspected `src/http-server.ts`, `tests/http-server.test.ts`, the complete source/test inventory, and the existing audit-limit domain error contract before modifying repository content.
+Also inspected `src/http-server.ts`, the current HTTP validation tests, recent validation/idempotency/concurrency work, and all dynamic route forms before modifying repository content.
 
-The inspection confirmed that the audit endpoint used `url.searchParams.get("limit")` followed by `Number(rawLimit)`. That allowed duplicate query parameters to silently use the first value and accepted coercive forms such as empty strings/whitespace, scientific notation, signed input, and padded decimals before the domain limit check. This was a transport ambiguity rather than a control-plane state-machine problem.
+The inspection confirmed that dynamic HTTP identifiers were decoded with raw `decodeURIComponent(...)`. Malformed percent sequences therefore raised a URI decoding exception that reached the generic `500 internal_error` boundary. It also confirmed that reconciliation rate-limit budget was consumed before those identifiers were decoded.
 
-The automation container's direct GitHub DNS path remains unreliable for a local clone, so GitHub Actions was used as the authoritative executable verification path.
+The automation container's direct GitHub DNS path remained unreliable for a local clone, so GitHub Actions was used as the authoritative executable verification path.
 
 ## Changes made this run
 
-PR #37, `Harden audit limit query validation`, changed `src/http-server.ts` and added `tests/http-audit-limit-validation.test.ts`.
+PR #38, `Harden malformed path identifier handling`, changed `src/http-server.ts` and added `tests/http-path-identifier-validation.test.ts`.
 
-The HTTP audit boundary now:
+The HTTP path boundary now:
 
-1. uses `URLSearchParams.getAll("limit")` so cardinality is explicit;
-2. preserves an omitted `limit` as the existing default of `100`;
-3. accepts exactly one canonical unsigned decimal integer from `1` through `500`;
-4. rejects duplicate `limit` parameters instead of silently selecting one;
-5. rejects empty/whitespace values, zero/negative values, decimal/scientific notation, explicit plus signs, padded forms such as `050`, and values above `500`;
-6. returns the existing stable privacy-safe HTTP 400 error, `Audit event limit must be an integer from 1 to 500`;
-7. performs validation before run lookup/domain work, making malformed client requests distinguishable from a valid request for an unknown run;
-8. leaves control-plane audit ordering/storage, branch-scoped blocking, instruction checkpoints, MCP/SDK behavior, and fake/live CALL-E orchestration unchanged.
+1. routes all dynamic run, escalation, and callback identifiers through one `pathIdentifier(...)` decoder;
+2. converts malformed percent-encoding into stable HTTP `400 {"error":"invalid_path_identifier"}`;
+3. never reflects the malformed/attacker-controlled identifier in the response;
+4. covers run read, overview, audit, heartbeat, checkpoint, instruction acknowledgement, escalation lifecycle/read/reconcile, and callback read/reconcile routes;
+5. decodes reconciliation identifiers before consuming the reconciliation rate-limit bucket, so malformed requests do not burn a legitimate reconciliation slot;
+6. preserves normal decoded identifiers and all existing domain/not-found behavior;
+7. leaves branch-scoped blocking, owner decisions, callback steering, MCP/SDK behavior, fake/live providers, and safe-checkpoint semantics unchanged.
 
-The new deterministic HTTP regressions prove duplicate and coercive forms fail with 400 before domain lookup, while omission plus canonical boundary values `1`, `100`, and `500` pass transport validation and reach the normal unknown-run 404 domain path.
+The deterministic regressions exercise malformed `%` encoding across all 11 dynamic identifier route forms and verify the exact privacy-safe 400 response. A separate regression sets the reconciliation budget to one request, proves a malformed path does not consume it, proves the next valid-but-unknown reconcile request reaches the domain 404 path, and proves a subsequent request then receives the expected 429.
 
-PR #37 was squash-merged into `main` as `08628aac99897b2cc8f0591f23b9656c3ecc1adf`.
+PR #38 was squash-merged into `main` as `d46164c53659757cb2dc163713741bd554cc597d`.
 
 ## Verification performed
 
-Authoritative final verification ran against PR head `0e39535a1a251517a219a60f002cb0c0192b3647`:
+Authoritative final verification ran against PR head `a5a0ef43e4d46ec3f4f561b5ed61b71b8d91cdd4`:
 
-- CI run `34530184912` — **success** on Node 24.20.0. Locked dependency installation succeeded, TypeScript typecheck succeeded, build succeeded, and **185/185 tests passed**, 0 failures. All three new audit-limit regressions passed.
-- Container run `34530184892` — **success**. The production image/runtime path remained green.
-- Compose deployment run `34530184818` — **success**. The production-style durable SQLite + scoped credentials + compiled MCP + restart + branch-scoped decision + owner callback + exactly-once steering + safe-checkpoint acceptance path remained green.
+- CI run `34535444730` — **success** on Node 24.20.0. Locked dependency installation succeeded, TypeScript typecheck succeeded, build succeeded, and **187/187 tests passed**, 0 failures. Both new path-identifier regressions passed.
+- Container run `34535444818` — **success**. The production image/runtime path remained green.
+- Compose deployment run `34535444970` — **success**. Scoped credential generation and capability checks passed; the compiled stdio MCP adapter worked against the deployed control plane; a durable branch-blocking owner decision survived restart and released only its affected branch; a context-aware owner callback survived restart; reconciliation queued steering exactly once; another restart preserved that steering; and the instruction was consumed only at an explicit safe checkpoint.
 
 `package.json` still has no separate lint script and no standalone migration/schema-check command. `npm run check` covers typecheck, build, and tests; SQLite regressions exercise schema/transaction durability, and Container/Compose cover packaged runtime/deployment behavior.
 
@@ -68,11 +67,11 @@ No live CALL-E phone call was attempted or claimed.
 
 ## Architecture decisions made this run
 
-1. Query parameters that alter data cardinality are part of the typed transport contract and should not rely on JavaScript coercion.
-2. Duplicate singleton query parameters fail closed. First-value-wins behavior is ambiguous across clients/proxies and can hide integration mistakes.
-3. Audit limit syntax is intentionally canonical decimal rather than accepting multiple textual representations of the same number; this keeps HTTP behavior deterministic while preserving the documented numeric range.
-4. Omission remains a documented default (`100`), so existing SDK/MCP/operator calls without a limit are unchanged.
-5. Malformed client-correctable input receives a stable privacy-safe 400, while valid requests continue into the existing domain/not-found behavior and unexpected failures remain behind `500 internal_error`.
+1. Path decoding is part of the typed HTTP transport boundary; malformed encoding is a client-correctable request error, not an internal control-plane failure.
+2. Dynamic identifiers use one decoder so route behavior cannot drift between run, escalation, callback, checkpoint, audit, and reconciliation surfaces.
+3. Privacy-safe validation errors use a stable code and never echo hostile path material.
+4. Transport-invalid requests should fail before scarce/side-effect-adjacent infrastructure controls such as reconciliation rate-limit budget are consumed.
+5. Valid identifiers still flow to the existing domain layer unchanged, and unexpected failures remain protected by the fail-closed `500 internal_error` boundary.
 
 ## CALL-E integration status
 
@@ -97,10 +96,10 @@ The SQLite reference topology remains intentionally single-instance. Multi-insta
 
 ## Highest-value next actions
 
-1. Continue the HTTP boundary audit with malformed percent-encoding in path identifiers: `decodeURIComponent(...)` failures currently fall through the generic exception path and should become a stable client-correctable 400 without echoing attacker-controlled path material.
-2. Review remaining singleton query/cardinality assumptions and reject ambiguous duplicate parameters before domain work where applicable.
-3. Review live-runtime environment validation ordering for settings that can still fail only after durable storage opens, moving safe pure validation earlier where appropriate.
-4. Continue least-privilege review of owner/operator/reconciler surfaces without widening browser or normal-agent credentials.
-5. Add explicit store-contract tests before introducing any Postgres/multi-instance deployment so atomic idempotency winner-selection remains a required adapter property.
+1. Continue the HTTP boundary audit for remaining singleton query/cardinality assumptions and unexpected query parameters, rejecting ambiguous transport forms before domain work where appropriate.
+2. Review runtime environment validation ordering for settings that can still fail only after durable storage opens, moving safe pure validation earlier where appropriate.
+3. Continue least-privilege review of owner/operator/reconciler surfaces without widening browser or normal-agent credentials.
+4. Add explicit store-contract tests before introducing any Postgres/multi-instance deployment so atomic idempotency winner-selection remains a required adapter property.
+5. Review identifier canonicalization expectations only where needed for interoperability; do not normalize valid opaque IDs in ways that could alter domain identity.
 6. Run the documented acceptance in a genuine Claude Code host when that external prerequisite is available and record only observed host/version behavior.
 7. When the user-controlled CALL-E prerequisites are available, perform one tightly bounded live provider acceptance and record only observed behavior.
