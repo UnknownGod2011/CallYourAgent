@@ -6,13 +6,13 @@ CallYourAgent is a durable Node 24 TypeScript control plane for asynchronous two
 
 The repository includes deterministic fake and production CALL-E providers, SQLite persistence, replayable/idempotent call attempts, polling/webhook convergence, branch-scoped blocking, owner decision persistence, durable per-run instruction queues, exact instruction acknowledgement, quiet hours/call budgets, bounded lifecycle recovery, fail-closed ambiguous/stalled handling, privacy-aware audit history, scoped HTTP authentication, a typed TypeScript client, a real stdio MCP adapter, deterministic end-to-end/demo flows, an operator console, a Claude Code host-acceptance runbook, and a single-instance persistent-volume Compose reference deployment.
 
-This run continued the privacy/security audit and found a concrete least-privilege gap on successful reconciliation responses. The standard `reconciler` role intentionally has only `calls:reconcile`, but the HTTP endpoints returned the full internal `Escalation` or replayable `CallAttempt` after a successful reconcile. That made mutation authority accidentally double as read authority over escalation question/context/idempotency and callback phone-task/provider/recovery state. PR #22 now keeps reconciliation authority intact while returning only the existing privacy-safe lifecycle projections.
+This run continued the privacy/security audit after reconciliation-response hardening and found a concrete remaining production-provider leak path: CALL-E HTTP error responses were already sanitized, but an arbitrary exception thrown by the fetch/network transport itself propagated through `CalleCallProvider` unchanged. Because ambiguous create failures are intentionally persisted as `CallAttempt.lastError`, a transport stack, proxy, injected fetch implementation, or future networking layer could accidentally place secret-bearing exception text into durable control-plane state. PR #23 now sanitizes that transport boundary before the error can reach persistent recovery state while preserving timeout classification and ambiguous-create behavior.
 
 ## Exact repo state inspected this run
 
-The run started from `main` HEAD `421ee8588ef323ca0b507f8c92ed06f696a40c65`, immediately after PR #21 and its progress handoff documenting HTTP exception privacy hardening.
+The run started from `main` HEAD `f4b6044ba2def749180be44de566f37bc3774157`, immediately after PR #22 and its progress handoff documenting successful reconciliation-response privacy hardening.
 
-Before changing code, inspected the complete recursive repository tree through GitHub's recursive tree API, covering the root, `.github/workflows`, `deploy`, all `docs`, all `src`, and all `tests` surfaces. Inspected the recent commit chain through PR #21 and verified there were no open issues and no open pull requests before this run.
+Before changing code, inspected the complete recursive repository tree through GitHub's recursive tree API, covering the root, `.github/workflows`, `deploy`, every file under `docs`, all `src` implementation surfaces, and the full `tests` suite. Inspected the recent commit chain through PR #22 and verified there were no open issues and no open pull requests before this run.
 
 Read in full before changing code:
 
@@ -29,39 +29,39 @@ Read in full before changing code:
 - `docs/PROVIDER_RESTART_SEMANTICS.md`
 - `deploy/README.md`
 
-Also inspected the relevant implementation and test surfaces, especially `src/control-plane.ts`, `src/http-server.ts`, `src/client.ts`, `src/mcp-server.ts`, `src/callback-view.ts`, `src/escalation-view.ts`, `src/run-overview.ts`, and existing privacy/audit/provider tests.
+Also inspected the relevant implementation/test surfaces, especially `src/control-plane.ts`, `src/calle-provider.ts`, `src/store.ts`, and the existing CALL-E/provider/privacy tests including `tests/calle-provider.test.ts`.
 
-The audit confirmed the durable internal `CallAttempt` must keep exact replayable task, metadata, idempotency, provider correlation, and bounded-recovery state for safe ambiguous-create/restart handling. It also confirmed that ordinary callback reads, escalation lifecycle reads, run overviews, audit events, and MCP error handling already project less-sensitive data. The concrete remaining gap was successful `calls:reconcile` HTTP responses: `POST /v1/escalations/:id/reconcile` returned the full escalation and `POST /v1/callbacks/:id/reconcile` returned the full internal call attempt despite the standard reconciler credential lacking `agent:read` and `decision:read`.
+The audit confirmed that the public HTTP and MCP response projections no longer expose `CallAttempt.lastError`, and CALL-E non-2xx response bodies are already excluded from thrown errors. The remaining concrete gap was below those presentation boundaries: `CalleCallProvider.start()` and `observe()` awaited the configured fetch implementation directly. A thrown exception therefore retained its arbitrary original message. `ControlPlane.dispatchCallAttempt()` and ambiguous recovery deliberately persist provider create failures in `lastError` for operational/recovery context, so a secret-bearing network exception could survive in SQLite even though it was not currently returned through ordinary public views.
 
 ## Changes made this run
 
-PR #22, `Harden reconciliation response privacy`, changed `src/http-server.ts`, `src/client.ts`, and added `tests/reconciliation-response-privacy.test.ts`.
+PR #23, `Sanitize CALL-E transport errors before persistence`, changed `src/calle-provider.ts` and added `tests/calle-transport-error-privacy.test.ts`.
 
-The reconciliation endpoints now separate mutation authority from read authority:
+The production CALL-E adapter now normalizes exceptions thrown by the transport boundary before returning them to the control plane:
 
-- decision reconciliation still executes `ControlPlane.reconcileEscalation`, but the HTTP response is the existing `EscalationLifecycleView` instead of the full `Escalation`;
-- callback reconciliation still executes `ControlPlane.reconcileCallback`, but the HTTP response is the existing `OwnerCallbackView` instead of the replayable `CallAttempt`;
-- `CallYourAgentClient.reconcileEscalation` and `reconcileCallback` now expose those narrowed types, so platform adapters cannot accidentally depend on internal recovery state through the public SDK contract.
+- create-side transport failures become `CALL-E create transport failed`;
+- polling/get-side transport failures become `CALL-E get transport failed`;
+- timeout exceptions retain `name === "TimeoutError"` so existing timeout behavior/tests and operational classification remain intact, but their potentially arbitrary message is replaced by `CALL-E create timed out` or `CALL-E get timed out`;
+- no original transport exception message, cause, request URL, phone number, task text, API credential, webhook URL/token, or other fetch-layer diagnostic is copied into the sanitized error.
 
-The decision lifecycle result keeps only operational state such as escalation/run/scope ids, blocking/priority/status, privacy-safe call status, optional policy deferral reason, and timestamps. It excludes the question, context, idempotency key, call/decision ids, provider correlation, and owner decision answer/result.
+This means an ambiguous CALL-E create still becomes a durable `CallAttempt` in the same fail-closed state and still reuses the exact original idempotency key for bounded recovery, but `lastError` now contains only the small provider-owned privacy-safe classification rather than arbitrary networking text.
 
-The callback lifecycle result keeps only callback id, run id, status, and timestamps. It excludes the current-status phone task, owner prompt, provider call id/name, idempotency key, metadata, `lastError`, recovery bookkeeping, transcripts, and queued steering text.
+The new regressions prove two boundaries:
 
-Two new end-to-end tests exercise the routes through the typed client with a credential containing only `calls:reconcile`. The decision test seeds confidential question/context/idempotency plus a secret owner answer/structured result and proves none of those values or internal correlation ids are returned. The callback test seeds a secret agent status, owner prompt, callback idempotency key, and resulting steering instruction and proves none of those values or replay/recovery fields are returned.
+1. A deliberately secret-bearing transport exception during an owner callback produces an `ambiguous` call attempt whose durable `lastError` is exactly `CALL-E create transport failed` and contains none of the injected webhook token, owner phone, or owner callback prompt.
+2. Polling transport errors similarly expose only `CALL-E get transport failed`, while a deliberately secret-bearing `TimeoutError` retains its timeout type with only the sanitized `CALL-E get timed out` message.
 
-This is deliberately a presentation-contract change only. Durable control-plane state, CALL-E/fake-provider calls, polling/webhook convergence, provider idempotency, ambiguous recovery, branch-scoped blocking, and safe-checkpoint instruction consumption are unchanged.
+The change is intentionally narrow. It does not alter CALL-E request bodies, server-side credential handling, idempotency keys, call reservation ordering, provider correlation, polling/webhook convergence, branch-scoped blocking, callback steering, safe-checkpoint consumption, HTTP authorization, or fake-provider behavior.
 
 ## Verification performed
 
-Direct repository execution in the automation container remained unavailable because the runtime could not resolve GitHub for a local clone, so authoritative verification used the repository's GitHub Actions surfaces as in prior runs.
+Direct repository execution in the automation container was not used; authoritative verification ran through the repository's GitHub Actions matrix against PR #23 head `e4cac008c1c2bea1931bc7ab80c20d1ae6db916f`.
 
-PR #22 head `27bc220c33edc7ee7ac522ab37b9879a59e4d305` passed the complete repository verification matrix:
+- CI run `34447950506` — **success** on Node `24.20.0`; `npm run check` completed TypeScript typechecking, build, and the Node test suite with **148 tests, 148 passed, 0 failed, 0 cancelled, 0 skipped, 0 todo**. Both new transport-error privacy regressions passed explicitly, and the existing CALL-E timeout tests remained green.
+- Container run `34447950460` — **success**; the production image/runtime smoke path passed.
+- Compose deployment run `34447950499` — **success**. The full production-style fake-provider acceptance remained green through generated scoped credentials, Compose validation, durable SQLite boot, compiled stdio MCP, branch-blocking owner-decision creation, restart while the decision call was active, branch-specific release, owner context-aware callback creation, restart while the callback was active, exactly-once restored callback reconciliation/steering, another restart with steering durable, and consumption only at the explicit safe checkpoint.
 
-- CI run `34443655422` — **success** on Node `24.20.0`; `npm run check` completed TypeScript typechecking, build, and the Node test suite with **146 tests, 146 passed, 0 failed, 0 cancelled, 0 skipped, 0 todo**. Both new reconciliation privacy tests passed explicitly.
-- Container run `34443655328` — **success**; the production image/runtime smoke path passed.
-- Compose deployment run `34443655334` — **success**; the production-style single-instance SQLite + scoped credentials + compiled stdio MCP + restart/recovery + branch-safe owner-decision + callback steering + safe-checkpoint acceptance remained green.
-
-PR #22 was squash-merged into `main` as `e29737444f6c294041bf6c842070b22e60063e47`.
+PR #23 was squash-merged into `main` as `ec5bfd65fa3af0e301eb20b7342790c1204f3eff`.
 
 `package.json` still has no separate lint script and no standalone migration/schema-check command. `npm run check` covers typechecking, build, and tests; SQLite tests exercise the durable schema/transaction path; Container and Compose exercise the production image/runtime/deployment behavior.
 
@@ -69,19 +69,18 @@ No live CALL-E phone call was attempted or claimed.
 
 ## Architecture decisions made this run
 
-1. `calls:reconcile` is mutation authority, not implicit broad read authority. A provider-facing reconciler should be able to advance a call without receiving the private application context that caused the call.
-2. Successful mutation responses are privacy boundaries too. Sanitizing error paths and ordinary GET views is insufficient if a privileged action route returns the full internal aggregate afterward.
-3. Keep replayable provider state durable and server-side. Privacy is enforced by HTTP/SDK projection rather than weakening `CallAttempt` persistence that ambiguous-create and restart recovery require.
-4. Owner decision consumption remains explicitly behind `agent:read` + `decision:read`; reconciliation never returns the durable answer merely because it caused that answer to be persisted.
-5. Reuse the same lifecycle projections already used by observational read APIs instead of inventing a second reconcile-only response model.
-6. The MCP adapter remains thin over the typed HTTP client and therefore automatically receives the narrowed contract without gaining a parallel authorization or state machine.
-7. No change was required to branch semantics: only the affected blocking scope waits, unrelated work continues, and callback steering remains durable queued state consumed at an explicit safe checkpoint.
+1. Sanitize provider transport failures at the production provider adapter boundary rather than relying on every downstream presentation surface to remember to redact them. Once arbitrary transport text reaches durable state, future operational tooling could accidentally expose it.
+2. Preserve ambiguous-create semantics. A network exception after a create request may mean CALL-E accepted the phone side effect, so sanitization must not relabel the outcome as a definite failure or create a replacement idempotency key.
+3. Preserve timeout classification without preserving timeout messages. Code may safely distinguish `TimeoutError`, but the networking implementation's message is not trusted diagnostic content.
+4. Keep durable recovery state useful but bounded. `lastError` remains available internally as a coarse operational classification; replayable task/idempotency/provider-correlation state remains unchanged because restart/ambiguous recovery depends on it.
+5. Do not add a broad control-plane redactor yet. The production CALL-E adapter is the boundary that handles the concrete phone/API/webhook secrets audited here. A generic future provider-error contract should be designed explicitly rather than silently destroying all adapter diagnostics.
+6. No branch or checkpoint semantics changed: only the affected blocking scope waits, unrelated scopes continue, and human steering remains durable queued state consumed at a safe checkpoint.
 
 ## CALL-E integration status
 
-- **Fake provider:** deterministic, credential-free, idempotent, restart-rehydratable from durable accepted-call state, and still the primary full-flow development/acceptance provider.
-- **Production CALL-E adapter:** remains implemented against the asynchronous Calls API with server-only `CALLE_API_KEY`, stable `Idempotency-Key`, structured result schemas, bounded create/poll requests, persisted correlation, polling/webhook convergence, duplicate prevention, restart-by-provider-id semantics, privacy-safe provider errors, and fail-closed ambiguous/stalled handling. This run did not alter provider dispatch behavior.
-- **Shared surfaces:** HTTP, TypeScript SDK, stdio MCP, lifecycle worker, operator console, and deployment flows continue to share the same persistent control-plane state machine. Successful HTTP/SDK reconciliation responses are now least-privilege projections rather than internal aggregates.
+- **Fake provider:** deterministic, credential-free, idempotent, restart-rehydratable from durable accepted-call state, and still the primary full-flow development/acceptance provider. The complete Compose acceptance remains green after this change.
+- **Production CALL-E adapter:** implemented against the asynchronous Calls API with server-only `CALLE_API_KEY`, stable `Idempotency-Key`, structured result schemas, bounded create/poll requests, persisted correlation, polling/webhook convergence, duplicate prevention, restart-by-provider-id semantics, sanitized HTTP response failures, now-sanitized transport exceptions, and fail-closed ambiguous/stalled handling.
+- **Shared surfaces:** HTTP, TypeScript SDK, stdio MCP, lifecycle worker, operator console, and deployment flows continue to share the same persistent control-plane state machine. This run changes only how the CALL-E adapter classifies transport exceptions before they reach that state machine.
 - **Claude Code:** compiled stdio MCP behavior remains covered by automated and Compose acceptance. A genuine Claude Code host session has still not been observed and is not claimed.
 - **Live status:** no authorized real CALL-E phone call has been performed, so live provider connectivity, owner-phone authorization, and public webhook success remain unverified.
 
@@ -95,9 +94,9 @@ Live CALL-E verification still requires user-controlled prerequisites: a valid/a
 
 ## Highest-value next actions
 
-1. Continue the privacy audit on durable/internal error state and less-direct operator surfaces. In particular, failure-test `CallAttempt.lastError` retention and verify no HTTP/MCP/operator route, lifecycle projection, or audit metadata can expose provider bodies, phone numbers, callback prompts, owner decision answers, steering text, API credentials, or webhook capability tokens.
-2. Review shutdown/lifecycle overlap around provider polling and callback/decision reconciliation for same-attempt concurrent observe/apply paths not already covered by webhook/poll race tests; alter production synchronization only for a reproduced divergence.
-3. Audit webhook and operational logging guidance so the application-owned webhook capability token cannot be copied into audit/error/log metadata, especially because it lives in the URL query string.
+1. Continue the provider/error privacy audit by deciding on an explicit provider-safe diagnostic contract for generic/custom `CallProvider` adapters. The production CALL-E path is now protected, but a future third-party adapter can still throw arbitrary text that the control plane may persist during ambiguous create recovery unless the port contract requires privacy-safe errors.
+2. Audit runtime/lifecycle stderr and operational logging paths, especially request URL logging around `/webhooks/calle`, so the application-owned webhook capability token carried in the query string cannot leak through proxy/application diagnostics.
+3. Review lifecycle sweep versus explicit callback/decision reconciliation for same-attempt concurrent observe/apply overlap not already covered by webhook-vs-poll and ambiguous-recovery single-flight tests. Add synchronization only if a reproducible divergence exists.
 4. Continue tightening stable API conflict/validation semantics without reintroducing arbitrary exception reflection.
 5. Run the documented acceptance in a genuine Claude Code host when that external prerequisite is available and record only observed host/version behavior.
 6. When the user-controlled CALL-E prerequisites are available, perform one tightly bounded live provider acceptance and record only observed behavior.
