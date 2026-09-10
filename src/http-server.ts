@@ -33,6 +33,7 @@ const CONCRETE_API_SCOPES: Exclude<ApiScope, "*">[] = [
 
 const ESCALATION_PRIORITIES: readonly EscalationPriority[] = ["low", "normal", "high", "critical"];
 const ISO_DATE_TIME_WITH_ZONE = /^(\d{4})-(\d{2})-(\d{2})T(?:[01]\d|2[0-3]):[0-5]\d:[0-5]\d(?:\.\d+)?(?:Z|[+-](?:[01]\d|2[0-3]):[0-5]\d)$/;
+const AUDIT_LIMIT_PATTERN = /^[1-9]\d{0,2}$/;
 
 export interface HttpRateLimitOptions {
   ownerCallbacksPerWindow?: number;
@@ -173,8 +174,7 @@ export function createControlPlaneHttpServer(controlPlane: ControlPlane, options
       const auditMatch = url.pathname.match(/^\/v1\/runs\/([^/]+)\/audit$/);
       if (req.method === "GET" && auditMatch) {
         if (!hasScope(credential, "audit:read")) return forbidden(res, "audit:read");
-        const rawLimit = url.searchParams.get("limit");
-        const limit = rawLimit === null ? 100 : Number(rawLimit);
+        const limit = auditLimit(url.searchParams);
         return json(res, 200, { events: controlPlane.listAuditEvents(decodeURIComponent(auditMatch[1]!), limit) });
       }
 
@@ -425,6 +425,16 @@ function optionalIsoDateTime(value: unknown, field: string): string | undefined 
 function stringArray(value: unknown, field: string): string[] {
   if (!Array.isArray(value) || value.some((item) => typeof item !== "string" || !item.trim())) throw new Error(`${field} must be an array of non-empty strings`);
   return value as string[];
+}
+function auditLimit(searchParams: URLSearchParams): number {
+  const values = searchParams.getAll("limit");
+  if (values.length === 0) return 100;
+  if (values.length !== 1 || !AUDIT_LIMIT_PATTERN.test(values[0]!)) {
+    throw new Error("Audit event limit must be an integer from 1 to 500");
+  }
+  const limit = Number(values[0]);
+  if (limit < 1 || limit > 500) throw new Error("Audit event limit must be an integer from 1 to 500");
+  return limit;
 }
 function positive(value: number, name: string): number { if (!Number.isInteger(value) || value < 1) throw new Error(`${name} must be a positive integer`); return value; }
 function nonNegative(value: number, name: string): number { if (!Number.isInteger(value) || value < 0) throw new Error(`${name} must be a non-negative integer`); return value; }
