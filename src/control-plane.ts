@@ -45,44 +45,52 @@ export class ControlPlane {
   ) {}
 
   registerAgent(input: Omit<AgentRegistration, "id" | "createdAt">): AgentRegistration {
-    const agent: AgentRegistration = { ...input, id: randomUUID(), createdAt: this.isoNow() };
-    this.store.agents.set(agent.id, agent);
-    this.audit("agent_registered", "control_plane", "Agent registered", { agentId: agent.id }, {
-      platform: agent.platform,
-      ownerId: agent.ownerId,
+    return this.store.transaction(() => {
+      const agent: AgentRegistration = { ...input, id: randomUUID(), createdAt: this.isoNow() };
+      this.store.agents.set(agent.id, agent);
+      this.audit("agent_registered", "control_plane", "Agent registered", { agentId: agent.id }, {
+        platform: agent.platform,
+        ownerId: agent.ownerId,
+      });
+      return agent;
     });
-    return agent;
   }
 
   startRun(agentId: string, summary: string, currentScope?: string): AgentRun {
     this.requireAgent(agentId);
-    const now = this.isoNow();
-    const run: AgentRun = {
-      id: randomUUID(),
-      agentId,
-      status: "running",
-      summary,
-      currentScope,
-      startedAt: now,
-      updatedAt: now,
-    };
-    this.store.runs.set(run.id, run);
-    this.audit("run_started", "agent", "Agent run started", { runId: run.id, agentId }, {
-      currentScope: run.currentScope,
+    return this.store.transaction(() => {
+      const now = this.isoNow();
+      const run: AgentRun = {
+        id: randomUUID(),
+        agentId,
+        status: "running",
+        summary,
+        currentScope,
+        startedAt: now,
+        updatedAt: now,
+      };
+      this.store.runs.set(run.id, run);
+      this.audit("run_started", "agent", "Agent run started", { runId: run.id, agentId }, {
+        currentScope: run.currentScope,
+      });
+      return run;
     });
-    return run;
   }
 
   heartbeat(runId: string, update: { summary?: string; currentScope?: string }): AgentRun {
     const run = this.requireRun(runId);
     if (run.status !== "running") throw new Error(`Run ${runId} is not running`);
-    const next = { ...run, ...update, updatedAt: this.isoNow() };
-    this.store.runs.set(runId, next);
-    this.audit("run_status_reported", "agent", "Agent reported progress", { runId, agentId: run.agentId }, {
-      currentScope: next.currentScope,
-      summaryChanged: update.summary !== undefined,
+    return this.store.transaction(() => {
+      const current = this.requireRun(runId);
+      if (current.status !== "running") throw new Error(`Run ${runId} is not running`);
+      const next = { ...current, ...update, updatedAt: this.isoNow() };
+      this.store.runs.set(runId, next);
+      this.audit("run_status_reported", "agent", "Agent reported progress", { runId, agentId: current.agentId }, {
+        currentScope: next.currentScope,
+        summaryChanged: update.summary !== undefined,
+      });
+      return next;
     });
-    return next;
   }
 
   async requestOwnerDecision(input: OwnerDecisionRequest): Promise<Escalation> {
@@ -258,10 +266,12 @@ export class ControlPlane {
 
   enqueueInstruction(runId: string, text: string, source: OwnerInstruction["source"] = "api", callAttemptId?: string): OwnerInstruction {
     const run = this.requireRun(runId);
-    const instruction: OwnerInstruction = { id: randomUUID(), runId, text, source, status: "queued", createdAt: this.isoNow() };
-    this.store.instructions.set(instruction.id, instruction);
-    this.audit("owner_instruction_queued", source === "callback" ? "owner" : "control_plane", "Owner instruction queued for next safe checkpoint", { runId, agentId: run.agentId, callAttemptId, instructionId: instruction.id }, { source });
-    return instruction;
+    return this.store.transaction(() => {
+      const instruction: OwnerInstruction = { id: randomUUID(), runId, text, source, status: "queued", createdAt: this.isoNow() };
+      this.store.instructions.set(instruction.id, instruction);
+      this.audit("owner_instruction_queued", source === "callback" ? "owner" : "control_plane", "Owner instruction queued for next safe checkpoint", { runId, agentId: run.agentId, callAttemptId, instructionId: instruction.id }, { source });
+      return instruction;
+    });
   }
 
   getRun(runId: string): AgentRun { return this.requireRun(runId); }
