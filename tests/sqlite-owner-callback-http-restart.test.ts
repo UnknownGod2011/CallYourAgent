@@ -122,7 +122,7 @@ test("SQLite-backed owner/read credential split and privacy-safe callback overvi
     const idempotentReplay = await ownerAfterRestart.requestOwnerCallback({
       runId: run.id,
       idempotencyKey: "sqlite-owner-callback-restart",
-      prompt: "A retry must not place another phone call.",
+      prompt: "Give me the current release status and capture my private steering.",
     });
     assert.equal(idempotentReplay.id, callback.id);
     assert.equal(idempotentReplay.status, "completed");
