@@ -6,13 +6,13 @@ CallYourAgent is a durable Node 24 TypeScript control plane for asynchronous two
 
 The repository includes deterministic fake and production CALL-E providers, SQLite persistence, replayable/idempotent call attempts, polling/webhook convergence, branch-scoped blocking, owner decision persistence, durable per-run instruction queues, exact instruction acknowledgement, quiet hours/call budgets, bounded lifecycle recovery, fail-closed ambiguous/stalled handling, privacy-aware audit history, scoped HTTP authentication, a typed TypeScript client, a real stdio MCP adapter, deterministic end-to-end/demo flows, an operator console, a Claude Code host-acceptance runbook, and a single-instance persistent-volume Compose reference deployment.
 
-This run hardened the initial owner-decision request boundary. Escalation creation, its idempotency mapping, and the causal `escalation_created` audit event now form one local atomic durability unit before policy evaluation or provider dispatch. A failed request can no longer leave a phantom blocking escalation or orphaned idempotency mapping behind. Provider/CALL-E network I/O remains outside database transactions.
+This run hardened the owner-requested callback creation boundary. The callback call-attempt reservation, callback idempotency mapping, `call_attempt_created`, and causal `owner_callback_requested` audit now commit as one local durability unit before any provider side effect. A local audit/persistence failure therefore cannot result in an accepted phone call whose durable history permanently lacks the owner request. Provider/CALL-E network I/O remains outside database transactions.
 
 ## Exact repo state inspected this run
 
-The run started from `main` HEAD `8489b81b6283d3112b8dbe9bb9fa2253e1fdf923`, immediately after PR #15 made escalation expiry, policy deferral, and policy release/call reservation atomic with their causal audit history.
+The run started from `main` HEAD `325a420fd5d133e5e21fbcbe6f8318c87ab847f8`, immediately after PR #16 and its progress handoff made initial owner-decision creation atomic.
 
-Before making changes, inspected the complete recursive repository tree and current architecture, recent commits, issues, and pull requests. There were no open issues or PRs at the start of the run. Recent commits and merged PRs were reviewed through PR #15, covering call reservation/idempotency, ambiguous-recovery single-flight, webhook/poll races, accepted-call stale handling, lifecycle atomicity, restart guarantees, provider-identity preservation, atomic terminal polling, atomic active-provider progress, production CALL-E restart semantics, and escalation-policy atomicity.
+Before making any change, inspected the complete recursive repository tree and current architecture, recent commits, relevant issues, and pull requests. There were no open issues at the start. Recent merged work through PR #16 was reviewed, including call reservation/idempotency, ambiguous-recovery single-flight, webhook/poll races, stale accepted-call handling, lifecycle atomicity, restart guarantees, provider-identity preservation, atomic terminal polling, atomic active-provider progress, production CALL-E restart semantics, escalation-policy atomicity, and atomic initial owner-decision creation.
 
 Read in full before changing code:
 
@@ -29,66 +29,90 @@ Read in full before changing code:
 - `docs/PROVIDER_RESTART_SEMANTICS.md`
 - `deploy/README.md`
 
-Also inspected the relevant implementation/reliability surfaces, especially `src/control-plane.ts`, `src/store.ts`, `src/sqlite-store.ts`, `package.json`, the tests directory, and the existing SQLite failure-injection patterns in `tests/sqlite-escalation-policy-atomicity.test.ts`.
+Also inspected the relevant implementation and reliability surfaces, especially `src/control-plane.ts`, `src/call-provider.ts`, the callback/audit restart tests, the stdio MCP callback restart test, and the Compose stdio deployment acceptance script.
 
-The audit reproduced a real local consistency hazard in `requestOwnerDecision`: the new `Escalation`, `escalationByIdempotencyKey` mapping, and `escalation_created` event were three separate SQLite writes. If the mapping or audit write failed after escalation persistence, the request could throw while durable state still contained a partially created blocking escalation or incomplete idempotency history. That partial escalation could then appear in `unresolvedBlockingScopes` even though the caller observed request failure.
+The audit reproduced a real causal-history gap in `requestOwnerCallback`: callback reservation and idempotency mapping were transactional, but `owner_callback_requested` was written only after `dispatchCallAttempt`. If the provider had already returned a concrete call id and the later local callback-request audit write failed, the accepted provider identity was correctly retained by earlier reliability work, but an idempotent retry returned the existing callback immediately. That meant the owner request event could remain missing forever even though a real call had been accepted.
 
 ## Changes made this run
 
-PR #16, `Make initial owner decision creation atomic`, changed only `src/control-plane.ts` plus one focused new regression file.
+PR #17, `Make owner callback request reservation atomic`, changed the callback creation boundary and added focused regression/acceptance coverage.
 
-### Initial owner-decision creation atomicity
+### Owner callback causal reservation atomicity
 
-`requestOwnerDecision` now enters `store.transaction(...)` for the local creation boundary. Inside that transaction it:
+`requestOwnerCallback` now commits these local facts in one `store.transaction(...)` before provider dispatch:
 
-1. rechecks the stable escalation idempotency key;
-2. returns the existing durable escalation immediately when the key is already reserved;
-3. otherwise persists the new pending escalation;
-4. persists the `escalationByIdempotencyKey` mapping;
-5. records the privacy-safe `escalation_created` audit event.
+1. stable callback idempotency lookup/reservation;
+2. the durable `CallAttempt` row;
+3. the callback idempotency mapping;
+4. `call_attempt_created`;
+5. `owner_callback_requested`.
 
-Only after that transaction commits does normal call-policy evaluation run. If policy allows a call, the existing call-reservation transaction and later provider dispatch continue unchanged. No CALL-E/provider request is made while the initial creation transaction is open.
+Only after that transaction succeeds does `dispatchCallAttempt` invoke the fake or CALL-E provider. This gives the audit timeline the intentional causal ordering:
 
-### SQLite failure-injection regressions
+`call_attempt_created -> owner_callback_requested -> call_attempt_started -> terminal outcome -> owner_instruction_queued`.
 
-Added `tests/sqlite-decision-creation-atomicity.test.ts` with two deterministic regressions:
+If the local reservation/audit transaction fails, it rolls back completely and no provider call is attempted. Existing idempotent retries still return the same already-created callback and do not start another provider call.
 
-1. an injected `escalation_created` audit failure proves the escalation row and idempotency mapping both roll back; no call attempt exists, no creation event exists, and the failed blocking request leaves no unresolved blocking scope. Retrying the same logical request then creates exactly one escalation/call chain, and another idempotent retry returns the same escalation without duplicate calls or audit events;
-2. an injected `escalationByIdempotencyKey` persistence failure proves the already-written escalation row rolls back too. Retry then succeeds with one mapping, one escalation, one call attempt, one creation event, and the expected branch-specific blocked scope.
+### SQLite failure-injection regression
 
-The production change is intentionally small: it moves only the existing local creation operations into the store's established synchronous transaction boundary and moves the idempotency lookup inside that same boundary. No provider contract, public HTTP/MCP contract, or domain schema was changed.
+Added `tests/sqlite-callback-request-atomicity.test.ts`.
+
+The test injects one failure while persisting `owner_callback_requested` and proves:
+
+- `requestOwnerCallback` rejects;
+- provider `start()` count remains exactly zero;
+- no call attempt remains;
+- no callback idempotency mapping remains;
+- neither `call_attempt_created` nor `owner_callback_requested` survives the rollback;
+- retrying the same logical callback succeeds with one provider start and one durable callback;
+- another idempotent retry returns the same callback and does not produce another provider start or callback-request event.
+
+### Causal-order acceptance updates
+
+Updated the existing callback audit timeline, restart recovery, long-lived stdio MCP restart, Compose deployment acceptance, and Claude Code host-acceptance expectations to the stronger request-before-provider ordering. No public HTTP, MCP, SDK, CALL-E provider, or schema contract changed.
+
+The first CI pass correctly caught two existing restart tests that still asserted the old `call_attempt_started -> owner_callback_requested` order. After those were corrected, CI passed. The second Compose pass independently caught the same stale ordering in `tests/mcp-stdio-deployment-acceptance.ts`; after that acceptance assertion was corrected, the full Compose workflow passed. These failures were test/acceptance expectation drift caused by the intentional causal-order change, not provider/runtime failures.
 
 ## Verification performed
 
-Direct repository execution in the automation container remains unavailable because that network namespace cannot resolve `github.com`, so verification used the repository's GitHub Actions execution surfaces.
+Direct repository execution in the automation container remains unavailable because that environment cannot resolve `github.com`, so verification used the repository's GitHub Actions surfaces.
 
-The substantive PR #16 head `ba81b70f5e5a395c18c51bc090f13f09223adb01` passed every repository verification surface before merge:
+Final substantive PR #17 head `2835097be2f4043ee80effb9abe0638758fdbcac` passed every repository verification surface before merge:
 
-- CI run `34419769431` — **success**. Node `24.20.0`; locked dependencies installed; TypeScript no-emit typecheck succeeded; build succeeded; Node test suite finished with **133 tests, 133 passed, 0 failed, 0 skipped/cancelled/todo**. Both new SQLite decision-creation rollback/retry regressions passed explicitly.
-- Container run `34419769439` — **success**.
-- Compose deployment run `34419769331` — **success**, preserving the full reference deployment acceptance around generated least-privilege credentials, durable SQLite, compiled stdio MCP, decision/callback restart recovery, branch-specific release, exactly-once steering, persistence restart, and safe-checkpoint consumption.
+- CI run `34424521152` — **success**. Node `24.20.0`; locked dependencies installed; TypeScript no-emit typecheck succeeded; build succeeded; Node test suite finished with **134 tests, 134 passed, 0 failed, 0 skipped/cancelled/todo**. The new SQLite callback-request rollback/retry regression passed explicitly.
+- Container run `34424521137` — **success**.
+- Compose deployment run `34424521133` — **success**, preserving generated least-privilege credentials, validated Compose configuration, healthy fake-provider runtime, real compiled stdio MCP, durable SQLite, restart during the branch-blocking owner decision, branch-specific release, owner-requested callback, restart during the active callback, exactly-once callback reconciliation/steering, another persistence restart, and safe-checkpoint instruction acknowledgement.
 
-`package.json` still has no separate lint script and no standalone migration/schema-check command. The normal `npm run check` path covers typechecking/build/tests; SQLite tests execute the durable schema/transaction path; Container and Compose cover production image/runtime/deployment behavior.
+Intermediate verification history was also preserved rather than ignored:
 
-PR #16 was squash-merged as `91c299034dbe710be42c0af923609f7b2d518111`.
+- CI run `34424219491` failed only because two older restart tests encoded the previous callback audit ordering; the new atomicity regression itself passed.
+- Container run `34424219285` succeeded.
+- Compose run `34424219407` failed before later scenario steps because the same old audit-order assertion was still present downstream.
+- After the first assertion fixes, CI `34424365381` and Container `34424364984` succeeded, while Compose `34424364741` exposed the remaining stale ordering assertion in the deployment acceptance script.
+- After that final acceptance update, all three final workflows succeeded as listed above.
+
+`package.json` still has no separate lint script and no standalone migration/schema-check command. `npm run check` covers typechecking/build/tests; SQLite tests exercise the durable schema/transaction path; Container and Compose exercise production image/runtime/deployment behavior.
+
+PR #17 was squash-merged as `7c22c3588e9f9e33d813683e09d5787ca393ab13`.
 
 No live CALL-E phone call was attempted or claimed.
 
 ## Architecture decisions made this run
 
-1. A successful owner-decision request should exist durably only when its escalation row, stable idempotency mapping, and causal creation audit have committed together.
-2. The idempotency lookup belongs inside the same local creation transaction so retry/convergence is evaluated against the same durability boundary that reserves the request.
-3. A local persistence failure must not create a phantom branch block. Until the initial creation transaction commits, the request has not become part of the durable agent-control state machine.
-4. Policy evaluation and all provider/CALL-E network work remain outside this transaction. The transaction protects local orchestration truth only; it does not hold SQLite locks over external I/O.
-5. Existing branch/scope semantics remain unchanged after a successful request: a blocking escalation affects only its own scope, while unrelated agent work can continue.
-6. No new distributed/multi-instance claim is introduced; the supported durable topology remains one control-plane process with SQLite.
+1. An owner-requested callback must not begin its external phone side effect until the local callback reservation, stable idempotency mapping, and causal owner-request audit have committed together.
+2. `owner_callback_requested` semantically records the owner's durable request, not provider acceptance, so it belongs before `call_attempt_started` in the audit timeline.
+3. A local failure before provider dispatch should fail closed: zero durable callback reservation and zero provider calls. This is safer than trying to reconstruct a missing causal event after an external side effect has already begun.
+4. Provider/CALL-E network I/O remains outside SQLite transactions. The transaction protects only local orchestration truth and never holds a database transaction over external I/O.
+5. Existing provider-identity safety remains unchanged: once provider acceptance returns a concrete identity, later local start-audit failures do not convert that known acceptance into ambiguous provider state.
+6. Existing branch/scope and safe-checkpoint semantics are unchanged; callbacks do not block unrelated agent work and callback steering remains queued until an explicit checkpoint/acknowledgement.
+7. No distributed/multi-instance claim is introduced; the supported durable reference topology remains one control-plane process with SQLite.
 
 ## CALL-E integration status
 
-- **Fake provider:** deterministic, credential-free, idempotent, restart-rehydratable from durable accepted-call state, and still the primary full-flow development/acceptance provider.
-- **Production CALL-E adapter:** implemented against the asynchronous Calls API with server-only `CALLE_API_KEY`, stable `Idempotency-Key`, structured result schemas, bounded create/poll requests, persisted correlation, polling/webhook convergence, duplicate prevention, restart-by-provider-id semantics, and fail-closed ambiguous/stalled handling. This run did not change the provider contract.
+- **Fake provider:** deterministic, credential-free, idempotent, restart-rehydratable from durable accepted-call state, and still the primary full-flow development/acceptance provider. The complete callback creation/restart/steering path passed again in CI and Compose.
+- **Production CALL-E adapter:** implemented against the asynchronous Calls API with server-only `CALLE_API_KEY`, stable `Idempotency-Key`, structured result schemas, bounded create/poll requests, persisted correlation, polling/webhook convergence, duplicate prevention, restart-by-provider-id semantics, and fail-closed ambiguous/stalled handling. This run did not alter its external contract.
 - **Shared surfaces:** HTTP, TypeScript SDK, stdio MCP, lifecycle worker, operator console, and deployment flows continue to share the same persistent control-plane state machine.
-- **Claude Code:** compiled stdio MCP behavior remains covered by repository/deployment tests and the host-acceptance runbook remains valid. A genuine Claude Code host session has not yet been observed and is not claimed.
+- **Claude Code:** compiled stdio MCP behavior remains covered by automated and deployment tests. `docs/CLAUDE_CODE_ACCEPTANCE.md` now explicitly expects the durable owner callback request event before provider-start acceptance. A genuine Claude Code host session has still not been observed and is not claimed.
 - **Live status:** no authorized real CALL-E phone call has been performed, so live provider connectivity, owner-phone authorization, and public webhook success remain unverified.
 
 ## Current blockers / external prerequisites
@@ -101,8 +125,8 @@ Live CALL-E verification still requires user-controlled prerequisites: a valid/a
 
 ## Highest-value next actions
 
-1. Audit owner-callback request/start causal bookkeeping under local SQLite failures. `requestOwnerCallback` already reserves the callback attempt and idempotency mapping atomically before provider creation, and accepted provider identity is protected from audit failures, but `owner_callback_requested` is recorded afterward. Determine whether failure/restart at that boundary can leave materially misleading causal history and harden only if a real inconsistency is reproducible without risking provider-create replay.
-2. Audit the remaining simple state-plus-audit write boundaries such as agent registration, run start/status heartbeat, and direct API instruction enqueue. Prioritize only boundaries where failure injection demonstrates a durable state-machine or operator-history inconsistency rather than mechanically wrapping every write.
+1. Audit remaining simple state-plus-audit boundaries, especially `registerAgent`, `startRun`, `heartbeat`, and direct `enqueueInstruction`, using SQLite failure injection. Prioritize only cases where a failed audit can leave materially misleading durable state or affect idempotency/safe-checkpoint behavior rather than wrapping writes mechanically.
+2. Audit callback reservation concurrency at the exact local-commit/provider-start boundary to ensure concurrent idempotent owner requests cannot cause duplicate `dispatchCallAttempt` calls under any supported re-entrant path; add production logic only if a reproducible race exists.
 3. Continue provider/result privacy audits for accidental task context, callback prompt, decision answer, instruction text, owner phone, API credential, or webhook-token disclosure.
 4. Run the documented acceptance in a genuine Claude Code host when that external prerequisite is available and record only observed host/version behavior.
 5. When the user-controlled CALL-E prerequisites are available, perform one tightly bounded live provider acceptance and record only observed behavior.
