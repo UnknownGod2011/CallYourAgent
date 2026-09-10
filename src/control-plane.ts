@@ -13,7 +13,7 @@ import type {
   OwnerDecisionRequest,
   OwnerInstruction,
 } from "./domain.js";
-import type { CallProvider, CallProviderObservation, StartCallResult } from "./call-provider.js";
+import { providerSafeDiagnostic, type CallProvider, type CallProviderObservation, type StartCallResult } from "./call-provider.js";
 import { CallPolicy } from "./call-policy.js";
 import type { ControlPlaneStore } from "./store.js";
 
@@ -219,7 +219,7 @@ export class ControlPlane {
     } catch (error) {
       const current = this.requireCallAttempt(attempt.id);
       if (current.status !== "ambiguous") return current;
-      const stillAmbiguous: CallAttempt = { ...current, status: "ambiguous", lastError: errorMessage(error), updatedAt: this.isoNow() };
+      const stillAmbiguous: CallAttempt = { ...current, status: "ambiguous", lastError: providerSafeDiagnostic(error), updatedAt: this.isoNow() };
       this.store.callAttempts.set(stillAmbiguous.id, stillAmbiguous);
       this.audit("call_attempt_ambiguous", "control_plane", "Call recovery remains ambiguous", { runId: this.runIdForAttempt(stillAmbiguous), callAttemptId: stillAmbiguous.id }, { purpose: stillAmbiguous.purpose, provider: stillAmbiguous.provider });
       return stillAmbiguous;
@@ -398,7 +398,7 @@ export class ControlPlane {
     try {
       started = await this.calls.start({ idempotencyKey: attempt.idempotencyKey, purpose: attempt.purpose, task: attempt.request.task, metadata: attempt.request.metadata });
     } catch (error) {
-      const ambiguous: CallAttempt = { ...attempt, status: "ambiguous", lastError: errorMessage(error), updatedAt: this.isoNow() };
+      const ambiguous: CallAttempt = { ...attempt, status: "ambiguous", lastError: providerSafeDiagnostic(error), updatedAt: this.isoNow() };
       this.store.callAttempts.set(ambiguous.id, ambiguous);
       this.audit("call_attempt_ambiguous", "control_plane", "Phone call outcome is ambiguous and will be safely reconciled", { runId: this.runIdForAttempt(ambiguous), callAttemptId: ambiguous.id }, { purpose: ambiguous.purpose, provider: ambiguous.provider });
       return ambiguous;
@@ -441,5 +441,3 @@ export class ControlPlane {
   private requireCallAttempt(id: string): CallAttempt { const value = this.store.callAttempts.get(id); if (!value) throw new Error(`Unknown call attempt: ${id}`); return value; }
   private isoNow(): string { return this.clock.now().toISOString(); }
 }
-
-function errorMessage(error: unknown): string { return error instanceof Error ? error.message : String(error); }
