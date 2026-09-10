@@ -517,9 +517,9 @@ async function main(): Promise<void> {
     assert.equal(callbackCallStarted.length, 1, "callback restart/provider rehydration must not duplicate provider start");
     assert.equal(callbackCallCompleted.length, 1, "callback reconciliation retry must not duplicate completion");
     assert.equal(callbackInstructionQueued.length, 1, "callback reconciliation retry must queue steering exactly once");
-    assert.ok(callbackCallCreated[0]!.sequence < callbackCallStarted[0]!.sequence);
-    assert.ok(callbackCallStarted[0]!.sequence < callbackRequested[0]!.sequence);
-    assert.ok(callbackRequested[0]!.sequence < callbackCallCompleted[0]!.sequence);
+    assert.ok(callbackCallCreated[0]!.sequence < callbackRequested[0]!.sequence);
+    assert.ok(callbackRequested[0]!.sequence < callbackCallStarted[0]!.sequence);
+    assert.ok(callbackCallStarted[0]!.sequence < callbackCallCompleted[0]!.sequence);
     assert.ok(callbackCallCompleted[0]!.sequence < callbackInstructionQueued[0]!.sequence);
     assert.equal(callbackInstructionQueued[0]?.instructionId, instruction.id);
     assert.equal(

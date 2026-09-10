@@ -116,13 +116,13 @@ For the owner callback specifically, correlate one durable `callAttemptId` throu
 
 ```text
 call_attempt_created
-  -> call_attempt_started
   -> owner_callback_requested
+  -> call_attempt_started
   -> call_attempt_completed
   -> owner_instruction_queued
 ```
 
-The `owner_instruction_queued` event must supply the resulting `instructionId`; the later `owner_instruction_consumed` event must reference that same `instructionId`. Consumption is intentionally instruction-correlated rather than pretending the safe checkpoint itself is a provider-call transition. A successful restart/retry path must not fabricate `call_attempt_ambiguous` or `call_attempt_failed` events for that callback.
+The request/reservation and `owner_callback_requested` audit are committed locally before any provider side effect begins, so the causal owner request must appear before `call_attempt_started`. The `owner_instruction_queued` event must supply the resulting `instructionId`; the later `owner_instruction_consumed` event must reference that same `instructionId`. Consumption is intentionally instruction-correlated rather than pretending the safe checkpoint itself is a provider-call transition. A successful restart/retry path must not fabricate `call_attempt_ambiguous` or `call_attempt_failed` events for that callback.
 
 ## Negative authorization checks
 

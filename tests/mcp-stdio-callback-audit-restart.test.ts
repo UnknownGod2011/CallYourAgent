@@ -248,9 +248,9 @@ test("long-lived stdio MCP observes restart-recovered owner callback and consume
     assert.equal(queued[0]?.instructionId, instruction.id);
     assert.equal(consumed[0]?.instructionId, instruction.id);
 
-    assert.ok(created[0]!.sequence < started[0]!.sequence);
-    assert.ok(started[0]!.sequence < requested[0]!.sequence);
-    assert.ok(requested[0]!.sequence < completedEvents[0]!.sequence);
+    assert.ok(created[0]!.sequence < requested[0]!.sequence);
+    assert.ok(requested[0]!.sequence < started[0]!.sequence);
+    assert.ok(started[0]!.sequence < completedEvents[0]!.sequence);
     assert.ok(completedEvents[0]!.sequence < queued[0]!.sequence);
     assert.ok(queued[0]!.sequence < consumed[0]!.sequence);
 
