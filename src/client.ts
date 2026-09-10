@@ -2,7 +2,6 @@ import type {
   AgentRegistration,
   AgentRun,
   AuditEvent,
-  CallAttempt,
   CheckpointResult,
   Escalation,
   EscalationPriority,
@@ -143,7 +142,7 @@ export class CallYourAgentClient {
     return this.request("GET", `/v1/escalations/${encodeURIComponent(escalationId)}`);
   }
 
-  async reconcileEscalation(escalationId: string): Promise<Escalation> {
+  async reconcileEscalation(escalationId: string): Promise<EscalationLifecycleView> {
     return this.request("POST", `/v1/escalations/${encodeURIComponent(escalationId)}/reconcile`, {});
   }
 
@@ -155,7 +154,7 @@ export class CallYourAgentClient {
     return this.request("GET", `/v1/callbacks/${encodeURIComponent(callbackId)}`);
   }
 
-  async reconcileCallback(callbackId: string): Promise<CallAttempt> {
+  async reconcileCallback(callbackId: string): Promise<OwnerCallbackView> {
     return this.request("POST", `/v1/callbacks/${encodeURIComponent(callbackId)}/reconcile`, {});
   }
 
