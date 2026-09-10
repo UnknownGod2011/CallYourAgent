@@ -3,7 +3,7 @@ import { createServer, type IncomingMessage, type Server, type ServerResponse } 
 import { URL } from "node:url";
 import { parseCalleTerminalWebhook } from "./calle-webhook.js";
 import { toOwnerCallbackView } from "./callback-view.js";
-import type { ControlPlane } from "./control-plane.js";
+import { IDEMPOTENCY_CONFLICT_MESSAGE, type ControlPlane } from "./control-plane.js";
 import { getEscalationLifecycleView } from "./escalation-view.js";
 import { operatorConsoleHtml } from "./operator-ui.js";
 import { getRunOverview } from "./run-overview.js";
@@ -288,6 +288,7 @@ function publicHttpError(error: unknown): { status: number; error: string } {
   if (message === "Run is not running" || /^Run .+ is not running$/.test(message)) return { status: 409, error: "run_not_running" };
   if (/^Instruction .+ does not belong to run .+$/.test(message)) return { status: 409, error: "instruction_run_mismatch" };
   if (message === "Call attempt is not an owner callback") return { status: 409, error: "callback_purpose_mismatch" };
+  if (message === IDEMPOTENCY_CONFLICT_MESSAGE) return { status: 409, error: "idempotency_conflict" };
   if (
     message === "invalid_json"
     || message === "JSON object body required"

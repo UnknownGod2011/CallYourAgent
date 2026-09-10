@@ -114,6 +114,8 @@ export interface CallAttempt {
   providerCallId?: string;
   status: "queued" | "in_progress" | "completed" | "failed" | "ambiguous" | "stalled";
   idempotencyKey: string;
+  /** SHA-256 binding of the logical owner-callback request; never sent to the phone provider. */
+  requestFingerprint?: string;
   request: PersistedCallRequest;
   lastError?: string;
   automaticRecoveryAttempts?: number;
