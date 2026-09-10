@@ -1,0 +1,87 @@
+name: Apply idempotency binding patch
+
+on:
+  push:
+    branches:
+      - automation/idempotency-payload-binding
+
+permissions:
+  contents: write
+
+jobs:
+  patch:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: automation/idempotency-payload-binding
+          fetch-depth: 0
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+      - name: Apply coherent idempotency hardening
+        shell: bash
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+
+          cp = Path('src/control-plane.ts')
+          text = cp.read_text()
+          text = text.replace('import { randomUUID } from "node:crypto";', 'import { createHash, randomUUID } from "node:crypto";')
+          text = text.replace(
+              'const systemClock: Clock = { now: () => new Date() };',
+              '''export const IDEMPOTENCY_CONFLICT_MESSAGE = "Idempotency key is already bound to a different request";\n\nconst systemClock: Clock = { now: () => new Date() };\n\nfunction callbackRequestFingerprint(input: CallbackRequest): string {\n  return createHash("sha256")\n    .update(JSON.stringify({ runId: input.runId, prompt: input.prompt || null }))\n    .digest("hex");\n}\n\nfunction assertEscalationReplayMatches(existing: Escalation, input: OwnerDecisionRequest): void {\n  if (\n    existing.runId !== input.runId\n    || existing.scopeId !== input.scopeId\n    || existing.question !== input.question\n    || (existing.context || undefined) !== (input.context || undefined)\n    || existing.blocking !== input.blocking\n    || existing.priority !== (input.priority ?? "normal")\n    || existing.expiresAt !== input.expiresAt\n  ) throw new Error(IDEMPOTENCY_CONFLICT_MESSAGE);\n}\n\nfunction assertCallbackReplayMatches(existing: CallAttempt, input: CallbackRequest): void {\n  if (existing.purpose !== "owner_callback" || existing.correlationId !== input.runId) {\n    throw new Error(IDEMPOTENCY_CONFLICT_MESSAGE);\n  }\n\n  const fingerprint = callbackRequestFingerprint(input);\n  if (existing.requestFingerprint) {\n    if (existing.requestFingerprint !== fingerprint) throw new Error(IDEMPOTENCY_CONFLICT_MESSAGE);\n    return;\n  }\n\n  // Backward-compatible verification for durable attempts created before\n  // requestFingerprint existed. The callback prompt is already part of the\n  // persisted replayable task, so no new sensitive state is introduced.\n  const promptClause = input.prompt\n    ? `Owner request: ${input.prompt}`\n    : "Ask what the owner wants to know or change.";\n  const expectedSuffix = `${promptClause}\\nCapture any new owner instructions as concise action items.`;\n  if (!existing.request.task.endsWith(expectedSuffix)) throw new Error(IDEMPOTENCY_CONFLICT_MESSAGE);\n}'''
+          )
+          text = text.replace(
+              '''  async requestOwnerDecision(input: OwnerDecisionRequest): Promise<Escalation> {\n    this.requireRunningRun(input.runId);\n    const escalation = this.store.transaction(() => {\n      const existingId = this.store.escalationByIdempotencyKey.get(input.idempotencyKey);\n      if (existingId) return this.store.escalations.get(existingId)!;''',
+              '''  async requestOwnerDecision(input: OwnerDecisionRequest): Promise<Escalation> {\n    const replayId = this.store.escalationByIdempotencyKey.get(input.idempotencyKey);\n    if (replayId) {\n      const existing = this.requireEscalation(replayId);\n      assertEscalationReplayMatches(existing, input);\n      return existing;\n    }\n    this.requireRunningRun(input.runId);\n    const escalation = this.store.transaction(() => {\n      const existingId = this.store.escalationByIdempotencyKey.get(input.idempotencyKey);\n      if (existingId) {\n        const existing = this.requireEscalation(existingId);\n        assertEscalationReplayMatches(existing, input);\n        return existing;\n      }'''
+          )
+          text = text.replace(
+              '''  async requestOwnerCallback(input: CallbackRequest): Promise<CallAttempt> {\n    const run = this.requireRunningRun(input.runId);\n    const existingId = this.store.callbackByIdempotencyKey.get(input.idempotencyKey);\n    if (existingId) return this.store.callAttempts.get(existingId)!;''',
+              '''  async requestOwnerCallback(input: CallbackRequest): Promise<CallAttempt> {\n    const replayId = this.store.callbackByIdempotencyKey.get(input.idempotencyKey);\n    if (replayId) {\n      const existing = this.requireCallAttempt(replayId);\n      assertCallbackReplayMatches(existing, input);\n      return existing;\n    }\n    const run = this.requireRunningRun(input.runId);'''
+          )
+          text = text.replace(
+              '''    const attempt = this.store.transaction(() => {\n      const existingId = this.store.callbackByIdempotencyKey.get(input.idempotencyKey);\n      if (existingId) return this.store.callAttempts.get(existingId)!;\n      const reserved = this.persistCallAttempt("owner_callback", input.runId, task, `callback:${input.idempotencyKey}`, { runId: input.runId });''',
+              '''    const attempt = this.store.transaction(() => {\n      const existingId = this.store.callbackByIdempotencyKey.get(input.idempotencyKey);\n      if (existingId) {\n        const existing = this.requireCallAttempt(existingId);\n        assertCallbackReplayMatches(existing, input);\n        return existing;\n      }\n      const reserved = this.persistCallAttempt(\n        "owner_callback",\n        input.runId,\n        task,\n        `callback:${input.idempotencyKey}`,\n        { runId: input.runId },\n        callbackRequestFingerprint(input),\n      );'''
+          )
+          text = text.replace(
+              '''  private persistCallAttempt(purpose: CallAttempt["purpose"], correlationId: string, task: string, idempotencyKey: string, metadata: Record<string, string>): CallAttempt {\n    const now = this.isoNow();\n    const attempt: CallAttempt = { id: randomUUID(), purpose, correlationId, provider: this.calls.name, status: "queued", idempotencyKey, request: { task, metadata: { ...metadata } }, createdAt: now, updatedAt: now };''',
+              '''  private persistCallAttempt(\n    purpose: CallAttempt["purpose"],\n    correlationId: string,\n    task: string,\n    idempotencyKey: string,\n    metadata: Record<string, string>,\n    requestFingerprint?: string,\n  ): CallAttempt {\n    const now = this.isoNow();\n    const attempt: CallAttempt = { id: randomUUID(), purpose, correlationId, provider: this.calls.name, status: "queued", idempotencyKey, requestFingerprint, request: { task, metadata: { ...metadata } }, createdAt: now, updatedAt: now };'''
+          )
+          cp.write_text(text)
+
+          domain = Path('src/domain.ts')
+          d = domain.read_text()
+          d = d.replace(
+              '  idempotencyKey: string;\n  request: PersistedCallRequest;\n',
+              '  idempotencyKey: string;\n  /** SHA-256 binding of the logical owner-callback request; never sent to the phone provider. */\n  requestFingerprint?: string;\n  request: PersistedCallRequest;\n'
+          )
+          domain.write_text(d)
+
+          http = Path('src/http-server.ts')
+          h = http.read_text()
+          h = h.replace('import type { ControlPlane } from "./control-plane.js";', 'import { IDEMPOTENCY_CONFLICT_MESSAGE, type ControlPlane } from "./control-plane.js";')
+          h = h.replace(
+              '  if (message === "Call attempt is not an owner callback") return { status: 409, error: "callback_purpose_mismatch" };',
+              '  if (message === "Call attempt is not an owner callback") return { status: 409, error: "callback_purpose_mismatch" };\n  if (message === IDEMPOTENCY_CONFLICT_MESSAGE) return { status: 409, error: "idempotency_conflict" };'
+          )
+          http.write_text(h)
+
+          test_file = Path('tests/idempotency-payload-binding.test.ts')
+          test_file.write_text('''import assert from "node:assert/strict";\nimport { mkdtempSync, rmSync } from "node:fs";\nimport type { AddressInfo } from "node:net";\nimport { tmpdir } from "node:os";\nimport { join } from "node:path";\nimport { afterEach, test } from "node:test";\nimport { FakeCallProvider } from "../src/call-provider.js";\nimport { ControlPlane, IDEMPOTENCY_CONFLICT_MESSAGE } from "../src/control-plane.js";\nimport { createControlPlaneHttpServer } from "../src/http-server.js";\nimport { SqliteControlPlaneStore } from "../src/sqlite-store.js";\nimport { InMemoryControlPlaneStore } from "../src/store.js";\n\nconst servers: Array<ReturnType<typeof createControlPlaneHttpServer>> = [];\n\nafterEach(async () => {\n  await Promise.all(servers.splice(0).map((server) => new Promise<void>((resolve) => server.close(() => resolve()))));\n});\n\nfunction setup() {\n  const store = new InMemoryControlPlaneStore();\n  const provider = new FakeCallProvider();\n  const control = new ControlPlane(store, provider);\n  const agent = control.registerAgent({ name: "idempotency-agent", platform: "test", ownerId: "owner-1" });\n  const run = control.startRun(agent.id, "Working", "scope-a");\n  return { store, provider, control, agent, run };\n}\n\ntest("owner-decision idempotency key is bound to the original logical request", async () => {\n  const { store, control, agent, run } = setup();\n  const request = {\n    runId: run.id, scopeId: "release", question: "Ship now?", context: "Production is green",\n    blocking: true, priority: "high" as const, expiresAt: "2026-09-11T00:00:00.000Z", idempotencyKey: "decision-bound-1",\n  };\n  const first = await control.requestOwnerDecision(request);\n  assert.equal((await control.requestOwnerDecision({ ...request })).id, first.id);\n\n  const otherRun = control.startRun(agent.id, "Other work", "scope-b");\n  for (const changed of [\n    { ...request, runId: otherRun.id },\n    { ...request, scopeId: "billing" },\n    { ...request, question: "Rollback?" },\n    { ...request, context: "Different context" },\n    { ...request, blocking: false },\n    { ...request, priority: "critical" as const },\n    { ...request, expiresAt: "2026-09-12T00:00:00.000Z" },\n  ]) {\n    await assert.rejects(control.requestOwnerDecision(changed), new RegExp(IDEMPOTENCY_CONFLICT_MESSAGE));\n  }\n\n  assert.equal(store.escalations.size, 1);\n  assert.equal(store.callAttempts.size, 1);\n});\n\ntest("owner-callback idempotency key binds run and prompt while exact retries remain no-op", async () => {\n  const { store, control, agent, run } = setup();\n  const request = { runId: run.id, prompt: "Tell me deployment progress", idempotencyKey: "callback-bound-1" };\n  const first = await control.requestOwnerCallback(request);\n  assert.equal((await control.requestOwnerCallback({ ...request })).id, first.id);\n\n  control.heartbeat(run.id, { summary: "Status changed after callback reservation", currentScope: "scope-c" });\n  assert.equal((await control.requestOwnerCallback({ ...request })).id, first.id, "run status changes do not change the logical callback request");\n\n  await assert.rejects(\n    control.requestOwnerCallback({ ...request, prompt: "Tell me billing progress" }),\n    new RegExp(IDEMPOTENCY_CONFLICT_MESSAGE),\n  );\n  const otherRun = control.startRun(agent.id, "Other work");\n  await assert.rejects(\n    control.requestOwnerCallback({ ...request, runId: otherRun.id }),\n    new RegExp(IDEMPOTENCY_CONFLICT_MESSAGE),\n  );\n\n  assert.equal(store.callAttempts.size, 1);\n  assert.ok(first.requestFingerprint);\n  assert.equal(first.request.metadata.callbackRequestFingerprint, undefined, "binding stays local and is not provider metadata");\n});\n\ntest("exact retries remain valid after a run is no longer running", async () => {\n  const { store, control, run } = setup();\n  const decisionRequest = { runId: run.id, scopeId: "deploy", question: "Deploy?", blocking: true, idempotencyKey: "stopped-decision" };\n  const callbackRequest = { runId: run.id, prompt: "Progress?", idempotencyKey: "stopped-callback" };\n  const decision = await control.requestOwnerDecision(decisionRequest);\n  const callback = await control.requestOwnerCallback(callbackRequest);\n  store.runs.set(run.id, { ...run, status: "completed", updatedAt: new Date().toISOString() });\n\n  assert.equal((await control.requestOwnerDecision(decisionRequest)).id, decision.id);\n  assert.equal((await control.requestOwnerCallback(callbackRequest)).id, callback.id);\n  await assert.rejects(\n    control.requestOwnerDecision({ ...decisionRequest, question: "Different?" }),\n    new RegExp(IDEMPOTENCY_CONFLICT_MESSAGE),\n  );\n});\n\ntest("callback request binding survives SQLite restart", async () => {\n  const directory = mkdtempSync(join(tmpdir(), "cya-idempotency-binding-"));\n  const filename = join(directory, "state.db");\n  try {\n    const provider = new FakeCallProvider();\n    const firstStore = SqliteControlPlaneStore.open(filename);\n    const first = new ControlPlane(firstStore, provider);\n    const agent = first.registerAgent({ name: "durable-agent", platform: "test", ownerId: "owner-1" });\n    const run = first.startRun(agent.id, "Working");\n    const callback = await first.requestOwnerCallback({ runId: run.id, prompt: "Original prompt", idempotencyKey: "durable-callback-key" });\n    assert.ok(callback.requestFingerprint);\n    firstStore.close();\n\n    const reopenedStore = SqliteControlPlaneStore.open(filename);\n    const reopened = new ControlPlane(reopenedStore, new FakeCallProvider());\n    const replay = await reopened.requestOwnerCallback({ runId: run.id, prompt: "Original prompt", idempotencyKey: "durable-callback-key" });\n    assert.equal(replay.id, callback.id);\n    await assert.rejects(\n      reopened.requestOwnerCallback({ runId: run.id, prompt: "Changed prompt", idempotencyKey: "durable-callback-key" }),\n      new RegExp(IDEMPOTENCY_CONFLICT_MESSAGE),\n    );\n    assert.equal(reopenedStore.callAttempts.size, 1);\n    reopenedStore.close();\n  } finally {\n    rmSync(directory, { recursive: true, force: true });\n  }\n});\n\ntest("HTTP returns a stable privacy-safe 409 for idempotency payload mismatch", async () => {\n  const control = new ControlPlane(new InMemoryControlPlaneStore(), new FakeCallProvider());\n  const server = createControlPlaneHttpServer(control, { apiToken: "test-secret" });\n  servers.push(server);\n  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));\n  const address = server.address() as AddressInfo;\n  const base = `http://127.0.0.1:${address.port}`;\n  const agent = control.registerAgent({ name: "worker", platform: "test", ownerId: "owner" });\n  const run = control.startRun(agent.id, "working");\n  const otherRun = control.startRun(agent.id, "other");\n\n  const post = (body: unknown) => fetch(`${base}/v1/escalations`, {\n    method: "POST",\n    headers: { authorization: "Bearer test-secret", "content-type": "application/json" },\n    body: JSON.stringify(body),\n  });\n  const firstBody = { runId: run.id, scopeId: "release", question: "Ship?", blocking: true, idempotencyKey: "http-bound-key" };\n  assert.equal((await post(firstBody)).status, 201);\n  const conflict = await post({ ...firstBody, runId: otherRun.id, question: "Different secret question" });\n  assert.equal(conflict.status, 409);\n  const body = await conflict.json() as { error: string };\n  assert.deepEqual(body, { error: "idempotency_conflict" });\n  const serialized = JSON.stringify(body);\n  assert.equal(serialized.includes(run.id), false);\n  assert.equal(serialized.includes(otherRun.id), false);\n  assert.equal(serialized.includes("Different secret question"), false);\n});\n''')
+
+          workflow = Path('.github/workflows/apply-idempotency-binding.yml')
+          workflow.unlink()
+          PY
+      - name: Verify before committing
+        run: |
+          npm ci
+          npm run check
+      - name: Commit verified changes
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add -A
+          git commit -m "Harden request idempotency payload binding"
+          git push origin HEAD:automation/idempotency-payload-binding
