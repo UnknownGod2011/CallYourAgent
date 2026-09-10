@@ -6,13 +6,13 @@ CallYourAgent is a durable Node 24 TypeScript control plane for asynchronous two
 
 The repository includes deterministic fake and production CALL-E providers, SQLite persistence, replayable/idempotent call attempts, polling/webhook convergence, branch-scoped blocking, owner decision persistence, durable per-run instruction queues with exact acknowledgement, quiet hours/call budgets, bounded lifecycle recovery, fail-closed ambiguous/stalled handling, privacy-aware audit history, scoped HTTP authentication, a typed TypeScript client, a real stdio MCP adapter, deterministic end-to-end/demo flows, an operator console, a Claude Code host-acceptance runbook, and a single-instance persistent-volume Compose reference deployment.
 
-This run continued the HTTP transport-validation audit. PR #35 makes optional text fields type-safe at runtime instead of silently treating a present non-string value as if the field had been omitted. The change covers run `currentScope`, heartbeat `summary`/`currentScope`, escalation `context`, and owner-callback `prompt`, while preserving the existing behavior that an absent value or blank string means “not supplied.”
+This run continued the HTTP transport-validation audit. PR #36 makes `checkpoint.consume` type-safe at runtime instead of silently interpreting any supplied value other than literal `true` as `false`. Omitted `consume` remains non-consuming for compatibility, while a supplied value must now be boolean before the control plane is invoked.
 
 ## Exact repo state inspected this run
 
-The run started from `main` HEAD `d5333c29bdd99bd32619f7785d53000b22dea5de`, the progress handoff after PR #34 (`0d6ab01861ee9ffab0d5874fc39783bef4a9c8a8`).
+The run started from `main` HEAD `c12a31fa4c19ad9493110b50d4ebba8f2e3bd725`, the progress handoff after PR #35 (`492f2fc6a9f2453cb0865c15a9fe447494bdf10d`).
 
-Inspected the complete recursive repository tree and current source/test inventory, recent commits, current issue state, and recent pull requests. There were no open issues and no pre-existing open pull request blocking this increment.
+Before any change, inspected the complete recursive repository tree and current source/test inventory, recent commits, current issue state, and recent pull requests. There were no open issues and no pre-existing open pull requests.
 
 Read in full during the mandatory pre-implementation audit:
 
@@ -29,37 +29,37 @@ Read in full during the mandatory pre-implementation audit:
 - `docs/PROVIDER_RESTART_SEMANTICS.md`
 - `deploy/README.md`
 
-Also inspected `src/http-server.ts`, `src/store.ts`, the current HTTP-validation regressions, and the complete test inventory. No file content was modified until the documentation/source audit was complete. An empty working branch ref was created during the audit before the last documentation reads; all implementation commits were made only after the full audit was complete.
+Also inspected `src/http-server.ts`, `src/store.ts`, `src/domain.ts`, `tests/http-server.test.ts`, `package.json`, and the full test inventory before modifying repository content.
 
-The inspection found that the HTTP helper for optional text returned `undefined` for any non-string runtime value. Consequently, an untyped network caller could send values such as `prompt: 123`, `context: []`, or `summary: { ... }`; the adapter would silently reinterpret the malformed supplied value as “field omitted” and could continue into domain mutation/provider orchestration. This was a transport-boundary defect rather than a new domain rule.
+The inspection found that `POST /v1/runs/:runId/checkpoint` passed `value.consume === true` directly to `ControlPlane.checkpoint`. An untyped network caller could therefore send `consume: "true"`, `consume: 1`, `consume: null`, an array, or an object; the adapter silently treated every one as `false`. That ambiguity is especially undesirable on the safe-checkpoint boundary because a caller could believe it requested consumption while durable owner steering remained queued, or malformed input could be accepted without revealing the integration bug.
+
+A local clone was not required for the change; as in the previous run, the automation container's direct GitHub DNS path remains unreliable, so GitHub Actions was used as the authoritative executable verification path.
 
 ## Changes made this run
 
-PR #35, `Validate optional HTTP text fields`, changed `src/http-server.ts` and added `tests/http-optional-text-validation.test.ts`.
+PR #36, `Validate checkpoint consume input`, changed `src/http-server.ts` and added `tests/http-checkpoint-consume-validation.test.ts`.
 
-The HTTP boundary now:
+The HTTP checkpoint boundary now:
 
-1. distinguishes an actually absent optional field from a present malformed value;
-2. requires a present optional text value to be a string;
-3. returns a stable privacy-safe HTTP 400 error such as `prompt must be a string` for a wrong runtime type;
-4. validates run `currentScope`, heartbeat `summary` and `currentScope`, escalation `context`, and callback `prompt` consistently;
-5. preserves backwards-compatible blank/whitespace-string normalization to omission;
-6. rejects malformed values before run/heartbeat/escalation/callback control-plane mutation or provider call creation;
-7. keeps unexpected failures behind the existing fail-closed `500 internal_error` boundary.
+1. distinguishes an omitted `consume` from a supplied malformed value;
+2. preserves omission as the existing non-consuming default (`false`);
+3. accepts literal `true` and `false` as the only supplied forms;
+4. rejects any supplied non-boolean value with the existing stable privacy-safe HTTP 400 contract, `consume must be boolean`;
+5. performs that validation before invoking `ControlPlane.checkpoint`, so malformed transport input cannot change durable instruction state;
+6. preserves the preferred two-phase integration model: pull without consumption, incorporate steering at a safe work boundary, then acknowledge exact instruction ids;
+7. leaves the control-plane state machine, fake/live providers, SDK/MCP semantics, and branch-scoped blocking model unchanged.
 
-The new deterministic HTTP regressions prove that malformed optional values cannot create a run, mutate heartbeat/audit state, create an escalation, bind callback idempotency state, create a call attempt, or reach a provider side effect. A positive compatibility regression proves a blank callback prompt remains accepted as omitted.
+The new deterministic regressions seed a real queued `OwnerInstruction`, submit malformed `consume` values (`"true"`, `1`, `null`, array, object), and prove every request returns 400 while the instruction remains `queued`. A compatibility regression proves an omitted value remains non-consuming, then proves literal `true` returns the queued instruction and transitions it to `consumed`.
 
-PR #35 was squash-merged into `main` as `492f2fc6a9f2453cb0865c15a9fe447494bdf10d`.
+PR #36 was squash-merged into `main` as `15d107eb1b620195aad14dcf3e9feb2cd1dec4b7`.
 
 ## Verification performed
 
-Authoritative final verification ran against PR head `e2609daaf6f18eb6a958e2f7de82262c3f999d5b`:
+Authoritative final verification ran against PR head `12ea34cde26142b9ea3d3627982b6fb35f994eed`:
 
-- CI run `34518290853` — **success** on Node 24.20.0. Locked dependency installation succeeded, TypeScript typecheck succeeded, build succeeded, and **180/180 tests passed**, 0 failures. All four new optional-text HTTP regressions passed.
-- Container run `34518290869` — **success**. The production image/runtime path remained green.
-- Compose deployment run `34518290906` — **success**. The production-style durable SQLite + scoped credentials + compiled MCP + restart + branch-scoped decision + owner callback + exactly-once steering + safe-checkpoint acceptance path remained green.
-
-A local clone was attempted only as a convenience for editing/testing, but the automation container could not resolve `github.com`; GitHub Actions therefore remained the authoritative executable verification path. This was transient/local tooling, not a repository blocker.
+- CI run `34523742915` — **success** on Node 24.20.0. Locked dependency installation succeeded, TypeScript typecheck succeeded, build succeeded, and **182/182 tests passed**, 0 failures. Both new checkpoint-consume regressions passed.
+- Container run `34523742838` — **success**. The production image/runtime path remained green.
+- Compose deployment run `34523742844` — **success**. The production-style durable SQLite + scoped credentials + compiled MCP + restart + branch-scoped decision + owner callback + exactly-once steering + safe-checkpoint acceptance path remained green.
 
 `package.json` still has no separate lint script and no standalone migration/schema-check command. `npm run check` covers typecheck, build, and tests; SQLite regressions exercise schema/transaction durability, and Container/Compose cover packaged runtime/deployment behavior.
 
@@ -67,11 +67,11 @@ No live CALL-E phone call was attempted or claimed.
 
 ## Architecture decisions made this run
 
-1. HTTP optionality and runtime type are separate concepts: omission is valid where documented, but a caller that explicitly supplies the field must supply the contract type.
-2. The adapter should enforce transport shape before invoking shared control-plane semantics; no duplicate platform-specific state machine or domain rewrite is needed.
-3. Blank optional strings remain normalized to omission to preserve current SDK/browser compatibility; this increment is about wrong runtime types, not changing empty-text semantics.
-4. Client-correctable malformed input receives stable privacy-safe 400 errors, while arbitrary runtime/domain exceptions continue to collapse to `500 internal_error`.
-5. Invalid callback/escalation context must fail before any durable phone-side-effect state exists. This preserves the existing fake/live provider and idempotency architecture unchanged.
+1. Optional transport fields still require exact runtime types when supplied. Omission may carry a documented default, but malformed presence must not silently coerce to that default.
+2. The checkpoint boundary is safety-sensitive because it mediates durable human steering. Rejecting malformed `consume` before `ControlPlane.checkpoint` makes integration mistakes visible without inventing a second state machine.
+3. Omitted `consume` remains `false` for compatibility and because the preferred integration flow is already non-consuming pull followed by exact acknowledgement after the agent actually incorporates the instruction.
+4. Literal `true` remains supported as the legacy compatibility consumption path; this increment does not remove or redefine that behavior.
+5. Client-correctable malformed input receives a stable privacy-safe 400, while unexpected runtime/domain failures remain behind the fail-closed `500 internal_error` boundary.
 
 ## CALL-E integration status
 
@@ -80,6 +80,7 @@ No live CALL-E phone call was attempted or claimed.
 - **Control-plane idempotency:** decision and callback keys remain payload-bound; exact retries remain no-op replays; changed-payload reuse is rejected; SQLite race coverage proves the durable first binding wins before provider I/O.
 - **Public webhook configuration:** live runtime requires an exact HTTPS origin and structurally constructs the tokenized webhook target. Application request handling strips the capability token from `IncomingMessage.url`; reverse-proxy/CDN/APM query-string redaction remains mandatory.
 - **Shared integration surfaces:** HTTP, TypeScript SDK, stdio MCP, lifecycle worker, operator console, and deployment acceptance continue sharing the same persistent control-plane state machine.
+- **Checkpoint semantics:** malformed HTTP `consume` values now fail before state mutation; omitted/non-consuming pull plus exact acknowledgement remains the recommended integration model.
 - **Claude Code:** compiled stdio MCP behavior remains covered automatically and through Compose acceptance. A genuine Claude Code host session has still not been observed and is not claimed.
 - **Live status:** no authorized real CALL-E phone call has been performed, so live provider connectivity, owner-phone authorization, and externally reachable webhook delivery remain unverified.
 
@@ -95,9 +96,10 @@ The SQLite reference topology remains intentionally single-instance. Multi-insta
 
 ## Highest-value next actions
 
-1. Continue the HTTP transport audit with fields that still have permissive coercion semantics, especially `checkpoint.consume` (currently only literal `true` changes behavior, so a supplied wrong type silently becomes `false`) and query-parameter cardinality/validation such as duplicate `audit?limit=` values.
-2. Review live-runtime environment validation ordering for settings that can still fail only after durable storage opens, and move safe pure validation earlier where appropriate.
-3. Continue least-privilege review of owner/operator/reconciler surfaces without widening browser or normal-agent credentials.
-4. Add explicit store-contract tests before introducing any Postgres/multi-instance deployment so atomic idempotency winner-selection remains a required adapter property.
-5. Run the documented acceptance in a genuine Claude Code host when that external prerequisite is available and record only observed host/version behavior.
-6. When the user-controlled CALL-E prerequisites are available, perform one tightly bounded live provider acceptance and record only observed behavior.
+1. Continue the HTTP query-boundary audit, especially `GET /v1/runs/:runId/audit?limit=...`: reject duplicate `limit` parameters and malformed/coercive numeric forms with a stable 400 instead of relying on first-value-wins `URLSearchParams.get` plus JavaScript `Number(...)` coercion.
+2. Review other request/query cardinality assumptions for duplicate parameters or malformed values that can be rejected before domain work without changing valid SDK/MCP contracts.
+3. Review live-runtime environment validation ordering for settings that can still fail only after durable storage opens, and move safe pure validation earlier where appropriate.
+4. Continue least-privilege review of owner/operator/reconciler surfaces without widening browser or normal-agent credentials.
+5. Add explicit store-contract tests before introducing any Postgres/multi-instance deployment so atomic idempotency winner-selection remains a required adapter property.
+6. Run the documented acceptance in a genuine Claude Code host when that external prerequisite is available and record only observed host/version behavior.
+7. When the user-controlled CALL-E prerequisites are available, perform one tightly bounded live provider acceptance and record only observed behavior.
