@@ -4,6 +4,7 @@ import { URL } from "node:url";
 import { parseCalleTerminalWebhook } from "./calle-webhook.js";
 import { toOwnerCallbackView } from "./callback-view.js";
 import { IDEMPOTENCY_CONFLICT_MESSAGE, type ControlPlane } from "./control-plane.js";
+import type { EscalationPriority } from "./domain.js";
 import { getEscalationLifecycleView } from "./escalation-view.js";
 import { operatorConsoleHtml } from "./operator-ui.js";
 import { getRunOverview } from "./run-overview.js";
@@ -29,6 +30,9 @@ const CONCRETE_API_SCOPES: Exclude<ApiScope, "*">[] = [
   "owner:callback",
   "calls:reconcile",
 ];
+
+const ESCALATION_PRIORITIES: readonly EscalationPriority[] = ["low", "normal", "high", "critical"];
+const ISO_DATE_TIME_WITH_ZONE = /^(\d{4})-(\d{2})-(\d{2})T(?:[01]\d|2[0-3]):[0-5]\d:[0-5]\d(?:\.\d+)?(?:Z|[+-](?:[01]\d|2[0-3]):[0-5]\d)$/;
 
 export interface HttpRateLimitOptions {
   ownerCallbacksPerWindow?: number;
@@ -221,8 +225,8 @@ export function createControlPlaneHttpServer(controlPlane: ControlPlane, options
           runId: text(value.runId, "runId"), scopeId: text(value.scopeId, "scopeId"),
           question: text(value.question, "question"), context: optionalText(value.context),
           blocking: boolean(value.blocking, "blocking"),
-          priority: value.priority as "low" | "normal" | "high" | "critical" | undefined,
-          expiresAt: optionalText(value.expiresAt), idempotencyKey: text(value.idempotencyKey, "idempotencyKey"),
+          priority: optionalEscalationPriority(value.priority),
+          expiresAt: optionalIsoDateTime(value.expiresAt, "expiresAt"), idempotencyKey: text(value.idempotencyKey, "idempotencyKey"),
         });
         return json(res, 201, escalation);
       }
@@ -295,6 +299,8 @@ function publicHttpError(error: unknown): { status: number; error: string } {
     || message === "Provider webhook event id is required"
     || message === "Provider call id is required"
     || message === "Audit event limit must be an integer from 1 to 500"
+    || message === "priority must be one of: low, normal, high, critical"
+    || message === "expiresAt must be an ISO 8601 date-time with timezone"
     || /^[A-Za-z][A-Za-z0-9]* is required$/.test(message)
     || /^[A-Za-z][A-Za-z0-9]* must be boolean$/.test(message)
     || /^[A-Za-z][A-Za-z0-9]* must be an array of non-empty strings$/.test(message)
@@ -384,6 +390,26 @@ function record(value: unknown): Record<string, unknown> {
 function text(value: unknown, field: string): string { if (typeof value !== "string" || !value.trim()) throw new Error(`${field} is required`); return value; }
 function optionalText(value: unknown): string | undefined { return typeof value === "string" && value.trim() ? value : undefined; }
 function boolean(value: unknown, field: string): boolean { if (typeof value !== "boolean") throw new Error(`${field} must be boolean`); return value; }
+function optionalEscalationPriority(value: unknown): EscalationPriority | undefined {
+  if (value === undefined) return undefined;
+  if (typeof value !== "string" || !ESCALATION_PRIORITIES.includes(value as EscalationPriority)) {
+    throw new Error("priority must be one of: low, normal, high, critical");
+  }
+  return value as EscalationPriority;
+}
+function optionalIsoDateTime(value: unknown, field: string): string | undefined {
+  if (value === undefined) return undefined;
+  if (typeof value !== "string") throw new Error(`${field} must be an ISO 8601 date-time with timezone`);
+  const match = ISO_DATE_TIME_WITH_ZONE.exec(value);
+  if (match) {
+    const year = Number(match[1]);
+    const month = Number(match[2]);
+    const day = Number(match[3]);
+    const maxDay = month >= 1 && month <= 12 ? new Date(Date.UTC(year, month, 0)).getUTCDate() : 0;
+    if (day >= 1 && day <= maxDay && Number.isFinite(Date.parse(value))) return value;
+  }
+  throw new Error(`${field} must be an ISO 8601 date-time with timezone`);
+}
 function stringArray(value: unknown, field: string): string[] {
   if (!Array.isArray(value) || value.some((item) => typeof item !== "string" || !item.trim())) throw new Error(`${field} must be an array of non-empty strings`);
   return value as string[];
