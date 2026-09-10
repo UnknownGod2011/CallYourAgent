@@ -399,7 +399,8 @@ function optionalEscalationPriority(value: unknown): EscalationPriority | undefi
 }
 function optionalIsoDateTime(value: unknown, field: string): string | undefined {
   if (value === undefined) return undefined;
-  const match = typeof value === "string" ? ISO_DATE_TIME_WITH_ZONE.exec(value) : null;
+  if (typeof value !== "string") throw new Error(`${field} must be an ISO 8601 date-time with timezone`);
+  const match = ISO_DATE_TIME_WITH_ZONE.exec(value);
   if (match) {
     const year = Number(match[1]);
     const month = Number(match[2]);
