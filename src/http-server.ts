@@ -60,6 +60,40 @@ interface RateLimitEntry {
   count: number;
 }
 
+export interface RedactedCalleWebhookTarget {
+  target: string;
+  token?: string;
+  isCalleWebhook: boolean;
+}
+
+/**
+ * Extract the application-owned CALL-E webhook capability and return a request
+ * target with every `token` query parameter removed. The HTTP server applies
+ * this at the beginning of request handling and overwrites IncomingMessage.url
+ * so later in-process diagnostics cannot accidentally serialize the secret URL.
+ *
+ * This cannot redact logs produced by a reverse proxy/CDN before Node receives
+ * the request; exposed deployments must still suppress/redact webhook queries
+ * at the ingress layer.
+ */
+export function redactCalleWebhookRequestTarget(target: string): RedactedCalleWebhookTarget {
+  try {
+    const url = new URL(target, "http://localhost");
+    if (url.pathname !== "/webhooks/calle") return { target, isCalleWebhook: false };
+    const tokens = url.searchParams.getAll("token");
+    const token = tokens.length === 1 ? tokens[0] : undefined;
+    url.searchParams.delete("token");
+    const remainingQuery = url.searchParams.toString();
+    return {
+      target: `${url.pathname}${remainingQuery ? `?${remainingQuery}` : ""}`,
+      token,
+      isCalleWebhook: true,
+    };
+  } catch {
+    return { target, isCalleWebhook: false };
+  }
+}
+
 export function createControlPlaneHttpServer(controlPlane: ControlPlane, options: HttpServerOptions): Server {
   const credentials = normalizeCredentials(options);
   const maxBodyBytes = options.maxBodyBytes ?? 256_000;
@@ -69,6 +103,9 @@ export function createControlPlaneHttpServer(controlPlane: ControlPlane, options
   const rateLimits = new Map<string, RateLimitEntry>();
 
   return createServer(async (req, res) => {
+    const webhookTarget = redactCalleWebhookRequestTarget(req.url ?? "/");
+    if (webhookTarget.isCalleWebhook) req.url = webhookTarget.target;
+
     try {
       const url = new URL(req.url ?? "/", "http://localhost");
       if (req.method === "GET" && url.pathname === "/health") return json(res, 200, { ok: true });
@@ -86,7 +123,7 @@ export function createControlPlaneHttpServer(controlPlane: ControlPlane, options
       if (req.method === "GET" && url.pathname === "/operator") return html(res, 200, operatorConsoleHtml());
 
       if (req.method === "POST" && url.pathname === "/webhooks/calle") {
-        if (!options.calleWebhookToken || !safeEqual(url.searchParams.get("token") ?? "", options.calleWebhookToken)) {
+        if (!options.calleWebhookToken || !safeEqual(webhookTarget.token ?? "", options.calleWebhookToken)) {
           return json(res, 401, { error: "unauthorized_webhook" });
         }
         const payload = await readJson(req, maxBodyBytes);
