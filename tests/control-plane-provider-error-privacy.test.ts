@@ -5,6 +5,7 @@ import {
   GENERIC_CALL_PROVIDER_ERROR,
   SafeCallProviderError,
   type StartCallInput,
+  type StartCallResult,
 } from "../src/call-provider.js";
 import { ControlPlane } from "../src/control-plane.js";
 import { InMemoryControlPlaneStore } from "../src/store.js";
@@ -21,7 +22,7 @@ test("custom provider exception text never reaches durable lastError during crea
   const secret = "phone=+15551234567 webhook_token=do-not-persist task=secret-production-deploy";
 
   class SecretBearingProvider extends FakeCallProvider {
-    override async start(_input: StartCallInput) {
+    override async start(_input: StartCallInput): Promise<StartCallResult> {
       throw new Error(secret);
     }
   }
@@ -48,7 +49,7 @@ test("custom provider exception text never reaches durable lastError during crea
 
 test("control plane preserves only explicitly marked persistence-safe provider diagnostics", async () => {
   class SanitizedProvider extends FakeCallProvider {
-    override async start(_input: StartCallInput) {
+    override async start(_input: StartCallInput): Promise<StartCallResult> {
       throw new SafeCallProviderError("CALL-E create transport failed");
     }
   }
