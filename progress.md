@@ -6,15 +6,15 @@ CallYourAgent is a durable Node 24 TypeScript control plane for asynchronous two
 
 The repository includes deterministic fake and production CALL-E providers, SQLite persistence, replayable/idempotent call attempts, polling/webhook convergence, branch-scoped blocking, owner decision persistence, durable per-run instruction queues with exact acknowledgement, quiet hours/call budgets, bounded lifecycle recovery, fail-closed ambiguous/stalled handling, privacy-aware audit history, scoped HTTP authentication, a typed TypeScript client, a real stdio MCP adapter, deterministic end-to-end/demo flows, an operator console, a Claude Code host-acceptance runbook, and a single-instance persistent-volume Compose reference deployment.
 
-This run hardened the owner-decision HTTP input boundary. PR #34 adds runtime validation for escalation `priority` and `expiresAt` before `ControlPlane.requestOwnerDecision` is invoked, preventing malformed client data from entering durable escalation/policy/lifecycle state or reaching phone-provider orchestration.
+This run continued the HTTP transport-validation audit. PR #35 makes optional text fields type-safe at runtime instead of silently treating a present non-string value as if the field had been omitted. The change covers run `currentScope`, heartbeat `summary`/`currentScope`, escalation `context`, and owner-callback `prompt`, while preserving the existing behavior that an absent value or blank string means “not supplied.”
 
 ## Exact repo state inspected this run
 
-The run started from `main` HEAD `533f69d179d5fd451a7ff7d92d62ea012c107242`, the progress handoff after PR #33 (`63c766cb7c2f101d840e73274cb777091fa34b82`).
+The run started from `main` HEAD `d5333c29bdd99bd32619f7785d53000b22dea5de`, the progress handoff after PR #34 (`0d6ab01861ee9ffab0d5874fc39783bef4a9c8a8`).
 
-Before changing code, inspected the complete recursive repository tree and current source/test inventories, recent commits, and current issue/PR state. There were no open issues or pull requests blocking the increment.
+Inspected the complete recursive repository tree and current source/test inventory, recent commits, current issue state, and recent pull requests. There were no open issues and no pre-existing open pull request blocking this increment.
 
-Read in full before changing code:
+Read in full during the mandatory pre-implementation audit:
 
 - `AGENTS.md`
 - `progress.md`
@@ -29,38 +29,37 @@ Read in full before changing code:
 - `docs/PROVIDER_RESTART_SEMANTICS.md`
 - `deploy/README.md`
 
-Also inspected the relevant implementation and regression paths including `src/http-server.ts`, `src/domain.ts`, `src/control-plane.ts`, `src/call-policy.ts`, `src/call-provider.ts`, `tests/http-server.test.ts`, and the complete current test inventory.
+Also inspected `src/http-server.ts`, `src/store.ts`, the current HTTP-validation regressions, and the complete test inventory. No file content was modified until the documentation/source audit was complete. An empty working branch ref was created during the audit before the last documentation reads; all implementation commits were made only after the full audit was complete.
 
-The inspection found that `POST /v1/escalations` previously accepted `priority` through a TypeScript-only cast with no runtime enum check and accepted `expiresAt` through generic optional-string handling. An unknown priority such as `urgent` could therefore enter the policy layer with no rank entry, while malformed expiry values could become durable lifecycle input. Both are transport-validation defects rather than new domain states.
+The inspection found that the HTTP helper for optional text returned `undefined` for any non-string runtime value. Consequently, an untyped network caller could send values such as `prompt: 123`, `context: []`, or `summary: { ... }`; the adapter would silently reinterpret the malformed supplied value as “field omitted” and could continue into domain mutation/provider orchestration. This was a transport-boundary defect rather than a new domain rule.
 
 ## Changes made this run
 
-PR #34, `Validate owner decision HTTP inputs`, changed `src/http-server.ts` and added `tests/http-owner-decision-validation.test.ts`.
+PR #35, `Validate optional HTTP text fields`, changed `src/http-server.ts` and added `tests/http-optional-text-validation.test.ts`.
 
 The HTTP boundary now:
 
-1. accepts only the domain priorities `low`, `normal`, `high`, and `critical`;
-2. returns a stable privacy-safe HTTP 400 response for any other priority value;
-3. requires `expiresAt`, when supplied, to be an ISO 8601 date-time with an explicit `Z` or numeric timezone offset;
-4. rejects timezone-less dates, non-string values, malformed times/offsets, and impossible calendar dates such as February 31 rather than relying on JavaScript date normalization;
-5. performs these checks before invoking the control plane, so invalid requests create no escalation, call attempt, audit mutation, or provider side effect;
-6. preserves normal creation for valid priorities and timezone-qualified expiries.
+1. distinguishes an actually absent optional field from a present malformed value;
+2. requires a present optional text value to be a string;
+3. returns a stable privacy-safe HTTP 400 error such as `prompt must be a string` for a wrong runtime type;
+4. validates run `currentScope`, heartbeat `summary` and `currentScope`, escalation `context`, and callback `prompt` consistently;
+5. preserves backwards-compatible blank/whitespace-string normalization to omission;
+6. rejects malformed values before run/heartbeat/escalation/callback control-plane mutation or provider call creation;
+7. keeps unexpected failures behind the existing fail-closed `500 internal_error` boundary.
 
-The new end-to-end HTTP regressions explicitly verify invalid priority and expiry requests are non-mutating and verify a valid high-priority request with a zoned expiry still enters the normal escalation/call path.
+The new deterministic HTTP regressions prove that malformed optional values cannot create a run, mutate heartbeat/audit state, create an escalation, bind callback idempotency state, create a call attempt, or reach a provider side effect. A positive compatibility regression proves a blank callback prompt remains accepted as omitted.
 
-PR #34 was squash-merged into `main` as `0d6ab01861ee9ffab0d5874fc39783bef4a9c8a8`.
+PR #35 was squash-merged into `main` as `492f2fc6a9f2453cb0865c15a9fe447494bdf10d`.
 
 ## Verification performed
 
-The first PR verification exposed an intentional edge case in the new regression: JavaScript's date parser normalized an impossible `2026-02-31...` timestamp, so the initial implementation returned 201 rather than the expected 400. The validator was tightened rather than weakening the regression.
+Authoritative final verification ran against PR head `e2609daaf6f18eb6a958e2f7de82262c3f999d5b`:
 
-A second verification then exposed a TypeScript narrowing error in that stricter helper before tests ran. The helper was corrected to narrow the unknown HTTP value to a string before parsing. These failures were fixed on the branch before merge.
+- CI run `34518290853` — **success** on Node 24.20.0. Locked dependency installation succeeded, TypeScript typecheck succeeded, build succeeded, and **180/180 tests passed**, 0 failures. All four new optional-text HTTP regressions passed.
+- Container run `34518290869` — **success**. The production image/runtime path remained green.
+- Compose deployment run `34518290906` — **success**. The production-style durable SQLite + scoped credentials + compiled MCP + restart + branch-scoped decision + owner callback + exactly-once steering + safe-checkpoint acceptance path remained green.
 
-Authoritative final verification ran against PR head `8acc7c8d8c0a826b3538e140c095990852f92632`:
-
-- CI run `34512143402` — **success** on Node 24.20.0. Locked dependency installation succeeded, TypeScript typecheck succeeded, build succeeded, and **176/176 tests passed**, 0 failures. All three new owner-decision HTTP validation regressions passed.
-- Container run `34512142815` — **success**. The production image/runtime path remained green.
-- Compose deployment run `34512143376` — **success**. The production-style durable SQLite + scoped credentials + compiled MCP + restart + branch-scoped decision + callback steering + safe-checkpoint acceptance path remained green.
+A local clone was attempted only as a convenience for editing/testing, but the automation container could not resolve `github.com`; GitHub Actions therefore remained the authoritative executable verification path. This was transient/local tooling, not a repository blocker.
 
 `package.json` still has no separate lint script and no standalone migration/schema-check command. `npm run check` covers typecheck, build, and tests; SQLite regressions exercise schema/transaction durability, and Container/Compose cover packaged runtime/deployment behavior.
 
@@ -68,12 +67,11 @@ No live CALL-E phone call was attempted or claimed.
 
 ## Architecture decisions made this run
 
-1. HTTP adapters must runtime-validate externally supplied enum/date values even when the TypeScript SDK already provides compile-time types. Network callers are untrusted and can bypass TypeScript.
-2. Invalid owner-decision transport input must fail before durable mutation and before any real-world call side effect.
-3. Escalation expiry requires an explicit timezone so lifecycle comparisons are deterministic across hosts and deployments.
-4. Date validation must reject impossible calendar dates rather than accepting JavaScript `Date.parse` normalization behavior.
-5. Client-correctable malformed input receives stable privacy-safe 400 errors, while unexpected runtime/domain failures continue to use the fail-closed `500 internal_error` boundary.
-6. No control-plane state-machine changes were needed; the transport adapter remains thin and delegates only validated domain-shaped input to the shared core.
+1. HTTP optionality and runtime type are separate concepts: omission is valid where documented, but a caller that explicitly supplies the field must supply the contract type.
+2. The adapter should enforce transport shape before invoking shared control-plane semantics; no duplicate platform-specific state machine or domain rewrite is needed.
+3. Blank optional strings remain normalized to omission to preserve current SDK/browser compatibility; this increment is about wrong runtime types, not changing empty-text semantics.
+4. Client-correctable malformed input receives stable privacy-safe 400 errors, while arbitrary runtime/domain exceptions continue to collapse to `500 internal_error`.
+5. Invalid callback/escalation context must fail before any durable phone-side-effect state exists. This preserves the existing fake/live provider and idempotency architecture unchanged.
 
 ## CALL-E integration status
 
@@ -97,7 +95,7 @@ The SQLite reference topology remains intentionally single-instance. Multi-insta
 
 ## Highest-value next actions
 
-1. Continue the HTTP validation audit for optional text fields and query parameters that currently tolerate wrong runtime types or rely on downstream validation, while keeping stable privacy-safe client errors and avoiding duplicate domain rules.
+1. Continue the HTTP transport audit with fields that still have permissive coercion semantics, especially `checkpoint.consume` (currently only literal `true` changes behavior, so a supplied wrong type silently becomes `false`) and query-parameter cardinality/validation such as duplicate `audit?limit=` values.
 2. Review live-runtime environment validation ordering for settings that can still fail only after durable storage opens, and move safe pure validation earlier where appropriate.
 3. Continue least-privilege review of owner/operator/reconciler surfaces without widening browser or normal-agent credentials.
 4. Add explicit store-contract tests before introducing any Postgres/multi-instance deployment so atomic idempotency winner-selection remains a required adapter property.
