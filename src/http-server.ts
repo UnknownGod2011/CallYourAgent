@@ -34,6 +34,7 @@ const CONCRETE_API_SCOPES: Exclude<ApiScope, "*">[] = [
 const ESCALATION_PRIORITIES: readonly EscalationPriority[] = ["low", "normal", "high", "critical"];
 const ISO_DATE_TIME_WITH_ZONE = /^(\d{4})-(\d{2})-(\d{2})T(?:[01]\d|2[0-3]):[0-5]\d:[0-5]\d(?:\.\d+)?(?:Z|[+-](?:[01]\d|2[0-3]):[0-5]\d)$/;
 const AUDIT_LIMIT_PATTERN = /^[1-9]\d{0,2}$/;
+const INVALID_PATH_IDENTIFIER = "invalid_path_identifier";
 
 export interface HttpRateLimitOptions {
   ownerCallbacksPerWindow?: number;
@@ -175,26 +176,26 @@ export function createControlPlaneHttpServer(controlPlane: ControlPlane, options
       if (req.method === "GET" && auditMatch) {
         if (!hasScope(credential, "audit:read")) return forbidden(res, "audit:read");
         const limit = auditLimit(url.searchParams);
-        return json(res, 200, { events: controlPlane.listAuditEvents(decodeURIComponent(auditMatch[1]!), limit) });
+        return json(res, 200, { events: controlPlane.listAuditEvents(pathIdentifier(auditMatch[1]!), limit) });
       }
 
       const overviewMatch = url.pathname.match(/^\/v1\/runs\/([^/]+)\/overview$/);
       if (req.method === "GET" && overviewMatch) {
         if (!hasScope(credential, "agent:read")) return forbidden(res, "agent:read");
-        return json(res, 200, getRunOverview(controlPlane, decodeURIComponent(overviewMatch[1]!)));
+        return json(res, 200, getRunOverview(controlPlane, pathIdentifier(overviewMatch[1]!)));
       }
 
       const runMatch = url.pathname.match(/^\/v1\/runs\/([^/]+)$/);
       if (req.method === "GET" && runMatch) {
         if (!hasScope(credential, "agent:read")) return forbidden(res, "agent:read");
-        return json(res, 200, controlPlane.getRun(decodeURIComponent(runMatch[1]!)));
+        return json(res, 200, controlPlane.getRun(pathIdentifier(runMatch[1]!)));
       }
 
       const heartbeatMatch = url.pathname.match(/^\/v1\/runs\/([^/]+)\/heartbeat$/);
       if (req.method === "POST" && heartbeatMatch) {
         if (!hasScope(credential, "agent:write")) return forbidden(res, "agent:write");
         const value = record(body);
-        return json(res, 200, controlPlane.heartbeat(decodeURIComponent(heartbeatMatch[1]!), {
+        return json(res, 200, controlPlane.heartbeat(pathIdentifier(heartbeatMatch[1]!), {
           summary: optionalText(value.summary, "summary"), currentScope: optionalText(value.currentScope, "currentScope"),
         }));
       }
@@ -204,7 +205,7 @@ export function createControlPlaneHttpServer(controlPlane: ControlPlane, options
         if (!hasScope(credential, "agent:write")) return forbidden(res, "agent:write");
         const value = record(body);
         return json(res, 200, controlPlane.checkpoint(
-          decodeURIComponent(checkpointMatch[1]!),
+          pathIdentifier(checkpointMatch[1]!),
           optionalBoolean(value.consume, "consume") ?? false,
         ));
       }
@@ -215,7 +216,7 @@ export function createControlPlaneHttpServer(controlPlane: ControlPlane, options
         const value = record(body);
         return json(res, 200, {
           instructions: controlPlane.acknowledgeInstructions(
-            decodeURIComponent(acknowledgeMatch[1]!),
+            pathIdentifier(acknowledgeMatch[1]!),
             stringArray(value.instructionIds, "instructionIds"),
           ),
         });
@@ -237,22 +238,22 @@ export function createControlPlaneHttpServer(controlPlane: ControlPlane, options
       const escalationLifecycleMatch = url.pathname.match(/^\/v1\/escalations\/([^/]+)\/status$/);
       if (req.method === "GET" && escalationLifecycleMatch) {
         if (!hasScope(credential, "agent:read")) return forbidden(res, "agent:read");
-        return json(res, 200, getEscalationLifecycleView(controlPlane, decodeURIComponent(escalationLifecycleMatch[1]!)));
+        return json(res, 200, getEscalationLifecycleView(controlPlane, pathIdentifier(escalationLifecycleMatch[1]!)));
       }
 
       const escalationMatch = url.pathname.match(/^\/v1\/escalations\/([^/]+)$/);
       if (req.method === "GET" && escalationMatch) {
         if (!hasScope(credential, "agent:read")) return forbidden(res, "agent:read");
         if (!hasScope(credential, "decision:read")) return forbidden(res, "decision:read");
-        const id = decodeURIComponent(escalationMatch[1]!);
+        const id = pathIdentifier(escalationMatch[1]!);
         return json(res, 200, { escalation: controlPlane.getEscalation(id), decision: controlPlane.getDecision(id) ?? null });
       }
 
       const reconcileEscalationMatch = url.pathname.match(/^\/v1\/escalations\/([^/]+)\/reconcile$/);
       if (req.method === "POST" && reconcileEscalationMatch) {
         if (!hasScope(credential, "calls:reconcile")) return forbidden(res, "calls:reconcile");
+        const id = pathIdentifier(reconcileEscalationMatch[1]!);
         if (!consumeRateLimit(rateLimits, credential.id, "reconcile", reconcileLimit, rateWindowMs, res)) return;
-        const id = decodeURIComponent(reconcileEscalationMatch[1]!);
         await controlPlane.reconcileEscalation(id);
         return json(res, 200, getEscalationLifecycleView(controlPlane, id));
       }
@@ -270,14 +271,15 @@ export function createControlPlaneHttpServer(controlPlane: ControlPlane, options
       const callbackMatch = url.pathname.match(/^\/v1\/callbacks\/([^/]+)$/);
       if (req.method === "GET" && callbackMatch) {
         if (!hasScope(credential, "agent:read")) return forbidden(res, "agent:read");
-        return json(res, 200, toOwnerCallbackView(controlPlane.getCallAttempt(decodeURIComponent(callbackMatch[1]!))));
+        return json(res, 200, toOwnerCallbackView(controlPlane.getCallAttempt(pathIdentifier(callbackMatch[1]!))));
       }
 
       const reconcileCallbackMatch = url.pathname.match(/^\/v1\/callbacks\/([^/]+)\/reconcile$/);
       if (req.method === "POST" && reconcileCallbackMatch) {
         if (!hasScope(credential, "calls:reconcile")) return forbidden(res, "calls:reconcile");
+        const id = pathIdentifier(reconcileCallbackMatch[1]!);
         if (!consumeRateLimit(rateLimits, credential.id, "reconcile", reconcileLimit, rateWindowMs, res)) return;
-        return json(res, 200, toOwnerCallbackView(await controlPlane.reconcileCallback(decodeURIComponent(reconcileCallbackMatch[1]!))));
+        return json(res, 200, toOwnerCallbackView(await controlPlane.reconcileCallback(id)));
       }
 
       return json(res, 404, { error: "not_found" });
@@ -296,6 +298,7 @@ function publicHttpError(error: unknown): { status: number; error: string } {
   if (/^Instruction .+ does not belong to run .+$/.test(message)) return { status: 409, error: "instruction_run_mismatch" };
   if (message === "Call attempt is not an owner callback") return { status: 409, error: "callback_purpose_mismatch" };
   if (message === IDEMPOTENCY_CONFLICT_MESSAGE) return { status: 409, error: "idempotency_conflict" };
+  if (message === INVALID_PATH_IDENTIFIER) return { status: 400, error: INVALID_PATH_IDENTIFIER };
   if (
     message === "invalid_json"
     || message === "JSON object body required"
@@ -435,6 +438,13 @@ function auditLimit(searchParams: URLSearchParams): number {
   const limit = Number(values[0]);
   if (limit < 1 || limit > 500) throw new Error("Audit event limit must be an integer from 1 to 500");
   return limit;
+}
+function pathIdentifier(value: string): string {
+  try {
+    return decodeURIComponent(value);
+  } catch {
+    throw new Error(INVALID_PATH_IDENTIFIER);
+  }
 }
 function positive(value: number, name: string): number { if (!Number.isInteger(value) || value < 1) throw new Error(`${name} must be a positive integer`); return value; }
 function nonNegative(value: number, name: string): number { if (!Number.isInteger(value) || value < 0) throw new Error(`${name} must be a non-negative integer`); return value; }
