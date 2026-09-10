@@ -166,7 +166,7 @@ export function createControlPlaneHttpServer(controlPlane: ControlPlane, options
         return json(res, 201, controlPlane.startRun(
           text(value.agentId, "agentId"),
           text(value.summary, "summary"),
-          optionalText(value.currentScope),
+          optionalText(value.currentScope, "currentScope"),
         ));
       }
 
@@ -195,7 +195,7 @@ export function createControlPlaneHttpServer(controlPlane: ControlPlane, options
         if (!hasScope(credential, "agent:write")) return forbidden(res, "agent:write");
         const value = record(body);
         return json(res, 200, controlPlane.heartbeat(decodeURIComponent(heartbeatMatch[1]!), {
-          summary: optionalText(value.summary), currentScope: optionalText(value.currentScope),
+          summary: optionalText(value.summary, "summary"), currentScope: optionalText(value.currentScope, "currentScope"),
         }));
       }
 
@@ -223,7 +223,7 @@ export function createControlPlaneHttpServer(controlPlane: ControlPlane, options
         const value = record(body);
         const escalation = await controlPlane.requestOwnerDecision({
           runId: text(value.runId, "runId"), scopeId: text(value.scopeId, "scopeId"),
-          question: text(value.question, "question"), context: optionalText(value.context),
+          question: text(value.question, "question"), context: optionalText(value.context, "context"),
           blocking: boolean(value.blocking, "blocking"),
           priority: optionalEscalationPriority(value.priority),
           expiresAt: optionalIsoDateTime(value.expiresAt, "expiresAt"), idempotencyKey: text(value.idempotencyKey, "idempotencyKey"),
@@ -259,7 +259,7 @@ export function createControlPlaneHttpServer(controlPlane: ControlPlane, options
         if (!consumeRateLimit(rateLimits, credential.id, "callback", callbackLimit, rateWindowMs, res)) return;
         const value = record(body);
         const attempt = await controlPlane.requestOwnerCallback({
-          runId: text(value.runId, "runId"), idempotencyKey: text(value.idempotencyKey, "idempotencyKey"), prompt: optionalText(value.prompt),
+          runId: text(value.runId, "runId"), idempotencyKey: text(value.idempotencyKey, "idempotencyKey"), prompt: optionalText(value.prompt, "prompt"),
         });
         return json(res, 201, toOwnerCallbackView(attempt));
       }
@@ -302,6 +302,7 @@ function publicHttpError(error: unknown): { status: number; error: string } {
     || message === "priority must be one of: low, normal, high, critical"
     || message === "expiresAt must be an ISO 8601 date-time with timezone"
     || /^[A-Za-z][A-Za-z0-9]* is required$/.test(message)
+    || /^[A-Za-z][A-Za-z0-9]* must be a string$/.test(message)
     || /^[A-Za-z][A-Za-z0-9]* must be boolean$/.test(message)
     || /^[A-Za-z][A-Za-z0-9]* must be an array of non-empty strings$/.test(message)
   ) return { status: 400, error: message };
@@ -388,7 +389,11 @@ function record(value: unknown): Record<string, unknown> {
   return value as Record<string, unknown>;
 }
 function text(value: unknown, field: string): string { if (typeof value !== "string" || !value.trim()) throw new Error(`${field} is required`); return value; }
-function optionalText(value: unknown): string | undefined { return typeof value === "string" && value.trim() ? value : undefined; }
+function optionalText(value: unknown, field: string): string | undefined {
+  if (value === undefined) return undefined;
+  if (typeof value !== "string") throw new Error(`${field} must be a string`);
+  return value.trim() ? value : undefined;
+}
 function boolean(value: unknown, field: string): boolean { if (typeof value !== "boolean") throw new Error(`${field} must be boolean`); return value; }
 function optionalEscalationPriority(value: unknown): EscalationPriority | undefined {
   if (value === undefined) return undefined;
