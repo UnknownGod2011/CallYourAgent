@@ -6,15 +6,13 @@ CallYourAgent is a durable Node 24 TypeScript control plane for asynchronous two
 
 The repository includes deterministic fake and production CALL-E providers, SQLite persistence, replayable/idempotent call attempts, polling/webhook convergence, branch-scoped blocking, owner decision persistence, durable per-run instruction queues, exact instruction acknowledgement, quiet hours/call budgets, bounded lifecycle recovery, fail-closed ambiguous/stalled handling, privacy-aware audit history, scoped HTTP authentication, a typed TypeScript client, a real stdio MCP adapter, deterministic end-to-end/demo flows, an operator console, a Claude Code host-acceptance runbook, and a single-instance persistent-volume Compose reference deployment.
 
-This run continued the provider/privacy hardening by introducing an explicit generic `CallProvider` diagnostic trust contract. PR #25 adds `SafeCallProviderError`, a generic fallback diagnostic, and a central `providerSafeDiagnostic()` function. The production CALL-E adapter now marks only diagnostics that have already been sanitized at the adapter boundary as persistence-safe. Arbitrary custom/future provider exceptions and non-Error throws are proven to collapse to a fixed generic diagnostic when passed through that contract.
-
-The control-plane persistence sites still use their older raw `errorMessage(...)` helper today, so this run deliberately does **not** claim that the generic custom-provider `CallAttempt.lastError` privacy gap is fully closed yet. The highest-value next change is now narrowly defined: wire `dispatchCallAttempt` and `recoverCallAttemptOnce` to `providerSafeDiagnostic()` and add an end-to-end control-plane regression proving raw custom-provider exception text cannot reach durable `lastError` while explicitly marked sanitized provider diagnostics remain useful.
+This run completed the generic provider-diagnostic privacy boundary introduced by PR #25. PR #26 changes the two durable ambiguous-call persistence sites in `ControlPlane` to use `providerSafeDiagnostic(error)` rather than reflecting arbitrary provider `Error.message` values. Custom/future provider exceptions containing phone/task/token/request data now collapse to the fixed `Call provider operation failed` diagnostic; only an explicit `SafeCallProviderError` may preserve a provider-produced message after the adapter has sanitized it.
 
 ## Exact repo state inspected this run
 
-The run started from `main` HEAD `85d79f9d6f697bf15da1c89c29e8406b5b52097c`, immediately after PR #24 and its progress handoff documenting runtime stderr privacy hardening.
+The run started from `main` HEAD `3de2442a96b7966db706e0e947a370bc3af919c2`, the progress handoff immediately after PR #25 (`a621d92fff1450baa0d75dfa98e0e8a905c40c15`).
 
-Before changing code, inspected the complete recursive repository tree through GitHub's recursive tree API, covering the root, `.github/workflows`, `deploy`, every file under `docs`, all `src` implementation surfaces, and the full test-suite inventory. Inspected the recent commit chain through PR #24 and verified there were no open issues and no open pull requests before this run.
+Before changing code, inspected the complete recursive repository tree through GitHub's recursive tree API (`truncated: false`), covering root configuration, `.github/workflows`, `deploy`, every document under `docs`, all `src` implementation surfaces, and the complete test inventory. Inspected the recent commit chain through PR #25 and verified there were no open issues and no open pull requests before this run.
 
 Read in full before changing code:
 
@@ -31,60 +29,60 @@ Read in full before changing code:
 - `docs/PROVIDER_RESTART_SEMANTICS.md`
 - `deploy/README.md`
 
-Also inspected the relevant implementation/test surfaces, especially `src/call-provider.ts`, `src/calle-provider.ts`, `src/control-plane.ts`, `package.json`, and the existing CALL-E transport-privacy regression.
+Also inspected the full `src/control-plane.ts` implementation, `src/call-provider.ts`, the existing provider-safe diagnostic tests, and the existing ambiguous-create/recovery regression in `tests/control-plane.test.ts`.
 
-The audit confirmed that `CalleCallProvider` already sanitized its HTTP and transport failures before throwing, but the provider port had no explicit way to distinguish a deliberately sanitized operational diagnostic from an arbitrary adapter exception. `ControlPlane.dispatchCallAttempt` and `recoverCallAttemptOnce` currently persist generic provider exception messages through `errorMessage(error)`, so a future/custom adapter could still feed phone/task/token/request details into `CallAttempt.lastError` unless the control-plane boundary is switched to the new trust contract.
+The audit confirmed the previous handoff precisely: `src/call-provider.ts` already had the safe diagnostic trust primitive and `CalleCallProvider` already emitted explicitly sanitized `SafeCallProviderError` instances, but `ControlPlane.dispatchCallAttempt` and `recoverCallAttemptOnce` still persisted raw arbitrary error text through the obsolete local `errorMessage(...)` helper.
 
 ## Changes made this run
 
-PR #25, `Add privacy-safe provider diagnostic contract`, changed `src/call-provider.ts`, `src/calle-provider.ts`, and added `tests/provider-safe-diagnostic.test.ts`.
+PR #26, `Close provider diagnostic persistence privacy gap`, changed `src/control-plane.ts`, added `tests/control-plane-provider-error-privacy.test.ts`, and updated the pre-existing ambiguous-create test contract.
 
-`src/call-provider.ts` now exports:
+`src/control-plane.ts` now imports and applies `providerSafeDiagnostic()` in both places where a provider create exception becomes durable ambiguous-call recovery state:
 
-- `SafeCallProviderError`, an explicit marker for adapter-produced diagnostics that are safe to persist;
-- `GENERIC_CALL_PROVIDER_ERROR`, the fixed fallback `Call provider operation failed`;
-- `providerSafeDiagnostic(error)`, which preserves only a `SafeCallProviderError` message and reduces arbitrary `Error`, string, object, and other thrown values to the generic fallback.
+1. initial provider dispatch failure in `dispatchCallAttempt`;
+2. repeated ambiguous-create recovery failure in `recoverCallAttemptOnce`.
 
-The contract documents that safe provider messages must never contain phone numbers, prompts, credentials, request URLs, webhook tokens, transcripts, or raw upstream response bodies.
+The old generic `errorMessage(...)` helper was removed because provider exception text is no longer trusted at this boundary. Idempotency keys, ambiguous-state semantics, provider replay behavior, call-attempt correlation, branch-specific blocking, and recovery flow are unchanged.
 
-`CalleCallProvider` now uses `SafeCallProviderError` only for the diagnostic strings it already constructs from privacy-safe information: sanitized create/get transport failures and timeouts, bounded HTTP status plus validated request id, invalid call payload classification, and terminal create status. Timeout classification still preserves `name = "TimeoutError"`; provider request, idempotency, polling, webhook, structured-result, and recovery semantics are otherwise unchanged.
+A new end-to-end control-plane regression uses a deliberately secret-bearing custom provider error containing a phone number, webhook-token-like value, and task text. It proves that both initial create and subsequent recovery keep `CallAttempt.status = ambiguous` but persist only `GENERIC_CALL_PROVIDER_ERROR`, with none of the injected secret material appearing in the durable attempt. A second regression proves an explicitly marked `SafeCallProviderError("CALL-E create transport failed")` still preserves that sanitized operational diagnostic.
 
-The new deterministic tests prove:
-
-1. an arbitrary custom-provider-style `Error` containing an owner phone number, webhook token, and task text becomes exactly the generic fallback;
-2. an explicitly marked sanitized provider diagnostic retains its safe message;
-3. non-Error secret-bearing throws such as strings/objects are never reflected.
-
-The change is intentionally a provider-port trust primitive, not a speculative rewrite. The existing control-plane state machine, fake provider, branch-safe blocking, decision/callback reconciliation, safe-checkpoint instruction queue, HTTP/MCP contracts, SQLite schema, and runtime behavior remain unchanged in this PR.
+The pre-existing ambiguous-create recovery test previously asserted that raw `socket closed after request transmission` text survived in `lastError`. That assertion represented the old privacy behavior, so it now asserts the fixed generic diagnostic while continuing to prove the exact same idempotency key is reused and recovery clears `lastError` after provider acceptance.
 
 ## Verification performed
 
-Authoritative verification ran through GitHub Actions against PR #25 head `31ff301ba79488a4d6b93d8da95889f2d0b60976`.
+Verification deliberately caught and corrected two test-contract issues before merge.
 
-- CI run `34458404399` — **success**. The repository's Node 24 locked install, TypeScript typecheck/build, and test suite completed successfully, including the new provider-safe diagnostic regressions.
-- Container run `34458404333` — **success**; production image/runtime smoke behavior passed.
-- Compose deployment run `34458404383` — **success**; the complete durable fake-provider deployment acceptance remained green.
+First PR head `c11004dadd5e92cfa55c03e0715b432ed70f27c5` failed CI run `34464296853` during TypeScript checking because the two deliberately throwing test-provider overrides inferred `Promise<void>` rather than `Promise<StartCallResult>`. The test doubles were corrected with the exact provider return type.
 
-PR #25 was squash-merged into `main` as `a621d92fff1450baa0d75dfa98e0e8a905c40c15`.
+Second PR head `d4cbee4a825c9ff94ebb5c2e4ae08da56e45178d` reached the test suite but CI run `34464413817` failed one existing assertion: the old ambiguous-create regression still expected `/socket closed/` in durable `lastError`. The new privacy contract intentionally replaces that text with `Call provider operation failed`; the assertion was updated without weakening any recovery/idempotency checks. That run otherwise had 153 passing tests out of 154.
 
-`package.json` still has no separate lint script and no standalone migration/schema-check command. The repository's `npm run check` path covers TypeScript checking, build, and tests; SQLite tests exercise the durable schema/transaction path; Container and Compose exercise production image/runtime/deployment behavior.
+Final authoritative verification ran against PR #26 head `0210cfb14ae8a1e1199c7fb9be64c4254170690d`:
+
+- CI run `34464518789` — **success** on Node 24.20.0. Locked dependency installation, TypeScript typecheck, build, and **154/154 tests passed**, 0 failures.
+- Container run `34464519285` — **success**; production image/runtime smoke behavior passed.
+- Compose deployment run `34464518798` — **success**. It validated generated scoped credentials, booted the fake-provider deployment, exercised the compiled stdio MCP adapter, created a durable branch-blocking decision, restarted with that decision active, reconciled and released only its blocked branch, requested a context-aware owner callback, restarted with the callback active, reconciled callback steering exactly once, restarted again, and consumed the queued steering only at a safe checkpoint.
+
+PR #26 was squash-merged into `main` as `ec4d3c3a67d112f120adfd7eb1842a335b500d3c`.
+
+`package.json` still has no separate lint script and no standalone migration/schema-check command. `npm run check` covers TypeScript checking, build, and tests; SQLite tests exercise durable schema/transaction behavior; Container and Compose exercise production image/runtime/deployment behavior.
 
 No live CALL-E phone call was attempted or claimed.
 
 ## Architecture decisions made this run
 
-1. Make provider diagnostic trust explicit rather than relying on conventions around ordinary `Error.message`. A provider exception is untrusted by default.
-2. Preserve useful provider diagnostics only through an opt-in marker type owned by the generic provider boundary. Future adapters must deliberately construct a persistence-safe error after sanitizing upstream data.
-3. Keep the fallback fixed and content-free. Arbitrary adapter exceptions, thrown strings, and objects must not be serialized or inspected for diagnostic text.
-4. Keep CALL-E sanitization adapter-local. The generic control plane should not need CALL-E-specific string matching or knowledge of provider HTTP response formats.
-5. Preserve timeout type classification for CALL-E while separating classification from message trust; changing an error's `name` does not remove the `SafeCallProviderError` marker.
-6. Do not claim the durable generic-provider leak is fixed until the control-plane catch sites actually consume `providerSafeDiagnostic()` and an end-to-end regression verifies the persisted `CallAttempt.lastError` value.
+1. Treat arbitrary `CallProvider` exceptions as untrusted at the control-plane persistence boundary, regardless of whether the adapter is first-party or custom.
+2. Keep the safe-message opt-in explicit. Only `SafeCallProviderError` may cross into durable `lastError` with its message intact; ordinary errors, strings, objects, and future provider failures collapse to a fixed content-free fallback.
+3. Apply the trust boundary at both initial dispatch and ambiguous recovery so repeated recovery cannot reintroduce a privacy leak after a safe initial failure.
+4. Preserve useful sanitized CALL-E diagnostics because sanitization remains adapter-local and the generic control plane does not need CALL-E-specific parsing/string matching.
+5. Preserve ambiguous-create correctness exactly: the system still fails closed, keeps the same logical call/idempotency key, and only clears `lastError` once provider acceptance is durably known.
+6. Treat failing legacy assertions as evidence to update the documented/tested contract rather than retaining unsafe behavior for backwards compatibility.
 
 ## CALL-E integration status
 
-- **Fake provider:** deterministic, credential-free, idempotent, restart-rehydratable from durable accepted-call state, and still the primary full-flow development/acceptance provider. Compose acceptance remains green after this provider-contract change.
-- **Production CALL-E adapter:** implemented against the asynchronous Calls API with server-only `CALLE_API_KEY`, stable `Idempotency-Key`, structured result schemas, bounded create/poll requests, persisted correlation, polling/webhook convergence, duplicate prevention, restart-by-provider-id semantics, sanitized HTTP response failures, sanitized transport exceptions, and fail-closed ambiguous/stalled handling. Its sanitized thrown diagnostics are now explicitly marked safe by the generic provider contract.
-- **Shared surfaces:** HTTP, TypeScript SDK, stdio MCP, lifecycle worker, operator console, and deployment flows continue to share the same persistent control-plane state machine. This run only introduces the diagnostic trust primitive and adopts it inside the CALL-E adapter.
+- **Fake provider:** deterministic, credential-free, idempotent, restart-rehydratable from durable accepted-call state, and still the primary full-flow development/acceptance provider. The complete Compose restart/decision/callback/checkpoint scenario remains green after this change.
+- **Production CALL-E adapter:** implemented against the asynchronous Calls API with server-only `CALLE_API_KEY`, stable `Idempotency-Key`, structured result schemas, bounded create/poll requests, persisted correlation, polling/webhook convergence, duplicate prevention, restart-by-provider-id semantics, sanitized HTTP/transport failures, and fail-closed ambiguous/stalled handling. Its sanitized diagnostics remain explicitly marked via `SafeCallProviderError`, and the control plane now honors that trust contract at durable `lastError` persistence sites.
+- **Generic provider boundary:** arbitrary custom/future provider create exceptions can no longer feed their raw messages into durable ambiguous-call `lastError` during initial dispatch or recovery.
+- **Shared surfaces:** HTTP, TypeScript SDK, stdio MCP, lifecycle worker, operator console, and deployment flows continue sharing one persistent control-plane state machine.
 - **Claude Code:** compiled stdio MCP behavior remains covered by automated and Compose acceptance. A genuine Claude Code host session has still not been observed and is not claimed.
 - **Live status:** no authorized real CALL-E phone call has been performed, so live provider connectivity, owner-phone authorization, and public webhook success remain unverified.
 
@@ -98,10 +96,9 @@ Live CALL-E verification still requires user-controlled prerequisites: a valid/a
 
 ## Highest-value next actions
 
-1. Complete the generic provider-diagnostic boundary: replace raw `errorMessage(error)` persistence in `ControlPlane.dispatchCallAttempt` and `recoverCallAttemptOnce` with `providerSafeDiagnostic(error)`. Add a control-plane-level regression using a deliberately secret-bearing custom provider and prove both initial ambiguous create and recovery persist only the generic fallback, while `SafeCallProviderError` preserves an explicitly sanitized message.
-2. Audit provider `observe`/`rehydrate` exceptions for any durable/logging path that might need the same trust primitive; current reconciliation errors are not written to `CallAttempt.lastError`, but lifecycle error aggregation should remain privacy-safe by construction.
-3. Audit all remaining code paths that may stringify request URLs or HTTP request objects around `/webhooks/calle`; application code does not currently access-log requests, but future middleware/proxy guidance should remain query-token-safe.
-4. Review lifecycle sweep versus explicit callback/decision reconciliation for same-attempt concurrent observe/apply overlap not already covered by webhook-vs-poll and ambiguous-recovery single-flight tests. Add synchronization only if a reproducible divergence exists.
-5. Continue tightening stable API conflict/validation semantics without reintroducing arbitrary exception reflection.
-6. Run the documented acceptance in a genuine Claude Code host when that external prerequisite is available and record only observed host/version behavior.
-7. When the user-controlled CALL-E prerequisites are available, perform one tightly bounded live provider acceptance and record only observed behavior.
+1. Audit provider `observe` and optional `rehydrate` exception paths end-to-end. They are currently not persisted to `CallAttempt.lastError`, but lifecycle and explicit-reconciliation surfaces should be regression-tested to prove arbitrary provider exception text cannot escape through operational results/logs or HTTP/MCP error projections.
+2. Review lifecycle sweep versus explicit callback/decision reconciliation for concurrent same-attempt `observe -> apply` overlap not already covered by webhook-vs-poll and ambiguous-recovery tests. Add synchronization only if a deterministic race demonstrates state/audit divergence.
+3. Audit all remaining request/proxy guidance around `/webhooks/calle` to ensure the query-string capability token is never encouraged into access logs, tracing metadata, or error serialization.
+4. Continue tightening stable API conflict/validation semantics without reintroducing arbitrary exception reflection.
+5. Run the documented acceptance in a genuine Claude Code host when that external prerequisite is available and record only observed host/version behavior.
+6. When the user-controlled CALL-E prerequisites are available, perform one tightly bounded live provider acceptance and record only observed behavior.
