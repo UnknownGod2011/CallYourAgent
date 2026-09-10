@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { FakeCallProvider, type StartCallInput } from "../src/call-provider.js";
+import { FakeCallProvider, GENERIC_CALL_PROVIDER_ERROR, type StartCallInput } from "../src/call-provider.js";
 import { ControlPlane } from "../src/control-plane.js";
 import { InMemoryControlPlaneStore } from "../src/store.js";
 
@@ -79,7 +79,7 @@ test("ambiguous create is linked durably and recoverable with the exact same ide
   const ambiguous = store.callAttempts.get(escalation.callAttemptId!)!;
   assert.equal(ambiguous.status, "ambiguous");
   assert.equal(ambiguous.providerCallId, undefined);
-  assert.match(ambiguous.lastError ?? "", /socket closed/);
+  assert.equal(ambiguous.lastError, GENERIC_CALL_PROVIDER_ERROR);
   assert.deepEqual(control.checkpoint(run.id).unresolvedBlockingScopes, ["deploy"]);
 
   await control.reconcileEscalation(escalation.id);
