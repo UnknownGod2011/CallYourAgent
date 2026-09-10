@@ -66,3 +66,51 @@ test("decision reconciliation cannot create a second local call while the first 
   assert.equal(events.filter((event) => event.type === "call_attempt_created").length, 1);
   assert.equal(events.filter((event) => event.type === "call_attempt_started").length, 1);
 });
+
+test("a provider re-entering the same decision request cannot dispatch the reserved call twice", async () => {
+  const store = new InMemoryControlPlaneStore();
+  let control!: ControlPlane;
+  let request!: Parameters<ControlPlane["requestOwnerDecision"]>[0];
+  let reentrantRetry: ReturnType<ControlPlane["requestOwnerDecision"]> | undefined;
+
+  class ReentrantProvider extends FakeCallProvider {
+    starts = 0;
+
+    override async start(input: StartCallInput) {
+      this.starts += 1;
+      if (this.starts === 1) reentrantRetry = control.requestOwnerDecision(request);
+      return super.start(input);
+    }
+  }
+
+  const provider = new ReentrantProvider();
+  control = new ControlPlane(store, provider);
+  const agent = control.registerAgent({ name: "reentrant-decision-agent", platform: "test", ownerId: "owner-1" });
+  const run = control.startRun(agent.id, "Preparing a release", "documentation");
+  request = {
+    runId: run.id,
+    scopeId: "release-approval",
+    question: "Should this release go to production?",
+    blocking: true,
+    idempotencyKey: "decision-reentrant-1",
+  };
+
+  const first = await control.requestOwnerDecision(request);
+  assert.ok(reentrantRetry);
+  const retry = await reentrantRetry;
+
+  assert.equal(retry.id, first.id);
+  assert.equal(retry.callAttemptId, first.callAttemptId);
+  assert.ok(first.callAttemptId);
+  assert.equal(provider.starts, 1);
+  assert.equal(store.escalations.size, 1);
+  assert.equal(store.callAttempts.size, 1);
+  assert.deepEqual(control.checkpoint(run.id).unresolvedBlockingScopes, ["release-approval"]);
+  assert.ok(store.callAttempts.get(first.callAttemptId!)?.providerCallId);
+
+  const events = control.listAuditEvents(run.id);
+  assert.equal(events.filter((event) => event.type === "escalation_created").length, 1);
+  assert.equal(events.filter((event) => event.type === "call_attempt_created").length, 1);
+  assert.equal(events.filter((event) => event.type === "call_attempt_started").length, 1);
+  assert.equal(events.filter((event) => event.type === "call_attempt_ambiguous").length, 0);
+});
