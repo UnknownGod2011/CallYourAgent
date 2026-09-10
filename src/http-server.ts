@@ -35,6 +35,7 @@ const ESCALATION_PRIORITIES: readonly EscalationPriority[] = ["low", "normal", "
 const ISO_DATE_TIME_WITH_ZONE = /^(\d{4})-(\d{2})-(\d{2})T(?:[01]\d|2[0-3]):[0-5]\d:[0-5]\d(?:\.\d+)?(?:Z|[+-](?:[01]\d|2[0-3]):[0-5]\d)$/;
 const AUDIT_LIMIT_PATTERN = /^[1-9]\d{0,2}$/;
 const INVALID_PATH_IDENTIFIER = "invalid_path_identifier";
+const UNEXPECTED_QUERY_PARAMETER = "unexpected_query_parameter";
 
 export interface HttpRateLimitOptions {
   ownerCallbacksPerWindow?: number;
@@ -145,6 +146,11 @@ export function createControlPlaneHttpServer(controlPlane: ControlPlane, options
 
       const credential = authenticate(req, credentials);
       if (!credential) return json(res, 401, { error: "unauthorized" });
+
+      if (url.pathname.startsWith("/v1/")) {
+        const allowedQueryKeys = /^\/v1\/runs\/[^/]+\/audit$/.test(url.pathname) ? ["limit"] : [];
+        assertAllowedQueryParameters(url.searchParams, allowedQueryKeys);
+      }
 
       if (req.method === "GET" && url.pathname === "/v1/auth/capabilities") {
         return json(res, 200, credentialCapabilities(credential));
@@ -299,6 +305,7 @@ function publicHttpError(error: unknown): { status: number; error: string } {
   if (message === "Call attempt is not an owner callback") return { status: 409, error: "callback_purpose_mismatch" };
   if (message === IDEMPOTENCY_CONFLICT_MESSAGE) return { status: 409, error: "idempotency_conflict" };
   if (message === INVALID_PATH_IDENTIFIER) return { status: 400, error: INVALID_PATH_IDENTIFIER };
+  if (message === UNEXPECTED_QUERY_PARAMETER) return { status: 400, error: UNEXPECTED_QUERY_PARAMETER };
   if (
     message === "invalid_json"
     || message === "JSON object body required"
@@ -438,6 +445,12 @@ function auditLimit(searchParams: URLSearchParams): number {
   const limit = Number(values[0]);
   if (limit < 1 || limit > 500) throw new Error("Audit event limit must be an integer from 1 to 500");
   return limit;
+}
+function assertAllowedQueryParameters(searchParams: URLSearchParams, allowed: readonly string[]): void {
+  const allowedKeys = new Set(allowed);
+  for (const key of searchParams.keys()) {
+    if (!allowedKeys.has(key)) throw new Error(UNEXPECTED_QUERY_PARAMETER);
+  }
 }
 function pathIdentifier(value: string): string {
   try {
