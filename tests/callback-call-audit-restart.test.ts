@@ -73,9 +73,9 @@ test("restart-recovered owner callback preserves one causal call-attempt and ste
     assert.equal(queued.length, 1, "terminal reconciliation retry must not duplicate queued steering");
     assert.equal(queued[0]?.instructionId, instruction.id);
 
-    assert.ok(created[0]!.sequence < started[0]!.sequence);
-    assert.ok(started[0]!.sequence < requested[0]!.sequence);
-    assert.ok(requested[0]!.sequence < completedEvents[0]!.sequence);
+    assert.ok(created[0]!.sequence < requested[0]!.sequence);
+    assert.ok(requested[0]!.sequence < started[0]!.sequence);
+    assert.ok(started[0]!.sequence < completedEvents[0]!.sequence);
     assert.ok(completedEvents[0]!.sequence < queued[0]!.sequence);
 
     assert.equal(
