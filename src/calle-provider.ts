@@ -1,5 +1,6 @@
 import type { CallOutcome } from "./domain.js";
 import {
+  SafeCallProviderError,
   isActiveCallObservation,
   type CallProvider,
   type CallProviderObservation,
@@ -99,13 +100,11 @@ export class CalleCallProvider implements CallProvider {
       throw providerTransportError("create", error);
     }
 
-    if (!response.ok) {
-      throw providerHttpError("create", response);
-    }
+    if (!response.ok) throw providerHttpError("create", response);
 
     const call = await parseCall(response);
     if (call.status === "failed" || call.status === "canceled") {
-      throw new Error(`CALL-E create returned terminal status ${call.status}`);
+      throw new SafeCallProviderError(`CALL-E create returned terminal status ${call.status}`);
     }
 
     return {
@@ -126,9 +125,7 @@ export class CalleCallProvider implements CallProvider {
       throw providerTransportError("get", error);
     }
 
-    if (!response.ok) {
-      throw providerHttpError("get", response);
-    }
+    if (!response.ok) throw providerHttpError("get", response);
 
     const call = await parseCall(response);
     if (call.status === "queued" || call.status === "in_progress") {
@@ -169,7 +166,7 @@ export class CalleCallProvider implements CallProvider {
 async function parseCall(response: Response): Promise<CalleCallTask> {
   const value: unknown = await response.json();
   if (!isRecord(value) || typeof value.id !== "string" || !isStatus(value.status)) {
-    throw new Error("CALL-E returned an invalid call payload");
+    throw new SafeCallProviderError("CALL-E returned an invalid call payload");
   }
   return {
     id: value.id,
@@ -192,12 +189,12 @@ function isStatus(value: unknown): value is CalleStatus {
 function providerHttpError(operation: "create" | "get", response: Response): Error {
   const requestId = privacySafeRequestId(response.headers.get("x-request-id"));
   const suffix = requestId ? ` [request-id: ${requestId}]` : "";
-  return new Error(`CALL-E ${operation} failed (${response.status})${suffix}`);
+  return new SafeCallProviderError(`CALL-E ${operation} failed (${response.status})${suffix}`);
 }
 
 function providerTransportError(operation: "create" | "get", error: unknown): Error {
   const timedOut = error instanceof Error && error.name === "TimeoutError";
-  const sanitized = new Error(timedOut ? `CALL-E ${operation} timed out` : `CALL-E ${operation} transport failed`);
+  const sanitized = new SafeCallProviderError(timedOut ? `CALL-E ${operation} timed out` : `CALL-E ${operation} transport failed`);
   if (timedOut) sanitized.name = "TimeoutError";
   return sanitized;
 }
