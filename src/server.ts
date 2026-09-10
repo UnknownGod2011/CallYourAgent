@@ -32,12 +32,15 @@ export function buildRuntimeFromEnv(env: NodeJS.ProcessEnv = process.env) {
       throw new Error("CYA_FAKE_AUTO_COMPLETE_AFTER_OBSERVATIONS is only valid when CYA_CALL_PROVIDER=fake");
     }
     const webhookToken = required(env.CYA_CALLE_WEBHOOK_TOKEN, "CYA_CALLE_WEBHOOK_TOKEN");
-    const publicBaseUrl = required(env.CYA_PUBLIC_BASE_URL, "CYA_PUBLIC_BASE_URL").replace(/\/$/, "");
+    const webhookUrl = calleWebhookUrl(
+      required(env.CYA_PUBLIC_BASE_URL, "CYA_PUBLIC_BASE_URL"),
+      webhookToken,
+    );
     provider = new CalleCallProvider({
       apiKey: required(env.CALLE_API_KEY, "CALLE_API_KEY"),
       ownerPhone: required(env.CYA_OWNER_PHONE, "CYA_OWNER_PHONE"),
       baseUrl: env.CALLE_BASE_URL,
-      webhookUrl: `${publicBaseUrl}/webhooks/calle?token=${encodeURIComponent(webhookToken)}`,
+      webhookUrl,
       requestTimeoutMs: env.CYA_CALLE_HTTP_TIMEOUT_MS
         ? positiveInteger(env.CYA_CALLE_HTTP_TIMEOUT_MS, "CYA_CALLE_HTTP_TIMEOUT_MS")
         : undefined,
@@ -238,6 +241,33 @@ export function lifecycleSweepIntervalMsFromEnv(env: NodeJS.ProcessEnv): number 
   return env.CYA_LIFECYCLE_SWEEP_INTERVAL_MS
     ? positiveInteger(env.CYA_LIFECYCLE_SWEEP_INTERVAL_MS, "CYA_LIFECYCLE_SWEEP_INTERVAL_MS")
     : 5_000;
+}
+
+export function calleWebhookUrl(publicBaseUrl: string, webhookToken: string): string {
+  let url: URL;
+  try {
+    url = new URL(publicBaseUrl.trim());
+  } catch {
+    throw new Error("CYA_PUBLIC_BASE_URL must be a valid absolute HTTPS origin");
+  }
+  if (url.protocol !== "https:") {
+    throw new Error("CYA_PUBLIC_BASE_URL must use https");
+  }
+  if (url.username || url.password) {
+    throw new Error("CYA_PUBLIC_BASE_URL must not contain credentials");
+  }
+  if (url.search) {
+    throw new Error("CYA_PUBLIC_BASE_URL must not contain a query string");
+  }
+  if (url.hash) {
+    throw new Error("CYA_PUBLIC_BASE_URL must not contain a fragment");
+  }
+  if (url.pathname !== "/") {
+    throw new Error("CYA_PUBLIC_BASE_URL must be an origin without a path");
+  }
+  url.pathname = "/webhooks/calle";
+  url.searchParams.set("token", webhookToken);
+  return url.toString();
 }
 
 function isApiScope(value: unknown): value is ApiScope {
