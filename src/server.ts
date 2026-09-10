@@ -4,7 +4,7 @@ import { CallPolicy, type CallPolicyConfig } from "./call-policy.js";
 import { CalleCallProvider } from "./calle-provider.js";
 import { createControlPlaneHttpServer, type ApiCredential, type ApiScope, type ReadinessSnapshot } from "./http-server.js";
 import type { EscalationPriority } from "./domain.js";
-import { LifecycleManager, type LifecycleRecoveryConfig } from "./lifecycle.js";
+import { LifecycleManager, type LifecycleRecoveryConfig, type LifecycleSweepResult } from "./lifecycle.js";
 import { InMemoryControlPlaneStore } from "./store.js";
 import { SqliteControlPlaneStore } from "./sqlite-store.js";
 
@@ -110,9 +110,9 @@ export async function startRuntimeFromEnv(env: NodeJS.ProcessEnv = process.env):
     if (stopping || activeSweep) return;
     activeSweep = runtime.lifecycle.sweep()
       .then((result) => {
-        if (result.errors.length > 0) console.error("CallYourAgent lifecycle sweep errors", result.errors);
+        if (result.errors.length > 0) console.error("CallYourAgent lifecycle sweep errors", lifecycleSweepErrorSummary(result));
       })
-      .catch((error) => console.error("CallYourAgent lifecycle sweep failed", error))
+      .catch(() => console.error("CallYourAgent lifecycle sweep failed"))
       .finally(() => { activeSweep = undefined; });
   };
 
@@ -135,6 +135,18 @@ export async function startRuntimeFromEnv(env: NodeJS.ProcessEnv = process.env):
   const address = runtime.server.address();
   const listeningPort = typeof address === "object" && address !== null ? address.port : port;
   return { ...runtime, port: listeningPort, shutdown };
+}
+
+export function lifecycleSweepErrorSummary(
+  result: Pick<LifecycleSweepResult, "errors">,
+): { total: number; escalations: number; callbacks: number } {
+  let escalations = 0;
+  let callbacks = 0;
+  for (const error of result.errors) {
+    if (error.kind === "escalation") escalations += 1;
+    else callbacks += 1;
+  }
+  return { total: result.errors.length, escalations, callbacks };
 }
 
 export function readinessSnapshot(
@@ -298,15 +310,15 @@ if (import.meta.url === `file://${process.argv[1]}`) {
       console.error(`CallYourAgent received ${signal}; shutting down gracefully`);
       void runtime.shutdown()
         .then(() => { process.exitCode = 0; })
-        .catch((error) => {
-          console.error("CallYourAgent graceful shutdown failed", error);
+        .catch(() => {
+          console.error("CallYourAgent graceful shutdown failed");
           process.exitCode = 1;
         });
     };
     process.once("SIGTERM", handleSignal);
     process.once("SIGINT", handleSignal);
-  }).catch((error) => {
-    console.error("CallYourAgent startup failed", error);
+  }).catch(() => {
+    console.error("CallYourAgent startup failed");
     process.exitCode = 1;
   });
 }
