@@ -83,16 +83,21 @@ export class CalleCallProvider implements CallProvider {
       ...(this.options.webhookUrl ? { webhook_url: this.options.webhookUrl } : {}),
     };
 
-    const response = await this.fetchImpl(`${this.baseUrl}/v1/calls`, {
-      method: "POST",
-      headers: {
-        Authorization: `Bearer ${this.options.apiKey}`,
-        "Content-Type": "application/json",
-        "Idempotency-Key": input.idempotencyKey,
-      },
-      body: JSON.stringify(body),
-      signal: AbortSignal.timeout(this.requestTimeoutMs),
-    });
+    let response: Response;
+    try {
+      response = await this.fetchImpl(`${this.baseUrl}/v1/calls`, {
+        method: "POST",
+        headers: {
+          Authorization: `Bearer ${this.options.apiKey}`,
+          "Content-Type": "application/json",
+          "Idempotency-Key": input.idempotencyKey,
+        },
+        body: JSON.stringify(body),
+        signal: AbortSignal.timeout(this.requestTimeoutMs),
+      });
+    } catch (error) {
+      throw providerTransportError("create", error);
+    }
 
     if (!response.ok) {
       throw providerHttpError("create", response);
@@ -110,11 +115,16 @@ export class CalleCallProvider implements CallProvider {
   }
 
   async observe(providerCallId: string): Promise<CallProviderObservation> {
-    const response = await this.fetchImpl(`${this.baseUrl}/v1/calls/${encodeURIComponent(providerCallId)}`, {
-      method: "GET",
-      headers: { Authorization: `Bearer ${this.options.apiKey}` },
-      signal: AbortSignal.timeout(this.requestTimeoutMs),
-    });
+    let response: Response;
+    try {
+      response = await this.fetchImpl(`${this.baseUrl}/v1/calls/${encodeURIComponent(providerCallId)}`, {
+        method: "GET",
+        headers: { Authorization: `Bearer ${this.options.apiKey}` },
+        signal: AbortSignal.timeout(this.requestTimeoutMs),
+      });
+    } catch (error) {
+      throw providerTransportError("get", error);
+    }
 
     if (!response.ok) {
       throw providerHttpError("get", response);
@@ -183,6 +193,13 @@ function providerHttpError(operation: "create" | "get", response: Response): Err
   const requestId = privacySafeRequestId(response.headers.get("x-request-id"));
   const suffix = requestId ? ` [request-id: ${requestId}]` : "";
   return new Error(`CALL-E ${operation} failed (${response.status})${suffix}`);
+}
+
+function providerTransportError(operation: "create" | "get", error: unknown): Error {
+  const timedOut = error instanceof Error && error.name === "TimeoutError";
+  const sanitized = new Error(timedOut ? `CALL-E ${operation} timed out` : `CALL-E ${operation} transport failed`);
+  if (timedOut) sanitized.name = "TimeoutError";
+  return sanitized;
 }
 
 function privacySafeRequestId(value: string | null): string | undefined {
