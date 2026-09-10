@@ -38,7 +38,7 @@ This is an in-process/single-instance guarantee. It is deliberately not generali
 
 ## Changes made this run
 
-PR #19, `Test provider re-entry dispatch invariants`, adds adversarial regression coverage without changing production state-machine behavior.
+PR #19, `Test provider re-entry dispatch invariants`, added adversarial regression coverage without changing production state-machine behavior.
 
 ### Callback provider re-entry regression
 
@@ -75,11 +75,15 @@ No dispatch single-flight map, extra lock, schema change, API change, or provide
 
 Direct repository execution in the automation container remains unavailable, so verification used the repository's GitHub Actions surfaces.
 
-Final PR #19 head `d8023686d6eb7e0a84fc07182478cf86554c3b6e` passed every repository verification surface:
+The substantive code head `d8023686d6eb7e0a84fc07182478cf86554c3b6e` passed the complete repository verification path first. CI run `34431818125` used Node `24.20.0`, completed `npm run check`, typecheck, build, and the Node test suite with **140 tests, 140 passed, 0 failed, 0 cancelled, 0 skipped, 0 todo**. Both new provider re-entry regressions passed explicitly. Container run `34431818146` and Compose deployment run `34431818145` also succeeded.
 
-- CI run `34431818125` — **success**. Node `24.20.0`; locked dependencies installed; `npm run check` completed; TypeScript no-emit typecheck succeeded; build succeeded; Node test suite finished with **140 tests, 140 passed, 0 failed, 0 cancelled, 0 skipped, 0 todo**. Both new provider re-entry regressions passed explicitly.
-- Container run `34431818146` — **success**.
-- Compose deployment run `34431818145` — **success**, preserving the production-style durable SQLite + compiled stdio MCP + restart/recovery + branch-safe owner decision + owner callback steering + safe-checkpoint acceptance path.
+After adding this progress handoff, the final PR #19 head `0a74b1edba388c64cd877f8bc4e891553b9273c3` was reverified and every required workflow succeeded again:
+
+- CI run `34431952294` — **success**.
+- Container run `34431952290` — **success**.
+- Compose deployment run `34431952296` — **success**, preserving the production-style durable SQLite + compiled stdio MCP + restart/recovery + branch-safe owner decision + owner callback steering + safe-checkpoint acceptance path.
+
+PR #19 was squash-merged into `main` as `26cd1cd598ada72ac47872762daa9b68a3c32833`.
 
 `package.json` still has no separate lint script and no standalone migration/schema-check command. `npm run check` covers typechecking, build, and tests; SQLite tests exercise the durable schema/transaction path; Container and Compose exercise production image/runtime/deployment behavior.
 
