@@ -67,9 +67,9 @@ test("audit timeline explains asynchronous decision and callback steering withou
   assert.equal(callbackRequested.length, 1);
   assert.equal(callbackCompleted.length, 1);
   assert.equal(callbackInstructions.length, 1);
-  assert.ok(callbackCreated[0].sequence < callbackStarted[0].sequence);
-  assert.ok(callbackStarted[0].sequence < callbackRequested[0].sequence);
-  assert.ok(callbackRequested[0].sequence < callbackCompleted[0].sequence);
+  assert.ok(callbackCreated[0].sequence < callbackRequested[0].sequence);
+  assert.ok(callbackRequested[0].sequence < callbackStarted[0].sequence);
+  assert.ok(callbackStarted[0].sequence < callbackCompleted[0].sequence);
   assert.ok(callbackCompleted[0].sequence < callbackInstructions[0].sequence);
   assert.ok(callbackInstructions[0].instructionId);
 
