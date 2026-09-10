@@ -6,13 +6,13 @@ CallYourAgent is a durable Node 24 TypeScript control plane for asynchronous two
 
 The repository includes deterministic fake and production CALL-E providers, SQLite persistence, replayable/idempotent call attempts, polling/webhook convergence, branch-scoped blocking, owner decision persistence, durable per-run instruction queues, exact instruction acknowledgement, quiet hours/call budgets, bounded lifecycle recovery, fail-closed ambiguous/stalled handling, privacy-aware audit history, scoped HTTP authentication, a typed TypeScript client, a real stdio MCP adapter, deterministic end-to-end/demo flows, an operator console, a Claude Code host-acceptance runbook, and a single-instance persistent-volume Compose reference deployment.
 
-This run audited the multi-instruction safe-checkpoint acknowledgement boundary under deterministic SQLite failure injection. The production implementation already had the correct architecture: the full acknowledgement batch runs inside one store transaction. A failure while persisting the second instruction's causal audit event rolls back every instruction mutation and every consumption audit from that batch, including the in-memory mirrors; after SQLite close/reopen the entire batch is still queued. Retrying then consumes each exact instruction once, and later acknowledgement retries remain idempotent. No unnecessary production state-machine change was made.
+This run audited the external HTTP error boundary as part of the privacy/security surface review. A concrete leak was found: the HTTP adapter returned arbitrary thrown `Error.message` values verbatim. Although the normal domain projections and CALL-E adapter already avoided returning sensitive provider bodies, an unexpected provider/store/runtime exception could therefore have reflected task context, owner data, steering text, credentials, or other sensitive exception material to an authenticated HTTP caller. PR #21 now fails closed for unexpected errors while preserving an explicit allowlist of actionable transport/validation errors.
 
 ## Exact repo state inspected this run
 
-The run started from `main` HEAD `63e672b8a4b06910c635abb88ac161995c3ea5b2`, immediately after PR #19 and its progress handoff documented the provider-reentry dispatch invariant.
+The run started from `main` HEAD `edce1f944e9d216ea150976e1133fb3b098e46fc`, immediately after PR #20 and its progress handoff documented multi-instruction acknowledgement batch atomicity.
 
-Before changing code, inspected the complete recursive repository tree through GitHub's recursive tree API. It reported `truncated: false` and covered the root, `.github/workflows`, `deploy`, all `docs`, all `src`, and all `tests` files. Inspected the recent commit chain through PR #19. There were no open issues and no open pull requests before this run.
+Before changing code, inspected the complete recursive repository tree through GitHub's recursive tree API, covering the root, `.github/workflows`, `deploy`, all `docs`, all `src`, and all `tests` surfaces. Inspected the recent commit chain through PR #20. There were no open issues and no open pull requests before this run.
 
 Read in full before changing code:
 
@@ -28,59 +28,56 @@ Read in full before changing code:
 - `docs/OPERATOR_CONSOLE.md`
 - `docs/PROVIDER_RESTART_SEMANTICS.md`
 
-Also inspected the relevant implementation and test surfaces, especially `src/control-plane.ts`, `src/sqlite-store.ts`, `tests/instruction-acknowledgement.test.ts`, and `tests/sqlite-core-state-audit-atomicity.test.ts`.
+Also inspected the relevant implementation and test surfaces, especially `src/http-server.ts`, `src/control-plane.ts`, `src/calle-provider.ts`, `src/call-policy.ts`, `tests/http-server.test.ts`, and the repository's existing privacy/MCP/provider tests.
 
-The audit confirmed `ControlPlane.acknowledgeInstructions` validates the requested instruction ids before mutation, then executes status updates plus `owner_instruction_consumed` audit writes inside one `store.transaction(...)`. `SqliteControlPlaneStore.transaction` uses `BEGIN IMMEDIATE`/`COMMIT`; on any failure it executes `ROLLBACK` and reloads every SQLite-backed map/set, preventing committed SQL and in-memory state from diverging.
+The audit confirmed that `CalleCallProvider` already converts unsuccessful CALL-E HTTP responses into privacy-safe application errors containing only operation, status, and a strictly validated optional request id; upstream response bodies are not copied. Existing MCP tests also already prove upstream HTTP error bodies are not exposed to the host. The concrete remaining leak was the generic `catch` in `src/http-server.ts`, which reflected any exception message directly into JSON.
 
 ## Changes made this run
 
-PR #20, `Test multi-instruction acknowledgement atomicity`, added `tests/sqlite-instruction-batch-atomicity.test.ts`.
+PR #21, `Harden HTTP error privacy boundary`, changed `src/http-server.ts` and added `tests/http-error-privacy.test.ts`.
 
-The deterministic regression creates three queued owner instructions for one run, injects a failure on the second `owner_instruction_consumed` audit write, and proves:
+The HTTP adapter now classifies exceptions through a single privacy boundary:
 
-- the acknowledgement call fails rather than reporting partial success;
-- all three instructions remain `queued`;
-- zero `owner_instruction_consumed` events survive the failed transaction;
-- the next non-consuming checkpoint returns the full original batch;
-- closing and reopening SQLite preserves that fully rolled-back state;
-- retrying acknowledgement consumes all three instructions successfully;
-- each instruction receives exactly one durable consumption audit event;
-- a later retry, even with reordered ids, creates no duplicate consumption events;
-- no instruction remains queued after the successful acknowledgement.
+- unknown-resource exceptions return HTTP 404 with `{ "error": "not_found" }` instead of echoing resource identifiers;
+- an oversized request body returns HTTP 413 with the stable `request_body_too_large` code;
+- a non-running run returns HTTP 409 with the stable `run_not_running` code rather than echoing the run id;
+- known transport/validation failures such as `invalid_json`, required-field errors, boolean/array validation errors, invalid callback-attempt type, required provider-webhook ids, and invalid audit limits remain actionable 400 responses;
+- every other unexpected provider/store/control-plane/runtime exception returns HTTP 500 with `{ "error": "internal_error" }` and never reflects the exception message.
 
-### Production behavior intentionally unchanged
+The new deterministic regressions prove that a deliberately sensitive exception message is absent from the HTTP response, an attacker-controlled identifier embedded in an `Unknown run` exception is not echoed, and malformed JSON still receives the useful stable `invalid_json` response.
 
-No production lock, schema change, API change, or acknowledgement-state rewrite was added. Failure injection demonstrated that the existing transaction boundary already provides the required all-or-nothing semantics. Adding more machinery would increase complexity without fixing a reproduced bug.
+This change is intentionally confined to the HTTP presentation boundary. It does not alter durable control-plane state, provider idempotency, CALL-E calls, branch-scoped blocking, checkpoint semantics, or provider/network transaction boundaries.
 
 ## Verification performed
 
-Direct repository execution in the automation container remains unavailable, so verification used the repository's GitHub Actions surfaces.
+Direct repository execution in the automation container remained unavailable because the runtime could not resolve GitHub for a local clone, so authoritative verification used the repository's GitHub Actions surfaces as in prior runs.
 
-PR #20 head `ff3a5eb85d893f261ec0d83f63a0235333459c61` passed the full repository verification path:
+PR #21 head `e48e35baacdc452a84899848f39cdb573e433b35` passed the complete repository verification matrix:
 
-- CI run `34435437889` — **success** on Node `24.20.0`; `npm run check` completed typechecking, build, and the Node test suite with **141 tests, 141 passed, 0 failed, 0 cancelled, 0 skipped, 0 todo**. The new SQLite batch-rollback/retry regression passed explicitly.
-- Container run `34435437950` — **success**; production image build and fake-provider runtime smoke test passed.
-- Compose deployment run `34435437954` — **success**; generated least-privilege credentials, Compose validation, fake-provider deployment, health/readiness, compiled stdio MCP, durable branch-blocking owner decision across restart, branch-specific release, owner callback across restart, exactly-once steering, another persistence restart, and safe-checkpoint steering consumption all passed.
+- CI run `34439750657` — **success** on Node `24.20.0`; `npm run check` completed TypeScript typechecking, build, and the Node test suite with **144 tests, 144 passed, 0 failed, 0 cancelled, 0 skipped, 0 todo**. All three new HTTP privacy tests passed explicitly.
+- Container run `34439750591` — **success**; the production image/runtime smoke path passed.
+- Compose deployment run `34439750490` — **success**; the deployment acceptance remained green, preserving the durable fake-provider/control-plane/MCP/restart/branch-safe callback and steering path.
 
-PR #20 was squash-merged into `main` as `b364e2f57afc0883a73decf7ac054ea82c1fcf91`.
+PR #21 was squash-merged into `main` as `bb3d40dc50f46560e5098a504977206ac9297386`.
 
-`package.json` still has no separate lint script and no standalone migration/schema-check command. `npm run check` covers typechecking, build, and tests; SQLite tests exercise the durable schema and transaction path; Container and Compose exercise the production image/runtime/deployment behavior.
+`package.json` still has no separate lint script and no standalone migration/schema-check command. `npm run check` covers typechecking, build, and tests; SQLite tests exercise the durable schema/transaction path; Container and Compose exercise the production image/runtime/deployment behavior.
 
 No live CALL-E phone call was attempted or claimed.
 
 ## Architecture decisions made this run
 
-1. Multi-instruction acknowledgement is one local durability unit. If any instruction-state or causal-audit write fails, none of the batch may be considered consumed.
-2. Safe-checkpoint semantics remain exact: a failed acknowledgement leaves the entire batch available for a later checkpoint/retry instead of partially hiding owner steering from the agent.
-3. SQLite rollback must restore both durable rows and the synchronous in-memory mirrors. The new close/reopen assertion makes the durable side of that invariant executable as well.
-4. Repeated acknowledgement remains idempotent at the instruction level and must never duplicate `owner_instruction_consumed` history.
-5. Do not change production logic merely because a boundary is important; change it only when failure injection or concurrency testing demonstrates a real incorrect state. Here the existing transaction was correct.
-6. This path performs no provider/CALL-E network I/O, and the change does not alter branch-scoped blocking or the rule that human steering is consumed only at safe checkpoints.
+1. Exception messages are internal diagnostic data, not an HTTP contract. Unexpected exception text must never be reflected merely because the caller is authenticated.
+2. The public HTTP error contract is fail-closed and allowlisted: expose only stable errors that are intentionally actionable to a client; map everything else to `internal_error`.
+3. Unknown-resource responses must not echo user-controlled or sensitive identifiers. A stable `not_found` response is sufficient for the API contract.
+4. Domain conflicts such as a non-running run should be represented by a stable semantic code (`run_not_running`) rather than an interpolated internal exception string.
+5. Keep privacy hardening at adapter boundaries where possible. There was no reason to weaken durable `CallAttempt.lastError` recovery data or rewrite core state machines to fix an HTTP presentation leak.
+6. Existing CALL-E provider error sanitization and MCP upstream-body sanitization remain complementary layers; the HTTP boundary now closes the generic final reflection path.
+7. The change preserves the core product model: unrelated scopes continue while branch-specific work is blocked, and human instructions remain durable queued state consumed only at safe checkpoints.
 
 ## CALL-E integration status
 
 - **Fake provider:** deterministic, credential-free, idempotent, restart-rehydratable from durable accepted-call state, and still the primary full-flow development/acceptance provider.
-- **Production CALL-E adapter:** remains implemented against the asynchronous Calls API with server-only `CALLE_API_KEY`, stable `Idempotency-Key`, structured result schemas, bounded create/poll requests, persisted correlation, polling/webhook convergence, duplicate prevention, restart-by-provider-id semantics, and fail-closed ambiguous/stalled handling. This run did not alter provider behavior.
+- **Production CALL-E adapter:** remains implemented against the asynchronous Calls API with server-only `CALLE_API_KEY`, stable `Idempotency-Key`, structured result schemas, bounded create/poll requests, persisted correlation, polling/webhook convergence, duplicate prevention, restart-by-provider-id semantics, privacy-safe HTTP/provider errors, and fail-closed ambiguous/stalled handling. This run did not alter provider dispatch behavior.
 - **Shared surfaces:** HTTP, TypeScript SDK, stdio MCP, lifecycle worker, operator console, and deployment flows continue to share the same persistent control-plane state machine.
 - **Claude Code:** compiled stdio MCP behavior remains covered by automated and Compose acceptance. A genuine Claude Code host session has still not been observed and is not claimed.
 - **Live status:** no authorized real CALL-E phone call has been performed, so live provider connectivity, owner-phone authorization, and public webhook success remain unverified.
@@ -95,8 +92,8 @@ Live CALL-E verification still requires user-controlled prerequisites: a valid/a
 
 ## Highest-value next actions
 
-1. Audit provider/result/error and operator-visible surfaces for accidental disclosure of task context, callback prompt, owner decision answer, owner instruction text, owner phone number, API credential, or webhook capability token. Add deterministic regressions for any privacy boundary that is not already executable.
+1. Continue the privacy audit on durable/internal error state and operator-visible projections: verify that `CallAttempt.lastError`, audit metadata, run overviews, callback lifecycle views, and any reconciliation response cannot surface callback prompts, owner decision answers, instruction text, phone numbers, API credentials, or webhook capability tokens through less-direct paths.
 2. Review shutdown/lifecycle overlap around provider polling and callback/decision reconciliation for same-attempt concurrent observe/apply paths not already covered by webhook/poll race tests; alter production synchronization only for a reproduced divergence.
-3. Continue auditing remaining local state/audit boundaries only where a plausible partial-write failure can still exist, avoiding speculative transaction rewrites.
+3. Audit validation/error classification for stable API semantics so legitimate domain conflicts remain distinguishable without falling back to sensitive exception reflection.
 4. Run the documented acceptance in a genuine Claude Code host when that external prerequisite is available and record only observed host/version behavior.
 5. When the user-controlled CALL-E prerequisites are available, perform one tightly bounded live provider acceptance and record only observed behavior.
