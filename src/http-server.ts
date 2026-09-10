@@ -32,7 +32,7 @@ const CONCRETE_API_SCOPES: Exclude<ApiScope, "*">[] = [
 ];
 
 const ESCALATION_PRIORITIES: readonly EscalationPriority[] = ["low", "normal", "high", "critical"];
-const ISO_DATE_TIME_WITH_ZONE = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:\d{2})$/;
+const ISO_DATE_TIME_WITH_ZONE = /^(\d{4})-(\d{2})-(\d{2})T(?:[01]\d|2[0-3]):[0-5]\d:[0-5]\d(?:\.\d+)?(?:Z|[+-](?:[01]\d|2[0-3]):[0-5]\d)$/;
 
 export interface HttpRateLimitOptions {
   ownerCallbacksPerWindow?: number;
@@ -399,10 +399,15 @@ function optionalEscalationPriority(value: unknown): EscalationPriority | undefi
 }
 function optionalIsoDateTime(value: unknown, field: string): string | undefined {
   if (value === undefined) return undefined;
-  if (typeof value !== "string" || !ISO_DATE_TIME_WITH_ZONE.test(value) || !Number.isFinite(Date.parse(value))) {
-    throw new Error(`${field} must be an ISO 8601 date-time with timezone`);
+  const match = typeof value === "string" ? ISO_DATE_TIME_WITH_ZONE.exec(value) : null;
+  if (match) {
+    const year = Number(match[1]);
+    const month = Number(match[2]);
+    const day = Number(match[3]);
+    const maxDay = month >= 1 && month <= 12 ? new Date(Date.UTC(year, month, 0)).getUTCDate() : 0;
+    if (day >= 1 && day <= maxDay && Number.isFinite(Date.parse(value))) return value;
   }
-  return value;
+  throw new Error(`${field} must be an ISO 8601 date-time with timezone`);
 }
 function stringArray(value: unknown, field: string): string[] {
   if (!Array.isArray(value) || value.some((item) => typeof item !== "string" || !item.trim())) throw new Error(`${field} must be an array of non-empty strings`);
