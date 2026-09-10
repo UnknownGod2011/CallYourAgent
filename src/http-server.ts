@@ -208,7 +208,9 @@ export function createControlPlaneHttpServer(controlPlane: ControlPlane, options
       if (req.method === "POST" && reconcileEscalationMatch) {
         if (!hasScope(credential, "calls:reconcile")) return forbidden(res, "calls:reconcile");
         if (!consumeRateLimit(rateLimits, credential.id, "reconcile", reconcileLimit, rateWindowMs, res)) return;
-        return json(res, 200, await controlPlane.reconcileEscalation(decodeURIComponent(reconcileEscalationMatch[1]!)));
+        const id = decodeURIComponent(reconcileEscalationMatch[1]!);
+        await controlPlane.reconcileEscalation(id);
+        return json(res, 200, getEscalationLifecycleView(controlPlane, id));
       }
 
       if (req.method === "POST" && url.pathname === "/v1/callbacks") {
@@ -231,7 +233,7 @@ export function createControlPlaneHttpServer(controlPlane: ControlPlane, options
       if (req.method === "POST" && reconcileCallbackMatch) {
         if (!hasScope(credential, "calls:reconcile")) return forbidden(res, "calls:reconcile");
         if (!consumeRateLimit(rateLimits, credential.id, "reconcile", reconcileLimit, rateWindowMs, res)) return;
-        return json(res, 200, await controlPlane.reconcileCallback(decodeURIComponent(reconcileCallbackMatch[1]!)));
+        return json(res, 200, toOwnerCallbackView(await controlPlane.reconcileCallback(decodeURIComponent(reconcileCallbackMatch[1]!))));
       }
 
       return json(res, 404, { error: "not_found" });
