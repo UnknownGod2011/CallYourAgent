@@ -20,6 +20,8 @@ export interface LifecycleSweepResult {
   errors: Array<{ kind: "escalation" | "callback"; id: string; message: string }>;
 }
 
+export const GENERIC_LIFECYCLE_ERROR = "Lifecycle reconciliation failed";
+
 const systemClock: Clock = { now: () => new Date() };
 
 export class LifecycleManager {
@@ -78,8 +80,8 @@ export class LifecycleManager {
         if (reconciled.callAttemptId && (reconciled.status === "pending" || reconciled.status === "calling")) {
           this.markStalledIfOverdue(this.control.getCallAttempt(reconciled.callAttemptId), result);
         }
-      } catch (error) {
-        result.errors.push({ kind: "escalation", id: escalationId, message: errorMessage(error) });
+      } catch {
+        result.errors.push({ kind: "escalation", id: escalationId, message: GENERIC_LIFECYCLE_ERROR });
       }
     }
 
@@ -99,8 +101,8 @@ export class LifecycleManager {
 
         await this.control.reconcileCallback(callAttemptId);
         this.markStalledIfOverdue(this.control.getCallAttempt(callAttemptId), result);
-      } catch (error) {
-        result.errors.push({ kind: "callback", id: callAttemptId, message: errorMessage(error) });
+      } catch {
+        result.errors.push({ kind: "callback", id: callAttemptId, message: GENERIC_LIFECYCLE_ERROR });
       }
     }
 
@@ -253,8 +255,4 @@ function nonNegativeInteger(value: number, name: string): number {
 function positiveInteger(value: number, name: string): number {
   if (!Number.isInteger(value) || value < 1) throw new Error(`${name} must be a positive integer`);
   return value;
-}
-
-function errorMessage(error: unknown): string {
-  return error instanceof Error ? error.message : String(error);
 }
