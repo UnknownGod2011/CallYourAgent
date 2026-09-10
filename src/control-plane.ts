@@ -87,18 +87,21 @@ export class ControlPlane {
 
   async requestOwnerDecision(input: OwnerDecisionRequest): Promise<Escalation> {
     this.requireRunningRun(input.runId);
-    const existingId = this.store.escalationByIdempotencyKey.get(input.idempotencyKey);
-    if (existingId) return this.store.escalations.get(existingId)!;
-    const now = this.isoNow();
-    const escalation: Escalation = {
-      id: randomUUID(), runId: input.runId, scopeId: input.scopeId, question: input.question,
-      context: input.context, blocking: input.blocking, priority: input.priority ?? "normal", status: "pending",
-      idempotencyKey: input.idempotencyKey, createdAt: now, updatedAt: now, expiresAt: input.expiresAt,
-    };
-    this.store.escalations.set(escalation.id, escalation);
-    this.store.escalationByIdempotencyKey.set(input.idempotencyKey, escalation.id);
-    this.audit("escalation_created", "agent", "Owner decision requested", { runId: escalation.runId, escalationId: escalation.id }, {
-      scopeId: escalation.scopeId, blocking: escalation.blocking, priority: escalation.priority, expiresAt: escalation.expiresAt,
+    const escalation = this.store.transaction(() => {
+      const existingId = this.store.escalationByIdempotencyKey.get(input.idempotencyKey);
+      if (existingId) return this.store.escalations.get(existingId)!;
+      const now = this.isoNow();
+      const created: Escalation = {
+        id: randomUUID(), runId: input.runId, scopeId: input.scopeId, question: input.question,
+        context: input.context, blocking: input.blocking, priority: input.priority ?? "normal", status: "pending",
+        idempotencyKey: input.idempotencyKey, createdAt: now, updatedAt: now, expiresAt: input.expiresAt,
+      };
+      this.store.escalations.set(created.id, created);
+      this.store.escalationByIdempotencyKey.set(input.idempotencyKey, created.id);
+      this.audit("escalation_created", "agent", "Owner decision requested", { runId: created.runId, escalationId: created.id }, {
+        scopeId: created.scopeId, blocking: created.blocking, priority: created.priority, expiresAt: created.expiresAt,
+      });
+      return created;
     });
     return this.startEscalationCallIfAllowed(escalation);
   }
