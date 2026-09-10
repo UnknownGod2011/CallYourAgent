@@ -203,7 +203,10 @@ export function createControlPlaneHttpServer(controlPlane: ControlPlane, options
       if (req.method === "POST" && checkpointMatch) {
         if (!hasScope(credential, "agent:write")) return forbidden(res, "agent:write");
         const value = record(body);
-        return json(res, 200, controlPlane.checkpoint(decodeURIComponent(checkpointMatch[1]!), value.consume === true));
+        return json(res, 200, controlPlane.checkpoint(
+          decodeURIComponent(checkpointMatch[1]!),
+          optionalBoolean(value.consume, "consume") ?? false,
+        ));
       }
 
       const acknowledgeMatch = url.pathname.match(/^\/v1\/runs\/([^/]+)\/instructions\/ack$/);
@@ -395,6 +398,10 @@ function optionalText(value: unknown, field: string): string | undefined {
   return value.trim() ? value : undefined;
 }
 function boolean(value: unknown, field: string): boolean { if (typeof value !== "boolean") throw new Error(`${field} must be boolean`); return value; }
+function optionalBoolean(value: unknown, field: string): boolean | undefined {
+  if (value === undefined) return undefined;
+  return boolean(value, field);
+}
 function optionalEscalationPriority(value: unknown): EscalationPriority | undefined {
   if (value === undefined) return undefined;
   if (typeof value !== "string" || !ESCALATION_PRIORITIES.includes(value as EscalationPriority)) {
