@@ -146,13 +146,15 @@ export class ControlPlane {
       "Capture any new owner instructions as concise action items.",
     ].filter(Boolean).join("\n");
     const attempt = this.store.transaction(() => {
+      const existingId = this.store.callbackByIdempotencyKey.get(input.idempotencyKey);
+      if (existingId) return this.store.callAttempts.get(existingId)!;
       const reserved = this.persistCallAttempt("owner_callback", input.runId, task, `callback:${input.idempotencyKey}`, { runId: input.runId });
       this.store.callbackByIdempotencyKey.set(input.idempotencyKey, reserved.id);
+      this.audit("owner_callback_requested", "owner", "Owner requested a callback to the running agent", { runId: input.runId, agentId: run.agentId, callAttemptId: reserved.id }, { currentScope: run.currentScope });
       return reserved;
     });
-    const started = await this.dispatchCallAttempt(attempt);
-    this.audit("owner_callback_requested", "owner", "Owner requested a callback to the running agent", { runId: input.runId, agentId: run.agentId, callAttemptId: started.id }, { currentScope: run.currentScope });
-    return started;
+    if (attempt.providerCallId || attempt.status !== "queued") return attempt;
+    return this.dispatchCallAttempt(attempt);
   }
 
   async reconcileCallback(callAttemptId: string): Promise<CallAttempt> {
