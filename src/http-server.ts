@@ -286,10 +286,11 @@ function publicHttpError(error: unknown): { status: number; error: string } {
   if (message.startsWith("Unknown ")) return { status: 404, error: "not_found" };
   if (message === "request_body_too_large") return { status: 413, error: message };
   if (message === "Run is not running" || /^Run .+ is not running$/.test(message)) return { status: 409, error: "run_not_running" };
+  if (/^Instruction .+ does not belong to run .+$/.test(message)) return { status: 409, error: "instruction_run_mismatch" };
+  if (message === "Call attempt is not an owner callback") return { status: 409, error: "callback_purpose_mismatch" };
   if (
     message === "invalid_json"
     || message === "JSON object body required"
-    || message === "Call attempt is not an owner callback"
     || message === "Provider webhook event id is required"
     || message === "Provider call id is required"
     || message === "Audit event limit must be an integer from 1 to 500"
