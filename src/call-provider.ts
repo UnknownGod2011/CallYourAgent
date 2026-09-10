@@ -28,6 +28,32 @@ export function isActiveCallObservation(observation: CallProviderObservation): o
   return observation.status === "queued" || observation.status === "in_progress";
 }
 
+/**
+ * Explicit marker for provider diagnostics that are safe to persist or expose to
+ * trusted operational tooling. Provider adapters must never put phone numbers,
+ * prompts, credentials, request URLs, webhook tokens, transcripts, or raw upstream
+ * bodies in this message.
+ */
+export class SafeCallProviderError extends Error {
+  readonly safeForPersistence = true;
+
+  constructor(message: string, options?: ErrorOptions) {
+    super(message, options);
+    this.name = "SafeCallProviderError";
+  }
+}
+
+export const GENERIC_CALL_PROVIDER_ERROR = "Call provider operation failed";
+
+/**
+ * Converts an untrusted provider exception into a durable privacy-safe diagnostic.
+ * Only explicitly marked SafeCallProviderError messages are trusted; arbitrary
+ * Error.message values from custom/future providers are discarded.
+ */
+export function providerSafeDiagnostic(error: unknown): string {
+  return error instanceof SafeCallProviderError ? error.message : GENERIC_CALL_PROVIDER_ERROR;
+}
+
 export interface CallProvider {
   readonly name: string;
   start(input: StartCallInput): Promise<StartCallResult>;
@@ -47,20 +73,7 @@ export interface CallProvider {
 }
 
 export interface FakeCallProviderOptions {
-  /**
-   * Status returned when the deterministic fake provider accepts a new call.
-   * The default remains `queued`; tests may select `in_progress` to exercise
-   * providers that begin dialing before the create response is returned.
-   */
   initialStatus?: "queued" | "in_progress";
-  /**
-   * Optional deployment/demo mode that makes an accepted fake call terminal after
-   * this many provider observations. It is disabled by default, so existing tests
-   * retain explicit control through `progress`/`complete`.
-   *
-   * This exists so a separately running HTTP/container deployment can exercise the
-   * complete fake-provider lifecycle without exposing a fake-provider mutation API.
-   */
   autoCompleteAfterObservations?: number;
 }
 
