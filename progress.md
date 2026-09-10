@@ -6,13 +6,13 @@ CallYourAgent is a durable Node 24 TypeScript control plane for asynchronous two
 
 The repository includes deterministic fake and production CALL-E providers, SQLite persistence, replayable/idempotent call attempts, polling/webhook convergence, branch-scoped blocking, owner decision persistence, durable per-run instruction queues, exact instruction acknowledgement, quiet hours/call budgets, bounded lifecycle recovery, fail-closed ambiguous/stalled handling, privacy-aware audit history, scoped HTTP authentication, a typed TypeScript client, a real stdio MCP adapter, deterministic end-to-end/demo flows, an operator console, a Claude Code host-acceptance runbook, and a single-instance persistent-volume Compose reference deployment.
 
-This run continued the privacy/security audit after reconciliation-response hardening and found a concrete remaining production-provider leak path: CALL-E HTTP error responses were already sanitized, but an arbitrary exception thrown by the fetch/network transport itself propagated through `CalleCallProvider` unchanged. Because ambiguous create failures are intentionally persisted as `CallAttempt.lastError`, a transport stack, proxy, injected fetch implementation, or future networking layer could accidentally place secret-bearing exception text into durable control-plane state. PR #23 now sanitizes that transport boundary before the error can reach persistent recovery state while preserving timeout classification and ambiguous-create behavior.
+This run continued the privacy/security audit and found a concrete operational logging leak: `startRuntimeFromEnv()` logged the complete `LifecycleSweepResult.errors` array and raw sweep/startup/shutdown exceptions to stderr. A custom/future provider or other runtime layer could therefore place owner/task/provider-sensitive exception text into platform logs even though HTTP responses and the production CALL-E adapter already sanitize those boundaries. PR #24 now keeps runtime diagnostics useful while omitting arbitrary messages and identifiers.
 
 ## Exact repo state inspected this run
 
-The run started from `main` HEAD `f4b6044ba2def749180be44de566f37bc3774157`, immediately after PR #22 and its progress handoff documenting successful reconciliation-response privacy hardening.
+The run started from `main` HEAD `11e5cfb31f131eaeb1e083a662309f236e9a3668`, immediately after PR #23 and its progress handoff documenting CALL-E transport-exception sanitization.
 
-Before changing code, inspected the complete recursive repository tree through GitHub's recursive tree API, covering the root, `.github/workflows`, `deploy`, every file under `docs`, all `src` implementation surfaces, and the full `tests` suite. Inspected the recent commit chain through PR #22 and verified there were no open issues and no open pull requests before this run.
+Before changing code, inspected the complete recursive repository tree through GitHub's recursive tree API, covering the root, `.github/workflows`, `deploy`, every file under `docs`, all `src` implementation surfaces, and the full test-suite inventory. Inspected the recent commit chain through PR #23 and verified there were no open issues and no open pull requests before this run.
 
 Read in full before changing code:
 
@@ -29,58 +29,55 @@ Read in full before changing code:
 - `docs/PROVIDER_RESTART_SEMANTICS.md`
 - `deploy/README.md`
 
-Also inspected the relevant implementation/test surfaces, especially `src/control-plane.ts`, `src/calle-provider.ts`, `src/store.ts`, and the existing CALL-E/provider/privacy tests including `tests/calle-provider.test.ts`.
+Also inspected the relevant implementation/test surfaces, especially `src/server.ts`, `src/lifecycle.ts`, `src/call-provider.ts`, `src/calle-provider.ts`, `src/control-plane.ts`, and the existing provider/privacy tests.
 
-The audit confirmed that the public HTTP and MCP response projections no longer expose `CallAttempt.lastError`, and CALL-E non-2xx response bodies are already excluded from thrown errors. The remaining concrete gap was below those presentation boundaries: `CalleCallProvider.start()` and `observe()` awaited the configured fetch implementation directly. A thrown exception therefore retained its arbitrary original message. `ControlPlane.dispatchCallAttempt()` and ambiguous recovery deliberately persist provider create failures in `lastError` for operational/recovery context, so a secret-bearing network exception could survive in SQLite even though it was not currently returned through ordinary public views.
+The audit confirmed that the production CALL-E adapter already sanitizes HTTP/transport failures before they can reach durable recovery state, but `LifecycleManager.sweep()` intentionally captures arbitrary operation errors in its internal `errors` array for programmatic inspection. `startRuntimeFromEnv()` then logged that complete array with `console.error`, including each error message and domain id. In addition, the runtime entrypoint printed raw rejected exception objects for sweep rejection, graceful-shutdown failure, and startup failure. Those are inappropriate trust boundaries for an internet-deployed service because platform stderr commonly feeds long-lived centralized logs.
 
 ## Changes made this run
 
-PR #23, `Sanitize CALL-E transport errors before persistence`, changed `src/calle-provider.ts` and added `tests/calle-transport-error-privacy.test.ts`.
+PR #24, `Harden runtime lifecycle logging privacy`, changed `src/server.ts` and added `tests/runtime-log-privacy.test.ts`.
 
-The production CALL-E adapter now normalizes exceptions thrown by the transport boundary before returning them to the control plane:
+Runtime lifecycle logging now:
 
-- create-side transport failures become `CALL-E create transport failed`;
-- polling/get-side transport failures become `CALL-E get transport failed`;
-- timeout exceptions retain `name === "TimeoutError"` so existing timeout behavior/tests and operational classification remain intact, but their potentially arbitrary message is replaced by `CALL-E create timed out` or `CALL-E get timed out`;
-- no original transport exception message, cause, request URL, phone number, task text, API credential, webhook URL/token, or other fetch-layer diagnostic is copied into the sanitized error.
+- converts normal sweep errors to an aggregate `{ total, escalations, callbacks }` summary;
+- does not log lifecycle error messages;
+- does not log escalation ids or callback/call-attempt ids;
+- does not reflect raw caught sweep exceptions to stderr;
+- does not reflect raw startup or graceful-shutdown exception objects from the CLI entrypoint.
 
-This means an ambiguous CALL-E create still becomes a durable `CallAttempt` in the same fail-closed state and still reuses the exact original idempotency key for bounded recovery, but `lastError` now contains only the small provider-owned privacy-safe classification rather than arbitrary networking text.
+The exported `lifecycleSweepErrorSummary()` helper deliberately accepts only the sweep error collection and returns counts by safe category. The underlying `LifecycleManager.sweep()` result is otherwise unchanged, so tests/internal callers that need structured error information still receive it directly; only the default runtime logging boundary is narrowed.
 
-The new regressions prove two boundaries:
+The new deterministic regression injects secret-bearing lifecycle messages and secret-looking ids and proves the resulting operational summary contains only aggregate counts. It explicitly verifies that webhook/phone/task-like secret text, escalation ids, callback ids, and arbitrary failure text do not survive serialization of the runtime log payload.
 
-1. A deliberately secret-bearing transport exception during an owner callback produces an `ambiguous` call attempt whose durable `lastError` is exactly `CALL-E create transport failed` and contains none of the injected webhook token, owner phone, or owner callback prompt.
-2. Polling transport errors similarly expose only `CALL-E get transport failed`, while a deliberately secret-bearing `TimeoutError` retains its timeout type with only the sanitized `CALL-E get timed out` message.
-
-The change is intentionally narrow. It does not alter CALL-E request bodies, server-side credential handling, idempotency keys, call reservation ordering, provider correlation, polling/webhook convergence, branch-scoped blocking, callback steering, safe-checkpoint consumption, HTTP authorization, or fake-provider behavior.
+The change is intentionally narrow. It does not alter control-plane state, CALL-E requests, provider idempotency, callback/decision reconciliation, recovery state, branch-scoped blocking, owner decision persistence, callback steering, audit events, HTTP authorization, MCP behavior, or safe-checkpoint instruction consumption.
 
 ## Verification performed
 
-Direct repository execution in the automation container was not used; authoritative verification ran through the repository's GitHub Actions matrix against PR #23 head `e4cac008c1c2bea1931bc7ab80c20d1ae6db916f`.
+Authoritative verification ran through GitHub Actions against PR #24 head `cd3bf3dbef29c844b6c890cbb5ee93e063572d8c`.
 
-- CI run `34447950506` — **success** on Node `24.20.0`; `npm run check` completed TypeScript typechecking, build, and the Node test suite with **148 tests, 148 passed, 0 failed, 0 cancelled, 0 skipped, 0 todo**. Both new transport-error privacy regressions passed explicitly, and the existing CALL-E timeout tests remained green.
-- Container run `34447950460` — **success**; the production image/runtime smoke path passed.
-- Compose deployment run `34447950499` — **success**. The full production-style fake-provider acceptance remained green through generated scoped credentials, Compose validation, durable SQLite boot, compiled stdio MCP, branch-blocking owner-decision creation, restart while the decision call was active, branch-specific release, owner context-aware callback creation, restart while the callback was active, exactly-once restored callback reconciliation/steering, another restart with steering durable, and consumption only at the explicit safe checkpoint.
+- CI run `34453048784` — **success** on the repository's Node 24 check job. Locked dependency installation and the combined typecheck/build/test step completed successfully, including the new runtime-log privacy regression.
+- Container run `34453048789` — **success**; the production image/runtime smoke path passed.
+- Compose deployment run `34453048812` — **success**; the full durable fake-provider deployment acceptance remained green.
 
-PR #23 was squash-merged into `main` as `ec5bfd65fa3af0e301eb20b7342790c1204f3eff`.
+PR #24 was squash-merged into `main` as `584b4918f6548999dbf06c965a2477a5c26f1747`.
 
-`package.json` still has no separate lint script and no standalone migration/schema-check command. `npm run check` covers typechecking, build, and tests; SQLite tests exercise the durable schema/transaction path; Container and Compose exercise the production image/runtime/deployment behavior.
+`package.json` still has no separate lint script and no standalone migration/schema-check command. The repository's `npm run check` path covers TypeScript checking, build, and tests; SQLite tests exercise the durable schema/transaction path; Container and Compose exercise production image/runtime/deployment behavior.
 
 No live CALL-E phone call was attempted or claimed.
 
 ## Architecture decisions made this run
 
-1. Sanitize provider transport failures at the production provider adapter boundary rather than relying on every downstream presentation surface to remember to redact them. Once arbitrary transport text reaches durable state, future operational tooling could accidentally expose it.
-2. Preserve ambiguous-create semantics. A network exception after a create request may mean CALL-E accepted the phone side effect, so sanitization must not relabel the outcome as a definite failure or create a replacement idempotency key.
-3. Preserve timeout classification without preserving timeout messages. Code may safely distinguish `TimeoutError`, but the networking implementation's message is not trusted diagnostic content.
-4. Keep durable recovery state useful but bounded. `lastError` remains available internally as a coarse operational classification; replayable task/idempotency/provider-correlation state remains unchanged because restart/ambiguous recovery depends on it.
-5. Do not add a broad control-plane redactor yet. The production CALL-E adapter is the boundary that handles the concrete phone/API/webhook secrets audited here. A generic future provider-error contract should be designed explicitly rather than silently destroying all adapter diagnostics.
-6. No branch or checkpoint semantics changed: only the affected blocking scope waits, unrelated scopes continue, and human steering remains durable queued state consumed at a safe checkpoint.
+1. Treat application/platform logs as a public-ish operational boundary rather than as a trusted dump target. Provider, owner, task, webhook, and recovery exception text must not be assumed safe merely because it is not returned through HTTP.
+2. Preserve structured lifecycle errors inside the lifecycle service for direct trusted programmatic use, but narrow the default runtime logger to counts only. This avoids weakening debuggability inside tests/controlled tooling while protecting centralized stderr logs.
+3. Omit ids as well as messages from the default aggregate. Call-attempt/escalation ids are not required to know a sweep is unhealthy and can be correlated through the privacy-aware audit/operator surfaces instead.
+4. Fail closed for unexpected top-level runtime exceptions: the CLI emits a fixed failure category rather than serializing arbitrary thrown objects.
+5. Do not change provider/recovery semantics as part of logging hardening. Ambiguous-create handling, idempotency reuse, restart recovery, branch-safe waiting, and safe-checkpoint steering remain exactly the same.
 
 ## CALL-E integration status
 
-- **Fake provider:** deterministic, credential-free, idempotent, restart-rehydratable from durable accepted-call state, and still the primary full-flow development/acceptance provider. The complete Compose acceptance remains green after this change.
-- **Production CALL-E adapter:** implemented against the asynchronous Calls API with server-only `CALLE_API_KEY`, stable `Idempotency-Key`, structured result schemas, bounded create/poll requests, persisted correlation, polling/webhook convergence, duplicate prevention, restart-by-provider-id semantics, sanitized HTTP response failures, now-sanitized transport exceptions, and fail-closed ambiguous/stalled handling.
-- **Shared surfaces:** HTTP, TypeScript SDK, stdio MCP, lifecycle worker, operator console, and deployment flows continue to share the same persistent control-plane state machine. This run changes only how the CALL-E adapter classifies transport exceptions before they reach that state machine.
+- **Fake provider:** deterministic, credential-free, idempotent, restart-rehydratable from durable accepted-call state, and still the primary full-flow development/acceptance provider. Compose acceptance remains green after this change.
+- **Production CALL-E adapter:** implemented against the asynchronous Calls API with server-only `CALLE_API_KEY`, stable `Idempotency-Key`, structured result schemas, bounded create/poll requests, persisted correlation, polling/webhook convergence, duplicate prevention, restart-by-provider-id semantics, sanitized HTTP response failures, sanitized transport exceptions, and fail-closed ambiguous/stalled handling.
+- **Shared surfaces:** HTTP, TypeScript SDK, stdio MCP, lifecycle worker, operator console, and deployment flows continue to share the same persistent control-plane state machine. This run changes only the default runtime stderr projection of lifecycle/runtime failures.
 - **Claude Code:** compiled stdio MCP behavior remains covered by automated and Compose acceptance. A genuine Claude Code host session has still not been observed and is not claimed.
 - **Live status:** no authorized real CALL-E phone call has been performed, so live provider connectivity, owner-phone authorization, and public webhook success remain unverified.
 
@@ -94,8 +91,8 @@ Live CALL-E verification still requires user-controlled prerequisites: a valid/a
 
 ## Highest-value next actions
 
-1. Continue the provider/error privacy audit by deciding on an explicit provider-safe diagnostic contract for generic/custom `CallProvider` adapters. The production CALL-E path is now protected, but a future third-party adapter can still throw arbitrary text that the control plane may persist during ambiguous create recovery unless the port contract requires privacy-safe errors.
-2. Audit runtime/lifecycle stderr and operational logging paths, especially request URL logging around `/webhooks/calle`, so the application-owned webhook capability token carried in the query string cannot leak through proxy/application diagnostics.
+1. Finish the generic/custom `CallProvider` diagnostic contract: production CALL-E is safe and runtime stderr is now safe, but a future adapter can still feed arbitrary exception text into durable `CallAttempt.lastError` during ambiguous create/recovery. Add an explicit provider-safe error type/classification and make the control plane persist only trusted safe diagnostics or a generic fallback.
+2. Audit all remaining code paths that may stringify request URLs or HTTP request objects around `/webhooks/calle`; application code does not currently access-log requests, but future middleware/proxy guidance should remain query-token-safe.
 3. Review lifecycle sweep versus explicit callback/decision reconciliation for same-attempt concurrent observe/apply overlap not already covered by webhook-vs-poll and ambiguous-recovery single-flight tests. Add synchronization only if a reproducible divergence exists.
 4. Continue tightening stable API conflict/validation semantics without reintroducing arbitrary exception reflection.
 5. Run the documented acceptance in a genuine Claude Code host when that external prerequisite is available and record only observed host/version behavior.
