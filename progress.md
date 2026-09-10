@@ -6,13 +6,13 @@ CallYourAgent is a durable Node 24 TypeScript control plane for asynchronous two
 
 The repository includes deterministic fake and production CALL-E providers, SQLite persistence, replayable/idempotent call attempts, polling/webhook convergence, branch-scoped blocking, owner decision persistence, durable per-run instruction queues, exact instruction acknowledgement, quiet hours/call budgets, bounded lifecycle recovery, fail-closed ambiguous/stalled handling, privacy-aware audit history, scoped HTTP authentication, a typed TypeScript client, a real stdio MCP adapter, deterministic end-to-end/demo flows, an operator console, a Claude Code host-acceptance runbook, and a single-instance persistent-volume Compose reference deployment.
 
-This run audited the exact durable call-reservation -> provider-start concurrency boundary for both owner callbacks and owner-decision calls. The suspected duplicate-dispatch race does not reproduce in the supported single-process Node topology: the durable idempotency mapping/call-attempt linkage is committed synchronously before provider I/O begins, so retries, reconciliation, and even synchronous provider re-entry observe the existing reservation instead of dispatching a second provider create. Two adversarial tests now make that invariant executable. No unnecessary production single-flight/lock layer was added.
+This run audited the multi-instruction safe-checkpoint acknowledgement boundary under deterministic SQLite failure injection. The production implementation already had the correct architecture: the full acknowledgement batch runs inside one store transaction. A failure while persisting the second instruction's causal audit event rolls back every instruction mutation and every consumption audit from that batch, including the in-memory mirrors; after SQLite close/reopen the entire batch is still queued. Retrying then consumes each exact instruction once, and later acknowledgement retries remain idempotent. No unnecessary production state-machine change was made.
 
 ## Exact repo state inspected this run
 
-The run started from `main` HEAD `6dfed4d3851706876f50c2b1a3a5a057e817625f`, immediately after PR #18 and its progress handoff made agent registration, run creation, heartbeat/status reporting, and direct owner-instruction enqueue atomic with their causal audit events.
+The run started from `main` HEAD `63e672b8a4b06910c635abb88ac161995c3ea5b2`, immediately after PR #19 and its progress handoff documented the provider-reentry dispatch invariant.
 
-Before changing code, inspected the complete recursive repository tree from GitHub's recursive tree API. The tree reported `truncated: false` and covered the root, `.github/workflows`, `deploy`, all `docs`, all `src`, and all `tests` files. Inspected recent commits through the PR #18 merge/handoff. There were no open issues and no open pull requests before this run.
+Before changing code, inspected the complete recursive repository tree through GitHub's recursive tree API. It reported `truncated: false` and covered the root, `.github/workflows`, `deploy`, all `docs`, all `src`, and all `tests` files. Inspected the recent commit chain through PR #19. There were no open issues and no open pull requests before this run.
 
 Read in full before changing code:
 
@@ -28,80 +28,59 @@ Read in full before changing code:
 - `docs/OPERATOR_CONSOLE.md`
 - `docs/PROVIDER_RESTART_SEMANTICS.md`
 
-Also inspected the relevant implementation and verification surfaces, especially `src/control-plane.ts`, `tests/callback-idempotency-concurrency.test.ts`, `tests/decision-idempotency-concurrency.test.ts`, and `package.json`.
+Also inspected the relevant implementation and test surfaces, especially `src/control-plane.ts`, `src/sqlite-store.ts`, `tests/instruction-acknowledgement.test.ts`, and `tests/sqlite-core-state-audit-atomicity.test.ts`.
 
-The callback audit focused on `requestOwnerCallback`: the callback reservation, callback idempotency mapping, `call_attempt_created`, and `owner_callback_requested` all commit synchronously before `dispatchCallAttempt` invokes provider I/O. Once that commit exists, the method's early idempotency lookup returns the same durable attempt directly. Because there is no `await` between the local transaction commit and invocation of `dispatchCallAttempt`, another ordinary request cannot interleave inside that gap in the supported single Node process. Even a provider whose `start()` method synchronously re-enters `requestOwnerCallback` sees the already-committed mapping and does not invoke `start()` again.
-
-The analogous owner-decision audit reached the same conclusion. `requestOwnerDecision` commits the escalation/idempotency state first; `startEscalationCallIfAllowed` then transactionally links exactly one persisted `CallAttempt` and moves the escalation to `calling` before provider I/O. A re-entrant request sees the existing escalation with a `callAttemptId`/`calling` state and returns it instead of reserving or dispatching another call. Reconciliation while provider start is in flight also remains non-dispatching when no provider id has been written yet.
-
-This is an in-process/single-instance guarantee. It is deliberately not generalized into a multi-instance/distributed claim; the documented reference topology remains one control-plane process with SQLite.
+The audit confirmed `ControlPlane.acknowledgeInstructions` validates the requested instruction ids before mutation, then executes status updates plus `owner_instruction_consumed` audit writes inside one `store.transaction(...)`. `SqliteControlPlaneStore.transaction` uses `BEGIN IMMEDIATE`/`COMMIT`; on any failure it executes `ROLLBACK` and reloads every SQLite-backed map/set, preventing committed SQL and in-memory state from diverging.
 
 ## Changes made this run
 
-PR #19, `Test provider re-entry dispatch invariants`, added adversarial regression coverage without changing production state-machine behavior.
+PR #20, `Test multi-instruction acknowledgement atomicity`, added `tests/sqlite-instruction-batch-atomicity.test.ts`.
 
-### Callback provider re-entry regression
+The deterministic regression creates three queued owner instructions for one run, injects a failure on the second `owner_instruction_consumed` audit write, and proves:
 
-Extended `tests/callback-idempotency-concurrency.test.ts` with a provider that synchronously re-enters `requestOwnerCallback` from inside its first `start()` invocation using the exact same logical idempotency key.
-
-The test proves:
-
-- the re-entrant retry resolves to the exact same durable callback id;
-- provider `start()` executes exactly once;
-- only one local `CallAttempt` exists;
-- the callback idempotency mapping points at that attempt;
-- exactly one `call_attempt_created`, one `owner_callback_requested`, and one `call_attempt_started` event exist;
-- no synthetic `call_attempt_ambiguous` event is introduced.
-
-### Owner-decision provider re-entry regression
-
-Extended `tests/decision-idempotency-concurrency.test.ts` with the analogous adversarial provider. Its first `start()` synchronously re-enters `requestOwnerDecision` for the same run/scope/idempotency key.
-
-The test proves:
-
-- both callers resolve to the same escalation and `callAttemptId`;
-- provider `start()` executes exactly once;
-- only one escalation and one call attempt exist;
-- the blocking `release-approval` scope remains correctly blocked while the call is unresolved;
-- the accepted call receives one provider id;
-- exactly one escalation creation, call-attempt creation, and provider-start audit event exist;
-- no false ambiguous transition is created.
+- the acknowledgement call fails rather than reporting partial success;
+- all three instructions remain `queued`;
+- zero `owner_instruction_consumed` events survive the failed transaction;
+- the next non-consuming checkpoint returns the full original batch;
+- closing and reopening SQLite preserves that fully rolled-back state;
+- retrying acknowledgement consumes all three instructions successfully;
+- each instruction receives exactly one durable consumption audit event;
+- a later retry, even with reordered ids, creates no duplicate consumption events;
+- no instruction remains queued after the successful acknowledgement.
 
 ### Production behavior intentionally unchanged
 
-No dispatch single-flight map, extra lock, schema change, API change, or provider-specific behavior was added because the audited race could not be reproduced. Provider idempotency remains a second line of defense, while the supported single-process control-plane ordering already prevents duplicate local dispatch for these paths.
+No production lock, schema change, API change, or acknowledgement-state rewrite was added. Failure injection demonstrated that the existing transaction boundary already provides the required all-or-nothing semantics. Adding more machinery would increase complexity without fixing a reproduced bug.
 
 ## Verification performed
 
 Direct repository execution in the automation container remains unavailable, so verification used the repository's GitHub Actions surfaces.
 
-The substantive code head `d8023686d6eb7e0a84fc07182478cf86554c3b6e` passed the complete repository verification path first. CI run `34431818125` used Node `24.20.0`, completed `npm run check`, typecheck, build, and the Node test suite with **140 tests, 140 passed, 0 failed, 0 cancelled, 0 skipped, 0 todo**. Both new provider re-entry regressions passed explicitly. Container run `34431818146` and Compose deployment run `34431818145` also succeeded.
+PR #20 head `ff3a5eb85d893f261ec0d83f63a0235333459c61` passed the full repository verification path:
 
-After adding this progress handoff, the final PR #19 head `0a74b1edba388c64cd877f8bc4e891553b9273c3` was reverified and every required workflow succeeded again:
+- CI run `34435437889` — **success** on Node `24.20.0`; `npm run check` completed typechecking, build, and the Node test suite with **141 tests, 141 passed, 0 failed, 0 cancelled, 0 skipped, 0 todo**. The new SQLite batch-rollback/retry regression passed explicitly.
+- Container run `34435437950` — **success**; production image build and fake-provider runtime smoke test passed.
+- Compose deployment run `34435437954` — **success**; generated least-privilege credentials, Compose validation, fake-provider deployment, health/readiness, compiled stdio MCP, durable branch-blocking owner decision across restart, branch-specific release, owner callback across restart, exactly-once steering, another persistence restart, and safe-checkpoint steering consumption all passed.
 
-- CI run `34431952294` — **success**.
-- Container run `34431952290` — **success**.
-- Compose deployment run `34431952296` — **success**, preserving the production-style durable SQLite + compiled stdio MCP + restart/recovery + branch-safe owner decision + owner callback steering + safe-checkpoint acceptance path.
+PR #20 was squash-merged into `main` as `b364e2f57afc0883a73decf7ac054ea82c1fcf91`.
 
-PR #19 was squash-merged into `main` as `26cd1cd598ada72ac47872762daa9b68a3c32833`.
-
-`package.json` still has no separate lint script and no standalone migration/schema-check command. `npm run check` covers typechecking, build, and tests; SQLite tests exercise the durable schema/transaction path; Container and Compose exercise production image/runtime/deployment behavior.
+`package.json` still has no separate lint script and no standalone migration/schema-check command. `npm run check` covers typechecking, build, and tests; SQLite tests exercise the durable schema and transaction path; Container and Compose exercise the production image/runtime/deployment behavior.
 
 No live CALL-E phone call was attempted or claimed.
 
 ## Architecture decisions made this run
 
-1. Do not add concurrency machinery without a demonstrated failure mode. The suspected callback dispatch race is already prevented by synchronous local reservation/idempotency before the first provider `await` boundary in the supported single-instance Node topology.
-2. Provider re-entry is a useful adversarial test because `CallProvider.start()` executes user/provider adapter code before its returned promise is awaited. The new tests prove even that stronger form of interleaving cannot produce a second local dispatch for callback or decision requests.
-3. Provider `Idempotency-Key` remains essential as defense in depth for transport ambiguity/retries, but ordinary same-process idempotent retries should not depend on the provider to deduplicate duplicate dispatches.
-4. The result is intentionally scoped to the documented one-process SQLite deployment. A future multi-instance architecture must introduce database/distributed coordination rather than extrapolating JavaScript event-loop ordering across processes.
-5. Branch/scope semantics are unchanged: only the affected blocking scope waits, unrelated work can continue, and callback steering remains durable queued state consumed only at explicit safe checkpoints.
-6. Provider/CALL-E I/O remains outside SQLite transactions.
+1. Multi-instruction acknowledgement is one local durability unit. If any instruction-state or causal-audit write fails, none of the batch may be considered consumed.
+2. Safe-checkpoint semantics remain exact: a failed acknowledgement leaves the entire batch available for a later checkpoint/retry instead of partially hiding owner steering from the agent.
+3. SQLite rollback must restore both durable rows and the synchronous in-memory mirrors. The new close/reopen assertion makes the durable side of that invariant executable as well.
+4. Repeated acknowledgement remains idempotent at the instruction level and must never duplicate `owner_instruction_consumed` history.
+5. Do not change production logic merely because a boundary is important; change it only when failure injection or concurrency testing demonstrates a real incorrect state. Here the existing transaction was correct.
+6. This path performs no provider/CALL-E network I/O, and the change does not alter branch-scoped blocking or the rule that human steering is consumed only at safe checkpoints.
 
 ## CALL-E integration status
 
-- **Fake provider:** deterministic, credential-free, idempotent, restart-rehydratable from durable accepted-call state, and still the primary full-flow development/acceptance provider. The new adversarial provider tests extend its role as deterministic concurrency test infrastructure.
-- **Production CALL-E adapter:** remains implemented against the asynchronous Calls API with server-only `CALLE_API_KEY`, stable `Idempotency-Key`, structured result schemas, bounded create/poll requests, persisted correlation, polling/webhook convergence, duplicate prevention, restart-by-provider-id semantics, and fail-closed ambiguous/stalled handling. This run did not alter its external behavior.
+- **Fake provider:** deterministic, credential-free, idempotent, restart-rehydratable from durable accepted-call state, and still the primary full-flow development/acceptance provider.
+- **Production CALL-E adapter:** remains implemented against the asynchronous Calls API with server-only `CALLE_API_KEY`, stable `Idempotency-Key`, structured result schemas, bounded create/poll requests, persisted correlation, polling/webhook convergence, duplicate prevention, restart-by-provider-id semantics, and fail-closed ambiguous/stalled handling. This run did not alter provider behavior.
 - **Shared surfaces:** HTTP, TypeScript SDK, stdio MCP, lifecycle worker, operator console, and deployment flows continue to share the same persistent control-plane state machine.
 - **Claude Code:** compiled stdio MCP behavior remains covered by automated and Compose acceptance. A genuine Claude Code host session has still not been observed and is not claimed.
 - **Live status:** no authorized real CALL-E phone call has been performed, so live provider connectivity, owner-phone authorization, and public webhook success remain unverified.
@@ -116,8 +95,8 @@ Live CALL-E verification still requires user-controlled prerequisites: a valid/a
 
 ## Highest-value next actions
 
-1. Audit the remaining exact-instruction acknowledgement state/audit boundary under SQLite failure injection. `acknowledgeInstructions` already wraps the batch in one transaction, but explicitly prove that a failure while auditing one instruction cannot leave part of a multi-instruction acknowledgement consumed and part queued, and that retry remains idempotent.
-2. Audit privacy of provider/result and error surfaces for accidental task context, callback prompt, decision answer, instruction text, owner phone, API credential, or webhook-token disclosure, prioritizing errors and operator-visible payloads.
-3. Review shutdown/lifecycle overlap around provider polling and callback/decision reconciliation for any same-attempt concurrent observe/apply paths not already covered by webhook/poll race tests; change production logic only for a reproducible state divergence.
+1. Audit provider/result/error and operator-visible surfaces for accidental disclosure of task context, callback prompt, owner decision answer, owner instruction text, owner phone number, API credential, or webhook capability token. Add deterministic regressions for any privacy boundary that is not already executable.
+2. Review shutdown/lifecycle overlap around provider polling and callback/decision reconciliation for same-attempt concurrent observe/apply paths not already covered by webhook/poll race tests; alter production synchronization only for a reproduced divergence.
+3. Continue auditing remaining local state/audit boundaries only where a plausible partial-write failure can still exist, avoiding speculative transaction rewrites.
 4. Run the documented acceptance in a genuine Claude Code host when that external prerequisite is available and record only observed host/version behavior.
 5. When the user-controlled CALL-E prerequisites are available, perform one tightly bounded live provider acceptance and record only observed behavior.
