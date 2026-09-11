@@ -56,11 +56,19 @@ function canonicalizeFingerprintValue(value: unknown): unknown {
   return value;
 }
 
-function terminalOutcomeClaim(outcome: TerminalCallOutcome): CallTerminalOutcomeClaim {
+function terminalOutcomeClaim(
+  outcome: TerminalCallOutcome,
+  purpose: CallAttempt["purpose"],
+): CallTerminalOutcomeClaim {
+  const semanticPayload = outcome.status === "failed"
+    ? { status: outcome.status }
+    : purpose === "owner_decision"
+      ? { status: outcome.status, answer: outcome.answer ?? "", structured: outcome.structured ?? null }
+      : { status: outcome.status, instructions: outcome.instructions ?? [] };
   return {
     status: outcome.status,
     fingerprint: createHash("sha256")
-      .update(JSON.stringify(canonicalizeFingerprintValue(outcome)))
+      .update(JSON.stringify(canonicalizeFingerprintValue(semanticPayload)))
       .digest("hex"),
   };
 }
@@ -448,7 +456,7 @@ export class ControlPlane {
       return this.finishAttempt(current, "ambiguous");
     }
 
-    const observedClaim = terminalOutcomeClaim(outcome);
+    const observedClaim = terminalOutcomeClaim(outcome, current.purpose);
     if (current.status === "completed" || current.status === "failed") {
       const existingClaim = this.store.terminalOutcomeClaims.get(current.id);
       if (existingClaim && !terminalClaimsMatch(existingClaim, observedClaim)) {
