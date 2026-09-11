@@ -15,7 +15,7 @@ import type {
 } from "./domain.js";
 import { providerSafeDiagnostic, type CallProvider, type CallProviderObservation, type StartCallResult } from "./call-provider.js";
 import { CallPolicy } from "./call-policy.js";
-import type { ControlPlaneStore } from "./store.js";
+import type { CallTerminalOutcomeClaim, ControlPlaneStore } from "./store.js";
 
 export interface Clock {
   now(): Date;
@@ -36,10 +36,45 @@ export const IDEMPOTENCY_CONFLICT_MESSAGE = "Idempotency key is already bound to
 
 const systemClock: Clock = { now: () => new Date() };
 
+type TerminalCallOutcome = Extract<CallOutcome, { status: "completed" | "failed" }>;
+
 function callbackRequestFingerprint(input: CallbackRequest): string {
   return createHash("sha256")
     .update(JSON.stringify({ runId: input.runId, prompt: input.prompt || null }))
     .digest("hex");
+}
+
+function canonicalizeFingerprintValue(value: unknown): unknown {
+  if (Array.isArray(value)) return value.map(canonicalizeFingerprintValue);
+  if (value && typeof value === "object") {
+    return Object.fromEntries(
+      Object.entries(value as Record<string, unknown>)
+        .sort(([left], [right]) => left.localeCompare(right))
+        .map(([key, nested]) => [key, canonicalizeFingerprintValue(nested)]),
+    );
+  }
+  return value;
+}
+
+function terminalOutcomeClaim(
+  outcome: TerminalCallOutcome,
+  purpose: CallAttempt["purpose"],
+): CallTerminalOutcomeClaim {
+  const semanticPayload = outcome.status === "failed"
+    ? { status: outcome.status }
+    : purpose === "owner_decision"
+      ? { status: outcome.status, answer: outcome.answer ?? "", structured: outcome.structured ?? null }
+      : { status: outcome.status, instructions: outcome.instructions ?? [] };
+  return {
+    status: outcome.status,
+    fingerprint: createHash("sha256")
+      .update(JSON.stringify(canonicalizeFingerprintValue(semanticPayload)))
+      .digest("hex"),
+  };
+}
+
+function terminalClaimsMatch(left: CallTerminalOutcomeClaim, right: CallTerminalOutcomeClaim): boolean {
+  return left.status === right.status && left.fingerprint === right.fingerprint;
 }
 
 function assertEscalationReplayMatches(existing: Escalation, input: OwnerDecisionRequest): void {
@@ -416,11 +451,35 @@ export class ControlPlane {
 
   private applyTerminalOutcome(attempt: CallAttempt, outcome: CallOutcome): CallAttempt {
     const current = this.requireCallAttempt(attempt.id);
-    if (current.status === "completed" || current.status === "failed") return current;
-    if (outcome.status === "ambiguous") return this.finishAttempt(current, "ambiguous");
-    const finished = this.finishAttempt(current, outcome.status);
-    if (current.purpose === "owner_decision") {
-      const escalation = this.requireEscalation(current.correlationId);
+    if (outcome.status === "ambiguous") {
+      if (current.status === "completed" || current.status === "failed") return current;
+      return this.finishAttempt(current, "ambiguous");
+    }
+
+    const observedClaim = terminalOutcomeClaim(outcome, current.purpose);
+    if (current.status === "completed" || current.status === "failed") {
+      const existingClaim = this.store.terminalOutcomeClaims.get(current.id);
+      if (existingClaim && !terminalClaimsMatch(existingClaim, observedClaim)) {
+        this.auditTerminalConflictOnce(current, existingClaim, observedClaim);
+      }
+      return current;
+    }
+
+    const claimResult = this.store.claimCallTerminalOutcome(current.id, observedClaim);
+    const authoritativeCurrent = this.requireCallAttempt(current.id);
+    if (!claimResult.claimed) {
+      if (!terminalClaimsMatch(claimResult.winner, observedClaim)) {
+        this.auditTerminalConflictOnce(authoritativeCurrent, claimResult.winner, observedClaim);
+      }
+      if (authoritativeCurrent.status === "completed" || authoritativeCurrent.status === "failed") {
+        return authoritativeCurrent;
+      }
+      return this.convergeTerminalEntityState(authoritativeCurrent, claimResult.winner);
+    }
+
+    const finished = this.finishAttempt(authoritativeCurrent, outcome.status);
+    if (authoritativeCurrent.purpose === "owner_decision") {
+      const escalation = this.requireEscalation(authoritativeCurrent.correlationId);
       if (["resolved", "expired", "failed"].includes(escalation.status)) return finished;
       if (outcome.status === "failed") {
         const failed = { ...escalation, status: "failed" as const, updatedAt: this.isoNow() };
@@ -437,13 +496,68 @@ export class ControlPlane {
       this.store.decisions.set(decision.id, decision);
       const resolved = { ...escalation, status: "resolved" as const, decisionId: decision.id, updatedAt: this.isoNow() };
       this.store.escalations.set(resolved.id, resolved);
-      this.audit("owner_decision_recorded", "owner", "Owner decision recorded and blocked scope released", { runId: escalation.runId, escalationId: escalation.id, callAttemptId: current.id }, { scopeId: escalation.scopeId, blocking: escalation.blocking, structured: Boolean(outcome.structured) });
+      this.audit("owner_decision_recorded", "owner", "Owner decision recorded and blocked scope released", { runId: escalation.runId, escalationId: escalation.id, callAttemptId: authoritativeCurrent.id }, { scopeId: escalation.scopeId, blocking: escalation.blocking, structured: Boolean(outcome.structured) });
       return finished;
     }
-    if (outcome.status === "completed" && this.store.claimCallbackInstructionSet(current.id)) {
-      for (const text of outcome.instructions ?? []) this.enqueueInstruction(current.correlationId, text, "callback", current.id);
+    if (outcome.status === "completed" && this.store.claimCallbackInstructionSet(authoritativeCurrent.id)) {
+      for (const text of outcome.instructions ?? []) this.enqueueInstruction(authoritativeCurrent.correlationId, text, "callback", authoritativeCurrent.id);
     }
     return finished;
+  }
+
+  private convergeTerminalEntityState(attempt: CallAttempt, winner: CallTerminalOutcomeClaim): CallAttempt {
+    if (attempt.purpose === "owner_decision") {
+      const escalation = this.requireEscalation(attempt.correlationId);
+      if (winner.status === "completed") {
+        const decisionId = this.store.decisionByEscalationId.get(escalation.id);
+        const decision = decisionId ? this.store.decisions.get(decisionId) : undefined;
+        if (!decisionId || !decision) {
+          throw new Error(`Completed terminal claim has no durable owner decision for escalation ${escalation.id}`);
+        }
+        if (escalation.status !== "resolved" || escalation.decisionId !== decisionId) {
+          this.store.escalations.set(escalation.id, {
+            ...escalation,
+            status: "resolved",
+            decisionId,
+            updatedAt: this.isoNow(),
+          });
+        }
+      } else if (escalation.status !== "failed") {
+        this.store.escalations.set(escalation.id, {
+          ...escalation,
+          status: "failed",
+          updatedAt: this.isoNow(),
+        });
+      }
+    } else if (winner.status === "completed" && !this.store.callbackInstructionSetClaims.has(attempt.id)) {
+      throw new Error(`Completed callback terminal claim has no durable instruction-set claim for call attempt ${attempt.id}`);
+    }
+
+    const converged: CallAttempt = { ...attempt, status: winner.status, updatedAt: this.isoNow() };
+    this.store.callAttempts.set(converged.id, converged);
+    return converged;
+  }
+
+  private auditTerminalConflictOnce(
+    attempt: CallAttempt,
+    winner: CallTerminalOutcomeClaim,
+    observed: CallTerminalOutcomeClaim,
+  ): void {
+    const alreadyAudited = [...this.store.auditEvents.values()].some(
+      (event) => event.type === "call_attempt_terminal_conflict" && event.callAttemptId === attempt.id,
+    );
+    if (alreadyAudited) return;
+    this.audit(
+      "call_attempt_terminal_conflict",
+      "provider",
+      "Conflicting terminal provider evidence ignored; first committed outcome remains authoritative",
+      { runId: this.runIdForAttempt(attempt), callAttemptId: attempt.id },
+      {
+        winningStatus: winner.status,
+        observedStatus: observed.status,
+        payloadConflict: winner.fingerprint !== observed.fingerprint,
+      },
+    );
   }
 
   private async rehydrateProviderCallIfSupported(attempt: CallAttempt): Promise<void> {

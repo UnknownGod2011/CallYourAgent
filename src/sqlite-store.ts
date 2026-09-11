@@ -145,7 +145,7 @@ export class SqliteControlPlaneStore implements ControlPlaneStore {
       return result;
     } catch (error) {
       this.db.exec("ROLLBACK");
-      for (const reloader of this.reloaders) reloader.reload();
+      this.reloadAll();
       throw error;
     } finally {
       this.transactionDepth -= 1;
@@ -171,8 +171,13 @@ export class SqliteControlPlaneStore implements ControlPlaneStore {
     );
     const row = this.db.prepare("SELECT data FROM call_terminal_outcomes WHERE key = ?").get(callAttemptId) as { data: string } | undefined;
     if (!row) throw new Error("Failed to claim terminal outcome");
-    this.terminalOutcomeClaims.reload();
-    return { winner: JSON.parse(row.data) as CallTerminalOutcomeClaim, claimed: Number(result.changes) === 1 };
+    const claimed = Number(result.changes) === 1;
+    // A losing connection may have stale in-memory entity mirrors from before the
+    // winning transaction committed. Refresh all mirrors before returning so the
+    // control plane can converge to the winner without rewriting stale state.
+    if (claimed) this.terminalOutcomeClaims.reload();
+    else this.reloadAll();
+    return { winner: JSON.parse(row.data) as CallTerminalOutcomeClaim, claimed };
   }
 
   claimCallbackInstructionSet(callAttemptId: string): boolean {
@@ -187,6 +192,10 @@ export class SqliteControlPlaneStore implements ControlPlaneStore {
     if (this.closed) return;
     this.db.close();
     this.closed = true;
+  }
+
+  private reloadAll(): void {
+    for (const reloader of this.reloaders) reloader.reload();
   }
 
   private bindUniqueMapValue(map: SqliteBackedMap<string>, table: string, key: string, value: string): string {
