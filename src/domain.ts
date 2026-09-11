@@ -22,6 +22,7 @@ export type AuditEventType =
   | "call_attempt_stalled"
   | "call_attempt_completed"
   | "call_attempt_failed"
+  | "call_attempt_terminal_conflict"
   | "call_recovery_scheduled"
   | "call_recovery_exhausted"
   | "owner_decision_recorded"
