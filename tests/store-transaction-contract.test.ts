@@ -47,16 +47,28 @@ function verifyAtomicClaimContract(store: ControlPlaneStore): void {
   assert.equal(store.bindCallbackIdempotencyKey("callback-claim", "callback-second"), "callback-first");
   assert.equal(store.callbackByIdempotencyKey.get("callback-claim"), "callback-first");
 
+  assert.equal(store.bindDecisionToEscalation("escalation-terminal", "owner-decision-first"), "owner-decision-first");
+  assert.equal(store.bindDecisionToEscalation("escalation-terminal", "owner-decision-second"), "owner-decision-first");
+  assert.equal(store.decisionByEscalationId.get("escalation-terminal"), "owner-decision-first");
+
+  assert.equal(store.claimCallbackInstructionSet("callback-terminal"), true);
+  assert.equal(store.claimCallbackInstructionSet("callback-terminal"), false);
+  assert.equal(store.callbackInstructionSetClaims.has("callback-terminal"), true);
+
   assert.equal(store.claimWebhookEventId("webhook-claim"), true);
   assert.equal(store.claimWebhookEventId("webhook-claim"), false);
 
   assert.throws(() => store.transaction(() => {
     assert.equal(store.bindCallbackIdempotencyKey("rollback-claim", "callback-rolled-back"), "callback-rolled-back");
+    assert.equal(store.bindDecisionToEscalation("rollback-escalation", "decision-rolled-back"), "decision-rolled-back");
+    assert.equal(store.claimCallbackInstructionSet("callback-terminal-rolled-back"), true);
     assert.equal(store.claimWebhookEventId("webhook-rolled-back"), true);
     throw new Error("rollback atomic claims");
   }), /rollback atomic claims/);
 
   assert.equal(store.bindCallbackIdempotencyKey("rollback-claim", "callback-after-rollback"), "callback-after-rollback");
+  assert.equal(store.bindDecisionToEscalation("rollback-escalation", "decision-after-rollback"), "decision-after-rollback");
+  assert.equal(store.claimCallbackInstructionSet("callback-terminal-rolled-back"), true);
   assert.equal(store.claimWebhookEventId("webhook-rolled-back"), true);
 }
 
@@ -91,8 +103,12 @@ test("SQLite store matches the transaction rollback and atomic-claim contracts a
       assert.equal(reopened.processedWebhookEventIds.has("event-committed"), true);
       assert.equal(reopened.escalationByIdempotencyKey.get("decision-claim"), "escalation-first");
       assert.equal(reopened.callbackByIdempotencyKey.get("callback-claim"), "callback-first");
+      assert.equal(reopened.decisionByEscalationId.get("escalation-terminal"), "owner-decision-first");
+      assert.equal(reopened.callbackInstructionSetClaims.has("callback-terminal"), true);
       assert.equal(reopened.processedWebhookEventIds.has("webhook-claim"), true);
       assert.equal(reopened.callbackByIdempotencyKey.get("rollback-claim"), "callback-after-rollback");
+      assert.equal(reopened.decisionByEscalationId.get("rollback-escalation"), "decision-after-rollback");
+      assert.equal(reopened.callbackInstructionSetClaims.has("callback-terminal-rolled-back"), true);
       assert.equal(reopened.processedWebhookEventIds.has("webhook-rolled-back"), true);
     } finally {
       reopened.close();
@@ -115,6 +131,14 @@ test("SQLite atomic claims return the committed winner across independent store 
     assert.equal(first.bindCallbackIdempotencyKey("shared-callback", "callback-a"), "callback-a");
     assert.equal(second.bindCallbackIdempotencyKey("shared-callback", "callback-b"), "callback-a");
     assert.equal(second.callbackByIdempotencyKey.get("shared-callback"), "callback-a");
+
+    assert.equal(first.bindDecisionToEscalation("shared-escalation", "decision-a"), "decision-a");
+    assert.equal(second.bindDecisionToEscalation("shared-escalation", "decision-b"), "decision-a");
+    assert.equal(second.decisionByEscalationId.get("shared-escalation"), "decision-a");
+
+    assert.equal(first.claimCallbackInstructionSet("shared-callback-terminal"), true);
+    assert.equal(second.claimCallbackInstructionSet("shared-callback-terminal"), false);
+    assert.equal(second.callbackInstructionSetClaims.has("shared-callback-terminal"), true);
 
     assert.equal(first.claimWebhookEventId("shared-webhook"), true);
     assert.equal(second.claimWebhookEventId("shared-webhook"), false);

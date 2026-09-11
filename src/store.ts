@@ -18,7 +18,9 @@ export interface ControlPlaneStore {
   auditEvents: Map<string, AuditEvent>;
   escalationByIdempotencyKey: Map<string, string>;
   callbackByIdempotencyKey: Map<string, string>;
+  decisionByEscalationId: Map<string, string>;
   processedWebhookEventIds: Set<string>;
+  callbackInstructionSetClaims: Set<string>;
 
   /** Execute a synchronous domain mutation atomically. */
   transaction<T>(operation: () => T): T;
@@ -28,6 +30,12 @@ export interface ControlPlaneStore {
 
   /** Atomically bind a callback idempotency key and return the winning call-attempt id. */
   bindCallbackIdempotencyKey(key: string, callAttemptId: string): string;
+
+  /** Atomically bind an escalation to its one durable owner-decision id and return the winner. */
+  bindDecisionToEscalation(escalationId: string, decisionId: string): string;
+
+  /** Atomically claim creation of the callback-derived instruction set for one terminal call attempt. */
+  claimCallbackInstructionSet(callAttemptId: string): boolean;
 
   /** Atomically claim a provider webhook event id. Returns true only for the first claim. */
   claimWebhookEventId(eventId: string): boolean;
@@ -46,7 +54,9 @@ type InMemorySnapshot = {
   auditEvents: Map<string, AuditEvent>;
   escalationByIdempotencyKey: Map<string, string>;
   callbackByIdempotencyKey: Map<string, string>;
+  decisionByEscalationId: Map<string, string>;
   processedWebhookEventIds: Set<string>;
+  callbackInstructionSetClaims: Set<string>;
 };
 
 function cloneMap<T>(source: Map<string, T>): Map<string, T> {
@@ -68,7 +78,9 @@ export class InMemoryControlPlaneStore implements ControlPlaneStore {
   auditEvents = new Map<string, AuditEvent>();
   escalationByIdempotencyKey = new Map<string, string>();
   callbackByIdempotencyKey = new Map<string, string>();
+  decisionByEscalationId = new Map<string, string>();
   processedWebhookEventIds = new Set<string>();
+  callbackInstructionSetClaims = new Set<string>();
 
   private transactionDepth = 0;
 
@@ -95,10 +107,16 @@ export class InMemoryControlPlaneStore implements ControlPlaneStore {
     return this.bindUnique(this.callbackByIdempotencyKey, key, callAttemptId);
   }
 
+  bindDecisionToEscalation(escalationId: string, decisionId: string): string {
+    return this.bindUnique(this.decisionByEscalationId, escalationId, decisionId);
+  }
+
+  claimCallbackInstructionSet(callAttemptId: string): boolean {
+    return this.claimUnique(this.callbackInstructionSetClaims, callAttemptId);
+  }
+
   claimWebhookEventId(eventId: string): boolean {
-    if (this.processedWebhookEventIds.has(eventId)) return false;
-    this.processedWebhookEventIds.add(eventId);
-    return true;
+    return this.claimUnique(this.processedWebhookEventIds, eventId);
   }
 
   close(): void {}
@@ -108,6 +126,12 @@ export class InMemoryControlPlaneStore implements ControlPlaneStore {
     if (existing !== undefined) return existing;
     map.set(key, value);
     return value;
+  }
+
+  private claimUnique(set: Set<string>, value: string): boolean {
+    if (set.has(value)) return false;
+    set.add(value);
+    return true;
   }
 
   private snapshot(): InMemorySnapshot {
@@ -121,7 +145,9 @@ export class InMemoryControlPlaneStore implements ControlPlaneStore {
       auditEvents: cloneMap(this.auditEvents),
       escalationByIdempotencyKey: cloneMap(this.escalationByIdempotencyKey),
       callbackByIdempotencyKey: cloneMap(this.callbackByIdempotencyKey),
+      decisionByEscalationId: cloneMap(this.decisionByEscalationId),
       processedWebhookEventIds: new Set(this.processedWebhookEventIds),
+      callbackInstructionSetClaims: new Set(this.callbackInstructionSetClaims),
     };
   }
 
@@ -135,7 +161,10 @@ export class InMemoryControlPlaneStore implements ControlPlaneStore {
     replaceMap(this.auditEvents, snapshot.auditEvents);
     replaceMap(this.escalationByIdempotencyKey, snapshot.escalationByIdempotencyKey);
     replaceMap(this.callbackByIdempotencyKey, snapshot.callbackByIdempotencyKey);
+    replaceMap(this.decisionByEscalationId, snapshot.decisionByEscalationId);
     this.processedWebhookEventIds.clear();
     for (const eventId of snapshot.processedWebhookEventIds) this.processedWebhookEventIds.add(eventId);
+    this.callbackInstructionSetClaims.clear();
+    for (const callAttemptId of snapshot.callbackInstructionSetClaims) this.callbackInstructionSetClaims.add(callAttemptId);
   }
 }

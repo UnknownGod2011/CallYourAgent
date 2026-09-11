@@ -87,7 +87,9 @@ export class SqliteControlPlaneStore implements ControlPlaneStore {
   readonly auditEvents: SqliteBackedMap<AuditEvent>;
   readonly escalationByIdempotencyKey: SqliteBackedMap<string>;
   readonly callbackByIdempotencyKey: SqliteBackedMap<string>;
+  readonly decisionByEscalationId: SqliteBackedMap<string>;
   readonly processedWebhookEventIds: SqliteBackedSet;
+  readonly callbackInstructionSetClaims: SqliteBackedSet;
 
   private readonly reloaders: Array<{ reload(): void }>;
   private transactionDepth = 0;
@@ -104,7 +106,9 @@ export class SqliteControlPlaneStore implements ControlPlaneStore {
     this.auditEvents = new SqliteBackedMap(db, "audit_events");
     this.escalationByIdempotencyKey = new SqliteBackedMap(db, "escalation_idempotency");
     this.callbackByIdempotencyKey = new SqliteBackedMap(db, "callback_idempotency");
+    this.decisionByEscalationId = new SqliteBackedMap(db, "decision_by_escalation");
     this.processedWebhookEventIds = new SqliteBackedSet(db, "webhook_events");
+    this.callbackInstructionSetClaims = new SqliteBackedSet(db, "callback_instruction_sets");
     this.reloaders = [
       this.agents,
       this.runs,
@@ -115,7 +119,9 @@ export class SqliteControlPlaneStore implements ControlPlaneStore {
       this.auditEvents,
       this.escalationByIdempotencyKey,
       this.callbackByIdempotencyKey,
+      this.decisionByEscalationId,
       this.processedWebhookEventIds,
+      this.callbackInstructionSetClaims,
     ];
   }
 
@@ -151,10 +157,16 @@ export class SqliteControlPlaneStore implements ControlPlaneStore {
     return this.bindUniqueMapValue(this.callbackByIdempotencyKey, "callback_idempotency", key, callAttemptId);
   }
 
+  bindDecisionToEscalation(escalationId: string, decisionId: string): string {
+    return this.bindUniqueMapValue(this.decisionByEscalationId, "decision_by_escalation", escalationId, decisionId);
+  }
+
+  claimCallbackInstructionSet(callAttemptId: string): boolean {
+    return this.claimUniqueSetValue(this.callbackInstructionSetClaims, "callback_instruction_sets", callAttemptId);
+  }
+
   claimWebhookEventId(eventId: string): boolean {
-    const result = this.db.prepare("INSERT OR IGNORE INTO webhook_events (key) VALUES (?)").run(eventId);
-    this.processedWebhookEventIds.reload();
-    return Number(result.changes) === 1;
+    return this.claimUniqueSetValue(this.processedWebhookEventIds, "webhook_events", eventId);
   }
 
   close(): void {
@@ -172,6 +184,12 @@ export class SqliteControlPlaneStore implements ControlPlaneStore {
     return winner;
   }
 
+  private claimUniqueSetValue(set: SqliteBackedSet, table: string, value: string): boolean {
+    const result = this.db.prepare(`INSERT OR IGNORE INTO ${table} (key) VALUES (?)`).run(value);
+    set.reload();
+    return Number(result.changes) === 1;
+  }
+
   private migrate(): void {
     this.db.exec(`
       CREATE TABLE IF NOT EXISTS agents (key TEXT PRIMARY KEY, data TEXT NOT NULL);
@@ -183,10 +201,14 @@ export class SqliteControlPlaneStore implements ControlPlaneStore {
       CREATE TABLE IF NOT EXISTS audit_events (key TEXT PRIMARY KEY, data TEXT NOT NULL);
       CREATE TABLE IF NOT EXISTS escalation_idempotency (key TEXT PRIMARY KEY, data TEXT NOT NULL);
       CREATE TABLE IF NOT EXISTS callback_idempotency (key TEXT PRIMARY KEY, data TEXT NOT NULL);
+      CREATE TABLE IF NOT EXISTS decision_by_escalation (key TEXT PRIMARY KEY, data TEXT NOT NULL);
       CREATE TABLE IF NOT EXISTS webhook_events (key TEXT PRIMARY KEY);
+      CREATE TABLE IF NOT EXISTS callback_instruction_sets (key TEXT PRIMARY KEY);
 
       CREATE UNIQUE INDEX IF NOT EXISTS ux_escalation_idempotency
         ON escalations(json_extract(data, '$.idempotencyKey'));
+      CREATE UNIQUE INDEX IF NOT EXISTS ux_decision_escalation
+        ON decisions(json_extract(data, '$.escalationId'));
       CREATE UNIQUE INDEX IF NOT EXISTS ux_call_attempt_provider_id
         ON call_attempts(json_extract(data, '$.providerCallId'))
         WHERE json_extract(data, '$.providerCallId') IS NOT NULL;
