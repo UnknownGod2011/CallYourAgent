@@ -23,6 +23,15 @@ export interface ControlPlaneStore {
   /** Execute a synchronous domain mutation atomically. */
   transaction<T>(operation: () => T): T;
 
+  /** Atomically bind an escalation idempotency key and return the winning escalation id. */
+  bindEscalationIdempotencyKey(key: string, escalationId: string): string;
+
+  /** Atomically bind a callback idempotency key and return the winning call-attempt id. */
+  bindCallbackIdempotencyKey(key: string, callAttemptId: string): string;
+
+  /** Atomically claim a provider webhook event id. Returns true only for the first claim. */
+  claimWebhookEventId(eventId: string): boolean;
+
   /** Release backing resources. Implementations must make this idempotent. */
   close(): void;
 }
@@ -78,7 +87,28 @@ export class InMemoryControlPlaneStore implements ControlPlaneStore {
     }
   }
 
+  bindEscalationIdempotencyKey(key: string, escalationId: string): string {
+    return this.bindUnique(this.escalationByIdempotencyKey, key, escalationId);
+  }
+
+  bindCallbackIdempotencyKey(key: string, callAttemptId: string): string {
+    return this.bindUnique(this.callbackByIdempotencyKey, key, callAttemptId);
+  }
+
+  claimWebhookEventId(eventId: string): boolean {
+    if (this.processedWebhookEventIds.has(eventId)) return false;
+    this.processedWebhookEventIds.add(eventId);
+    return true;
+  }
+
   close(): void {}
+
+  private bindUnique(map: Map<string, string>, key: string, value: string): string {
+    const existing = map.get(key);
+    if (existing !== undefined) return existing;
+    map.set(key, value);
+    return value;
+  }
 
   private snapshot(): InMemorySnapshot {
     return {
