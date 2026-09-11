@@ -6,42 +6,46 @@ CallYourAgent is a durable Node 24 TypeScript control plane for asynchronous two
 
 ## Exact repo state inspected this run
 
-Started from `main` HEAD `14c5086e0964373f42ba5970c10305194bafd226` after PR #50. Before changes, inspected the recursive repository tree, source/test inventory, recent commits, open issues, open pull requests, `AGENTS.md`, this file, `README.md`, and all architecture/integration/deployment/security/policy/acceptance documents under `docs/` plus `deploy/README.md`. No open issues or pull requests were present before this run.
+Started from `main` after PR #51. Before changes, inspected the recursive repository tree, source/test inventory, recent commits, open issues, open pull requests, `AGENTS.md`, this file, `README.md`, and all architecture/integration/deployment/security/policy/acceptance documents under `docs/` plus `deploy/README.md`. The repository tree remains architecture-first with shared core services, HTTP, MCP, SDK, lifecycle, fake/production providers, SQLite persistence, and a large regression suite. No open issues or pull requests were present before this run.
 
-The audit confirmed the next practical hardening target: the in-memory persistence adapter should not expose mutable caller-owned audit objects, because a caller mutation after insertion could rewrite the local audit mirror without going through the store boundary. This would diverge from the SQLite adapter's copy-on-write behavior and weaken audit immutability assumptions.
+The audit confirmed the next correctness phase: make stale-write risks concrete and reviewable before adding conditional/CAS methods. The highest-risk areas remain heartbeat/report-status, instruction acknowledgement, provider-call reservation, expiry/deferral, active-call progress, and ambiguous recovery.
 
 ## Changes made this run
 
-Merged PR #51, `Prevent in-memory audit event aliasing`, as `3424a058bebc846278438d5ddd8dae78e0610696`.
+Added `docs/STALE_WRITE_TEST_MATRIX.md`.
 
-Changes:
+The document turns the freshness contract into an explicit implementation/test matrix covering:
 
-- `InMemoryAuditEventMap.set` now structured-clones the incoming `AuditEvent` before assigning canonical sequence and storing it.
-- The caller's provisional `sequence` is no longer mutated by insertion.
-- Mutating the original object after insertion no longer changes the stored audit event.
-- Added regression coverage proving sequence preservation, object isolation, and stored-value stability.
+- heartbeat/status writes;
+- instruction acknowledgement;
+- escalation/provider-call reservation;
+- deferral/expiry races;
+- active-call poll/webhook races;
+- ambiguous recovery and duplicate-call prevention.
 
-This is a small persistence-boundary hardening change. It does not change the authoritative SQLite/shared-store deployment claims.
+It also states the required invariant that stale workers must not overwrite authoritative entities with older whole-object snapshots, and sets the implementation order for conditional store primitives, control-plane routing, independent SQLite tests, in-memory parity, and keeping provider I/O outside persistence transactions.
+
+This is a planning/contract artifact intentionally scoped to the current single-process SQLite topology; it does not claim shared-store or live CALL-E readiness.
 
 ## Verification performed
 
-PR #51 was merged after GitHub accepted the change. The branch did not expose workflow runs through the connector before merge, so no new CI run id was available in this automation context. The repository's last authoritative runtime baseline remains:
-
-- CI run `34582157458` — success on Node `24.20.0`, typecheck/build/full test suite, `212/212` tests passed.
-- Container run `34582157502` — success.
-- Compose run `34582157515` — success through scoped credentials, deployed stdio MCP, restart recovery for decisions/callbacks, exactly-once steering, persistence restart, and safe-checkpoint consumption.
-
-The new test is deterministic and included in the repository test suite; a fresh post-merge CI run should be treated as the authoritative verification once surfaced by GitHub Actions.
+- GitHub repository tree fetched recursively and confirmed complete/non-truncated.
+- `AGENTS.md`, `progress.md`, `README.md`, and all architecture/integration/deployment/security/policy/acceptance documents were read before the change.
+- Recent commits were inspected through PR #51 and its progress handoff.
+- No open issues or pull requests were present before the change.
+- The new artifact is documentation-only; no runtime files or tests were changed in this run.
+- Existing authoritative runtime baseline remains: CI run `34582157458` passed on Node `24.20.0` with `212/212` tests, container verification succeeded, and Compose fake-provider/MCP/restart acceptance succeeded.
 
 No live CALL-E phone call was attempted or claimed.
 
 ## Architecture decisions made this run
 
-1. Audit events are a persistence boundary, not shared mutable application objects.
-2. In-memory and SQLite adapters should both isolate caller-owned payloads before storage.
-3. Canonical audit sequence assignment remains store-owned and rollback-safe.
-4. Existing atomic claim contracts remain authoritative and unaffected.
-5. The documented single-instance SQLite topology remains the supported deployment until a shared transactional store and shared rate limiter satisfy the full contract.
+1. Stale-write risks should be tracked as explicit contract/test rows before implementation changes.
+2. Conditional/CAS primitives must be added in priority order, starting with heartbeat/report-status and exact instruction acknowledgement.
+3. Provider I/O remains outside persistence transactions.
+4. Independent SQLite-worker regressions are required before any future shared-store readiness claim.
+5. In-memory and SQLite adapters must preserve the same freshness semantics.
+6. The supported deployment remains one Node process with one SQLite volume until a shared transactional store and shared rate limiter satisfy the full contract.
 
 ## CALL-E integration status
 
@@ -57,11 +61,10 @@ A genuine Claude Code host acceptance still requires a real Claude Code environm
 
 ## Highest-value next actions
 
-1. Turn the highest-risk stale entity transitions into explicit conditional/CAS store primitives, starting with exact instruction acknowledgement and heartbeat/report-status.
-2. Add independent-worker race tests proving stale losers cannot revert newer state and converge to the durable winner.
+1. Add explicit conditional store primitives for run status/heartbeat and exact instruction acknowledgement.
+2. Route control-plane mutations through those primitives and add independent-worker race tests.
 3. Audit escalation reservation/deferral/expiry, active-call progress, and ambiguous recovery for stale whole-entity writes.
 4. Continue runtime string configuration and HTTP semantic-boundary hardening.
-5. Add fresh CI/container/Compose verification for PR #51 when workflow results are available.
-6. Preserve the fake-provider acceptance path while keeping UI work secondary.
-7. Run the documented acceptance in a genuine Claude Code host when available.
-8. Perform one tightly bounded live CALL-E acceptance only after user-controlled prerequisites are available.
+5. Preserve the fake-provider acceptance path while keeping UI work secondary.
+6. Run the documented acceptance in a genuine Claude Code host when available.
+7. Perform one tightly bounded live CALL-E acceptance only after user-controlled prerequisites are available.
