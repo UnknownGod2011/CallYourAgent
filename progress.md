@@ -6,27 +6,30 @@ CallYourAgent is a durable Node 24 TypeScript control plane for asynchronous two
 
 ## Exact repo state inspected this run
 
-Started from `main` at commit `6e4f13855e5def51c2c943feaed27a3b02b23cad`. Before changes, inspected the full repository tree and current source/test inventory, recent commits, open issues/PRs, `AGENTS.md`, this file, `README.md`, and every architecture/integration/deployment/security/policy/acceptance document under `docs/` plus `deploy/README.md`. No open issue or pull request required a different priority. The audit confirmed that `ControlPlaneStore.updateRunIfCurrent(...)` is implemented and covered by focused store regressions, while `ControlPlane.heartbeat(...)` still performs a direct run replacement.
+Started from `main` at commit `24115888e4137ae5547825e0dca96326f8119506`. Before changes, inspected the full repository tree and current source/test inventory, recent commits, open issues/PRs, `AGENTS.md`, this file, `README.md`, and every architecture/integration/deployment/security/policy/acceptance document under `docs/` plus `deploy/README.md`. No open issue or pull request required a different priority. The audit confirmed that `ControlPlaneStore.updateRunIfCurrent(...)` is implemented and covered by focused store regressions, while `ControlPlane.heartbeat(...)` still performs a direct run replacement.
 
 ## Changes made this run
 
-Added `docs/HEARTBEAT_CAS_ACCEPTANCE.md` as the executable acceptance target for the next runtime change. It defines the required public behavior for routing `ControlPlane.heartbeat(...)` through the store CAS primitive, including stale-writer rejection, preservation of newer paused/terminal state and unrelated fields, audit suppression for rejected writes, snapshot isolation, rollback safety, and convergence across independent SQLite connections. It also records the minimum regression cases and preserves the safe-checkpoint/no-mid-generation-interruption boundary.
+Added `src/heartbeat-mutation.ts` with `buildHeartbeatCandidate(...)`, a small immutable helper that constructs a heartbeat candidate from an authoritative running snapshot, preserves lifecycle status and unrelated fields, updates only heartbeat payload plus `updatedAt`, and rejects paused/terminal runs. Added `tests/heartbeat-mutation.test.ts` covering source immutability, lifecycle preservation, and rejection of non-running runs.
+
+This is an intentionally narrow supporting increment. The helper is not yet wired into `ControlPlane.heartbeat(...)`; the persistence CAS boundary remains authoritative and the large control-plane integration is still pending.
 
 ## Verification performed
 
 - Full repository tree and all architecture/integration docs inspected before the change.
 - Recent commits and open issues/PRs inspected; no relevant open issue or PR.
-- Added `docs/HEARTBEAT_CAS_ACCEPTANCE.md` in commit `60fb598969e7b28409a028e7721e3df36e7c8f11`.
-- No local runtime is available in the connector, so no fresh test/typecheck/build result is claimed for this documentation increment.
+- Added `src/heartbeat-mutation.ts` in commit `df4612ece98ddd2c75cf80d53dff1b864347f5f3`.
+- Added `tests/heartbeat-mutation.test.ts` in commit `54d517cadf028c82f4da5fb73402c3224630d4ec`.
+- The connector does not expose a local clone/runtime, so fresh test/typecheck/build execution was not available during this run and is not claimed.
 - Previous authoritative baseline remains: CI passed on Node `24.20.0` with `212/212` tests, container verification succeeded, and the full Compose fake-provider/MCP/restart acceptance succeeded.
 
 No live CALL-E phone call was attempted or claimed.
 
 ## Architecture decisions made this run
 
-1. Keep the public heartbeat CAS target explicit before touching the large control-plane source file.
-2. Treat the existing store primitive as the only freshness authority; do not reimplement compare-and-set in the domain layer.
-3. Require audit publication to follow the winning mutation only; stale losers must be silent.
+1. Keep heartbeat candidate construction pure and immutable so it can be reused when the control-plane CAS integration lands.
+2. Preserve lifecycle status and unrelated run fields in the candidate helper; freshness and commit authority remain inside `ControlPlaneStore.updateRunIfCurrent(...)`.
+3. Reject non-running heartbeat attempts before any candidate is produced.
 4. Preserve branch-scoped blocking and safe-checkpoint instruction semantics unchanged.
 
 ## CALL-E integration status
@@ -43,8 +46,8 @@ A genuine Claude Code host acceptance still requires a real Claude Code environm
 
 ## Highest-value next actions
 
-1. Wire `ControlPlane.heartbeat` through `updateRunIfCurrent` and return the authoritative winner on stale races.
-2. Extend `tests/heartbeat-contract.test.ts` with stale-writer, audit-suppression, and newer-terminal-state cases once the integration lands.
+1. Wire `ControlPlane.heartbeat` through `updateRunIfCurrent` and use `buildHeartbeatCandidate(...)` so stale writers return the authoritative winner.
+2. Extend heartbeat integration coverage with stale-writer rejection, audit suppression, newer-terminal-state preservation, and rollback cases.
 3. Add an exact instruction acknowledgement conditional primitive and route safe-checkpoint consumption through it.
 4. Audit escalation reservation/deferral/expiry, active-call progress, and ambiguous recovery for stale whole-entity writes.
 5. Continue runtime string configuration and HTTP semantic-boundary hardening.
