@@ -6,35 +6,37 @@ CallYourAgent is a durable Node 24 TypeScript control plane for asynchronous two
 
 ## Exact repo state inspected this run
 
-Started from `main` after the previous conditional-run-mutation handoff. Before changes, inspected the full repository tree and `src/`/`tests/` inventory, recent commits, open issues/PRs, `AGENTS.md`, this file, `README.md`, and the architecture/integration/deployment/security/policy/acceptance documents under `docs/` plus `deploy/README.md`. No open issue or pull request required a different priority. The audit confirmed that `ControlPlaneStore.updateRunIfCurrent(...)` is implemented by both store adapters while `ControlPlane.heartbeat(...)` still writes directly to `store.runs`.
+Started from `main` after the conditional-run-mutation test handoff. Before changes, inspected the full repository tree and `src/`/`tests/` inventory, recent commits, open issues/PRs, `AGENTS.md`, this file, `README.md`, and all architecture/integration/deployment/security/policy/acceptance documents under `docs/` plus `deploy/README.md`. No open issue or pull request required a different priority. The audit confirmed that `ControlPlaneStore.updateRunIfCurrent(...)` is implemented by both store adapters, the focused store regressions exist in `tests/run-mutation-contract.test.ts`, and `ControlPlane.heartbeat(...)` still performs a direct run replacement rather than using the conditional primitive.
 
 ## Changes made this run
 
-Added `tests/run-mutation-contract.test.ts` with focused regressions for the existing store-level compare-and-set primitive:
+Added `docs/HEARTBEAT_CONCURRENCY.md` to make the next runtime increment explicit:
 
-- first matching `updatedAt` applies the new run snapshot;
-- a stale writer is rejected and receives the authoritative durable winner;
-- rollback restores the prior run state;
-- SQLite preserves the committed winner across close/reopen.
+- heartbeat updates must use authoritative `updatedAt` compare-and-set;
+- only the successful CAS writer may append `run_status_reported`;
+- stale losers must return the durable winner and preserve unrelated fields;
+- terminal/paused state must not be reverted by stale heartbeats;
+- rollback must restore both run state and audit allocation;
+- independent SQLite connections must converge on one winner.
 
-This is intentionally a store-contract increment. `ControlPlane.heartbeat(...)` remains unwired to the primitive and is still the highest-value runtime follow-up.
+This keeps the implementation target precise while avoiding an unsafe speculative rewrite of the large control-plane source file in the connector environment.
 
 ## Verification performed
 
 - Full repository tree and architecture/integration docs inspected before the change.
-- Recent commits and open issues/PRs inspected; none were relevant.
-- Added test commit: `54e54240edf2f8d47ad03663c027729cf7614e98`.
-- No local runtime is available in the connector, so no fresh test/typecheck/build result is claimed for this commit. GitHub Actions validation should run from `main` after the handoff update.
+- Recent commits and open issues/PRs inspected; no open issue or PR was relevant.
+- Documentation commit: `51835c27317a83a887597f53d2812e9bc0b96af8`.
+- No local runtime is available in the connector, so no fresh test/typecheck/build result is claimed for this documentation-only change.
 - Previous authoritative baseline remains: CI passed on Node `24.20.0` with `212/212` tests, container verification succeeded, and the full Compose fake-provider/MCP/restart acceptance succeeded.
 
 No live CALL-E phone call was attempted or claimed.
 
 ## Architecture decisions made this run
 
-1. Conditional run mutation is tested independently of the control-plane orchestration so future callers can reuse one freshness-safe primitive.
-2. Stale writers must converge on the authoritative run and must not publish their stale snapshot.
-3. Store rollback must include conditional run updates.
-4. SQLite remains a single-instance deployment; these tests define invariants for future shared stores rather than claiming horizontal scale.
+1. Heartbeat freshness is an explicit domain invariant and must be enforced at the persistence boundary.
+2. A stale heartbeat must converge to the authoritative durable run rather than publish a local snapshot.
+3. Audit history must describe only committed authoritative state transitions.
+4. The current SQLite deployment remains single-instance; independent-connection tests define the contract for future shared stores.
 5. Existing branch-scoped blocking and safe-checkpoint instruction semantics remain unchanged.
 
 ## CALL-E integration status
