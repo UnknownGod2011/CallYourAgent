@@ -466,7 +466,7 @@ export class ControlPlane {
       if (authoritativeCurrent.status === "completed" || authoritativeCurrent.status === "failed") {
         return authoritativeCurrent;
       }
-      throw new Error(`Terminal outcome claim exists without committed terminal state for call attempt ${current.id}`);
+      return this.convergeTerminalEntityState(authoritativeCurrent, claimResult.winner);
     }
 
     const finished = this.finishAttempt(authoritativeCurrent, outcome.status);
@@ -495,6 +495,39 @@ export class ControlPlane {
       for (const text of outcome.instructions ?? []) this.enqueueInstruction(authoritativeCurrent.correlationId, text, "callback", authoritativeCurrent.id);
     }
     return finished;
+  }
+
+  private convergeTerminalEntityState(attempt: CallAttempt, winner: CallTerminalOutcomeClaim): CallAttempt {
+    if (attempt.purpose === "owner_decision") {
+      const escalation = this.requireEscalation(attempt.correlationId);
+      if (winner.status === "completed") {
+        const decisionId = this.store.decisionByEscalationId.get(escalation.id);
+        const decision = decisionId ? this.store.decisions.get(decisionId) : undefined;
+        if (!decisionId || !decision) {
+          throw new Error(`Completed terminal claim has no durable owner decision for escalation ${escalation.id}`);
+        }
+        if (escalation.status !== "resolved" || escalation.decisionId !== decisionId) {
+          this.store.escalations.set(escalation.id, {
+            ...escalation,
+            status: "resolved",
+            decisionId,
+            updatedAt: this.isoNow(),
+          });
+        }
+      } else if (escalation.status !== "failed") {
+        this.store.escalations.set(escalation.id, {
+          ...escalation,
+          status: "failed",
+          updatedAt: this.isoNow(),
+        });
+      }
+    } else if (winner.status === "completed" && !this.store.callbackInstructionSetClaims.has(attempt.id)) {
+      throw new Error(`Completed callback terminal claim has no durable instruction-set claim for call attempt ${attempt.id}`);
+    }
+
+    const converged: CallAttempt = { ...attempt, status: winner.status, updatedAt: this.isoNow() };
+    this.store.callAttempts.set(converged.id, converged);
+    return converged;
   }
 
   private auditTerminalConflictOnce(
