@@ -14,7 +14,7 @@ type JsonEntity = AgentRegistration | AgentRun | Escalation | OwnerDecision | Ow
 
 class SqliteBackedMap<T extends JsonEntity> extends Map<string, T> {
   constructor(
-    private readonly db: DatabaseSync,
+    protected readonly db: DatabaseSync,
     private readonly table: string,
   ) {
     super();
@@ -43,6 +43,26 @@ class SqliteBackedMap<T extends JsonEntity> extends Map<string, T> {
     super.clear();
     const rows = this.db.prepare(`SELECT key, data FROM ${this.table}`).all() as Array<{ key: string; data: string }>;
     for (const row of rows) super.set(row.key, JSON.parse(row.data) as T);
+  }
+}
+
+class SqliteAuditEventMap extends SqliteBackedMap<AuditEvent> {
+  override set(key: string, value: AuditEvent): this {
+    const existing = this.get(key);
+    if (existing) {
+      value.sequence = existing.sequence;
+      return super.set(key, value);
+    }
+
+    const row = this.db.prepare(`
+      UPDATE audit_sequence
+      SET next_sequence = next_sequence + 1
+      WHERE key = 1
+      RETURNING next_sequence - 1 AS sequence
+    `).get() as { sequence: number } | undefined;
+    if (!row) throw new Error("Failed to allocate audit event sequence");
+    value.sequence = Number(row.sequence);
+    return super.set(key, value);
   }
 }
 
@@ -84,7 +104,7 @@ export class SqliteControlPlaneStore implements ControlPlaneStore {
   readonly decisions: SqliteBackedMap<OwnerDecision>;
   readonly instructions: SqliteBackedMap<OwnerInstruction>;
   readonly callAttempts: SqliteBackedMap<CallAttempt>;
-  readonly auditEvents: SqliteBackedMap<AuditEvent>;
+  readonly auditEvents: SqliteAuditEventMap;
   readonly escalationByIdempotencyKey: SqliteBackedMap<string>;
   readonly callbackByIdempotencyKey: SqliteBackedMap<string>;
   readonly decisionByEscalationId: SqliteBackedMap<string>;
@@ -104,7 +124,7 @@ export class SqliteControlPlaneStore implements ControlPlaneStore {
     this.decisions = new SqliteBackedMap(db, "decisions");
     this.instructions = new SqliteBackedMap(db, "instructions");
     this.callAttempts = new SqliteBackedMap(db, "call_attempts");
-    this.auditEvents = new SqliteBackedMap(db, "audit_events");
+    this.auditEvents = new SqliteAuditEventMap(db, "audit_events");
     this.escalationByIdempotencyKey = new SqliteBackedMap(db, "escalation_idempotency");
     this.callbackByIdempotencyKey = new SqliteBackedMap(db, "callback_idempotency");
     this.decisionByEscalationId = new SqliteBackedMap(db, "decision_by_escalation");
@@ -222,6 +242,18 @@ export class SqliteControlPlaneStore implements ControlPlaneStore {
       CREATE TABLE IF NOT EXISTS instructions (key TEXT PRIMARY KEY, data TEXT NOT NULL);
       CREATE TABLE IF NOT EXISTS call_attempts (key TEXT PRIMARY KEY, data TEXT NOT NULL);
       CREATE TABLE IF NOT EXISTS audit_events (key TEXT PRIMARY KEY, data TEXT NOT NULL);
+      CREATE TABLE IF NOT EXISTS audit_sequence (
+        key INTEGER PRIMARY KEY CHECK (key = 1),
+        next_sequence INTEGER NOT NULL CHECK (next_sequence >= 1)
+      );
+      INSERT OR IGNORE INTO audit_sequence (key, next_sequence)
+        SELECT 1, COALESCE(MAX(CAST(json_extract(data, '$.sequence') AS INTEGER)), 0) + 1 FROM audit_events;
+      UPDATE audit_sequence
+        SET next_sequence = MAX(
+          next_sequence,
+          (SELECT COALESCE(MAX(CAST(json_extract(data, '$.sequence') AS INTEGER)), 0) + 1 FROM audit_events)
+        )
+        WHERE key = 1;
       CREATE TABLE IF NOT EXISTS escalation_idempotency (key TEXT PRIMARY KEY, data TEXT NOT NULL);
       CREATE TABLE IF NOT EXISTS callback_idempotency (key TEXT PRIMARY KEY, data TEXT NOT NULL);
       CREATE TABLE IF NOT EXISTS decision_by_escalation (key TEXT PRIMARY KEY, data TEXT NOT NULL);

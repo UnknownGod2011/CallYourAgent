@@ -25,6 +25,12 @@ export interface ControlPlaneStore {
   decisions: Map<string, OwnerDecision>;
   instructions: Map<string, OwnerInstruction>;
   callAttempts: Map<string, CallAttempt>;
+  /**
+   * Append-only audit event map. Store implementations must replace the caller's
+   * provisional sequence with a canonical monotonically increasing sequence when
+   * a new event id is inserted. That allocation must participate in transaction
+   * rollback so independent writers cannot publish duplicate causal positions.
+   */
   auditEvents: Map<string, AuditEvent>;
   escalationByIdempotencyKey: Map<string, string>;
   callbackByIdempotencyKey: Map<string, string>;
@@ -70,6 +76,7 @@ type InMemorySnapshot = {
   instructions: Map<string, OwnerInstruction>;
   callAttempts: Map<string, CallAttempt>;
   auditEvents: Map<string, AuditEvent>;
+  nextAuditSequence: number;
   escalationByIdempotencyKey: Map<string, string>;
   callbackByIdempotencyKey: Map<string, string>;
   decisionByEscalationId: Map<string, string>;
@@ -84,7 +91,19 @@ function cloneMap<T>(source: Map<string, T>): Map<string, T> {
 
 function replaceMap<T>(target: Map<string, T>, source: Map<string, T>): void {
   target.clear();
-  for (const [key, value] of source) target.set(key, value);
+  for (const [key, value] of source) Map.prototype.set.call(target, key, value);
+}
+
+class InMemoryAuditEventMap extends Map<string, AuditEvent> {
+  constructor(private readonly allocateSequence: () => number) {
+    super();
+  }
+
+  override set(key: string, value: AuditEvent): this {
+    const existing = this.get(key);
+    value.sequence = existing?.sequence ?? this.allocateSequence();
+    return super.set(key, value);
+  }
 }
 
 export class InMemoryControlPlaneStore implements ControlPlaneStore {
@@ -94,7 +113,8 @@ export class InMemoryControlPlaneStore implements ControlPlaneStore {
   decisions = new Map<string, OwnerDecision>();
   instructions = new Map<string, OwnerInstruction>();
   callAttempts = new Map<string, CallAttempt>();
-  auditEvents = new Map<string, AuditEvent>();
+  private nextAuditSequence = 1;
+  auditEvents = new InMemoryAuditEventMap(() => this.nextAuditSequence++);
   escalationByIdempotencyKey = new Map<string, string>();
   callbackByIdempotencyKey = new Map<string, string>();
   decisionByEscalationId = new Map<string, string>();
@@ -171,6 +191,7 @@ export class InMemoryControlPlaneStore implements ControlPlaneStore {
       instructions: cloneMap(this.instructions),
       callAttempts: cloneMap(this.callAttempts),
       auditEvents: cloneMap(this.auditEvents),
+      nextAuditSequence: this.nextAuditSequence,
       escalationByIdempotencyKey: cloneMap(this.escalationByIdempotencyKey),
       callbackByIdempotencyKey: cloneMap(this.callbackByIdempotencyKey),
       decisionByEscalationId: cloneMap(this.decisionByEscalationId),
@@ -187,6 +208,7 @@ export class InMemoryControlPlaneStore implements ControlPlaneStore {
     replaceMap(this.decisions, snapshot.decisions);
     replaceMap(this.instructions, snapshot.instructions);
     replaceMap(this.callAttempts, snapshot.callAttempts);
+    this.nextAuditSequence = snapshot.nextAuditSequence;
     replaceMap(this.auditEvents, snapshot.auditEvents);
     replaceMap(this.escalationByIdempotencyKey, snapshot.escalationByIdempotencyKey);
     replaceMap(this.callbackByIdempotencyKey, snapshot.callbackByIdempotencyKey);
