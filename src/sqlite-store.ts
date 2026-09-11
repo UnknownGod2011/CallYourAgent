@@ -8,9 +8,9 @@ import type {
   OwnerDecision,
   OwnerInstruction,
 } from "./domain.js";
-import type { ControlPlaneStore } from "./store.js";
+import type { CallTerminalOutcomeClaim, CallTerminalOutcomeClaimResult, ControlPlaneStore } from "./store.js";
 
-type JsonEntity = AgentRegistration | AgentRun | Escalation | OwnerDecision | OwnerInstruction | CallAttempt | AuditEvent | string;
+type JsonEntity = AgentRegistration | AgentRun | Escalation | OwnerDecision | OwnerInstruction | CallAttempt | AuditEvent | CallTerminalOutcomeClaim | string;
 
 class SqliteBackedMap<T extends JsonEntity> extends Map<string, T> {
   constructor(
@@ -88,6 +88,7 @@ export class SqliteControlPlaneStore implements ControlPlaneStore {
   readonly escalationByIdempotencyKey: SqliteBackedMap<string>;
   readonly callbackByIdempotencyKey: SqliteBackedMap<string>;
   readonly decisionByEscalationId: SqliteBackedMap<string>;
+  readonly terminalOutcomeClaims: SqliteBackedMap<CallTerminalOutcomeClaim>;
   readonly processedWebhookEventIds: SqliteBackedSet;
   readonly callbackInstructionSetClaims: SqliteBackedSet;
 
@@ -107,6 +108,7 @@ export class SqliteControlPlaneStore implements ControlPlaneStore {
     this.escalationByIdempotencyKey = new SqliteBackedMap(db, "escalation_idempotency");
     this.callbackByIdempotencyKey = new SqliteBackedMap(db, "callback_idempotency");
     this.decisionByEscalationId = new SqliteBackedMap(db, "decision_by_escalation");
+    this.terminalOutcomeClaims = new SqliteBackedMap(db, "call_terminal_outcomes");
     this.processedWebhookEventIds = new SqliteBackedSet(db, "webhook_events");
     this.callbackInstructionSetClaims = new SqliteBackedSet(db, "callback_instruction_sets");
     this.reloaders = [
@@ -120,6 +122,7 @@ export class SqliteControlPlaneStore implements ControlPlaneStore {
       this.escalationByIdempotencyKey,
       this.callbackByIdempotencyKey,
       this.decisionByEscalationId,
+      this.terminalOutcomeClaims,
       this.processedWebhookEventIds,
       this.callbackInstructionSetClaims,
     ];
@@ -159,6 +162,17 @@ export class SqliteControlPlaneStore implements ControlPlaneStore {
 
   bindDecisionToEscalation(escalationId: string, decisionId: string): string {
     return this.bindUniqueMapValue(this.decisionByEscalationId, "decision_by_escalation", escalationId, decisionId);
+  }
+
+  claimCallTerminalOutcome(callAttemptId: string, claim: CallTerminalOutcomeClaim): CallTerminalOutcomeClaimResult {
+    const result = this.db.prepare("INSERT OR IGNORE INTO call_terminal_outcomes (key, data) VALUES (?, ?)").run(
+      callAttemptId,
+      JSON.stringify(claim),
+    );
+    const row = this.db.prepare("SELECT data FROM call_terminal_outcomes WHERE key = ?").get(callAttemptId) as { data: string } | undefined;
+    if (!row) throw new Error("Failed to claim terminal outcome");
+    this.terminalOutcomeClaims.reload();
+    return { winner: JSON.parse(row.data) as CallTerminalOutcomeClaim, claimed: Number(result.changes) === 1 };
   }
 
   claimCallbackInstructionSet(callAttemptId: string): boolean {
@@ -202,6 +216,7 @@ export class SqliteControlPlaneStore implements ControlPlaneStore {
       CREATE TABLE IF NOT EXISTS escalation_idempotency (key TEXT PRIMARY KEY, data TEXT NOT NULL);
       CREATE TABLE IF NOT EXISTS callback_idempotency (key TEXT PRIMARY KEY, data TEXT NOT NULL);
       CREATE TABLE IF NOT EXISTS decision_by_escalation (key TEXT PRIMARY KEY, data TEXT NOT NULL);
+      CREATE TABLE IF NOT EXISTS call_terminal_outcomes (key TEXT PRIMARY KEY, data TEXT NOT NULL);
       CREATE TABLE IF NOT EXISTS webhook_events (key TEXT PRIMARY KEY);
       CREATE TABLE IF NOT EXISTS callback_instruction_sets (key TEXT PRIMARY KEY);
 
