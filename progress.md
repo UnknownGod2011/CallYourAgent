@@ -6,41 +6,41 @@ CallYourAgent is a durable Node 24 TypeScript control plane for asynchronous two
 
 ## Exact repo state inspected this run
 
-Started from `main` HEAD `14c5086e0964373f42ba5970c10305194bafd226` after PR #49. Before changes, inspected the recursive repository tree, source/test inventory, recent commits, open issues, open pull requests, `AGENTS.md`, this file, `README.md`, and all architecture/integration/deployment/security/policy/acceptance documents under `docs/` plus `deploy/README.md`. No open issues or pull requests were present before this run.
+Started from `main` HEAD `14c5086e0964373f42ba5970c10305194bafd226` after PR #50. Before changes, inspected the recursive repository tree, source/test inventory, recent commits, open issues, open pull requests, `AGENTS.md`, this file, `README.md`, and all architecture/integration/deployment/security/policy/acceptance documents under `docs/` plus `deploy/README.md`. No open issues or pull requests were present before this run.
 
-The audit confirmed the previous handoff's priority: future shared-store adapters need an explicit stale-read/CAS contract beyond terminal-outcome and audit-sequence hardening. The current supported topology remains one Node process with one SQLite volume; no multi-instance readiness is claimed.
+The audit confirmed the next practical hardening target: the in-memory persistence adapter should not expose mutable caller-owned audit objects, because a caller mutation after insertion could rewrite the local audit mirror without going through the store boundary. This would diverge from the SQLite adapter's copy-on-write behavior and weaken audit immutability assumptions.
 
 ## Changes made this run
 
-Merged PR #50, `Document shared-store freshness contract`, as `a1b96e1d6e1f4096e4287bd39b5f7c21bc687933`.
+Merged PR #51, `Prevent in-memory audit event aliasing`, as `3424a058bebc846278438d5ddd8dae78e0610696`.
 
-Added `docs/STORE_FRESHNESS.md`, documenting:
+Changes:
 
-- authoritative re-read or conditional/CAS requirements before whole-entity writes;
-- field-preservation rules for heartbeat, instruction acknowledgement, reservation, expiry, progress, and recovery mutations;
-- reuse of existing first-writer-wins claims for idempotency, terminal outcomes, owner decisions, callback instruction sets, webhook ids, and audit ordering;
-- privacy-safe loser/conflict observability;
-- required two-worker contract tests for future shared stores;
-- rollback requirements for entity fields and claim/sequence side effects.
+- `InMemoryAuditEventMap.set` now structured-clones the incoming `AuditEvent` before assigning canonical sequence and storing it.
+- The caller's provisional `sequence` is no longer mutated by insertion.
+- Mutating the original object after insertion no longer changes the stored audit event.
+- Added regression coverage proving sequence preservation, object isolation, and stored-value stability.
 
-This is an architecture contract, not a claim that SQLite is horizontally scalable.
+This is a small persistence-boundary hardening change. It does not change the authoritative SQLite/shared-store deployment claims.
 
 ## Verification performed
 
-This run's change was documentation-only, so no runtime test suite was changed or required. The prior authoritative runtime baseline remains:
+PR #51 was merged after GitHub accepted the change. The branch did not expose workflow runs through the connector before merge, so no new CI run id was available in this automation context. The repository's last authoritative runtime baseline remains:
 
 - CI run `34582157458` — success on Node `24.20.0`, typecheck/build/full test suite, `212/212` tests passed.
 - Container run `34582157502` — success.
 - Compose run `34582157515` — success through scoped credentials, deployed stdio MCP, restart recovery for decisions/callbacks, exactly-once steering, persistence restart, and safe-checkpoint consumption.
 
+The new test is deterministic and included in the repository test suite; a fresh post-merge CI run should be treated as the authoritative verification once surfaced by GitHub Actions.
+
 No live CALL-E phone call was attempted or claimed.
 
 ## Architecture decisions made this run
 
-1. A future shared store must never overwrite a whole entity from a stale local mirror.
-2. Conditional writes must preserve unrelated fields and converge losers to the durable winner.
-3. Existing atomic claim contracts remain authoritative and must not be bypassed by freshness logic.
-4. Conflicts must remain privacy-safe.
+1. Audit events are a persistence boundary, not shared mutable application objects.
+2. In-memory and SQLite adapters should both isolate caller-owned payloads before storage.
+3. Canonical audit sequence assignment remains store-owned and rollback-safe.
+4. Existing atomic claim contracts remain authoritative and unaffected.
 5. The documented single-instance SQLite topology remains the supported deployment until a shared transactional store and shared rate limiter satisfy the full contract.
 
 ## CALL-E integration status
@@ -61,6 +61,7 @@ A genuine Claude Code host acceptance still requires a real Claude Code environm
 2. Add independent-worker race tests proving stale losers cannot revert newer state and converge to the durable winner.
 3. Audit escalation reservation/deferral/expiry, active-call progress, and ambiguous recovery for stale whole-entity writes.
 4. Continue runtime string configuration and HTTP semantic-boundary hardening.
-5. Preserve the fake-provider acceptance path while keeping UI work secondary.
-6. Run the documented acceptance in a genuine Claude Code host when available.
-7. Perform one tightly bounded live CALL-E acceptance only after user-controlled prerequisites are available.
+5. Add fresh CI/container/Compose verification for PR #51 when workflow results are available.
+6. Preserve the fake-provider acceptance path while keeping UI work secondary.
+7. Run the documented acceptance in a genuine Claude Code host when available.
+8. Perform one tightly bounded live CALL-E acceptance only after user-controlled prerequisites are available.
