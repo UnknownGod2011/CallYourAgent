@@ -31,6 +31,7 @@ export interface CalleCallProviderOptions {
 }
 
 const DEFAULT_REQUEST_TIMEOUT_MS = 15_000;
+const DEFAULT_CALLE_BASE_URL = "https://api.heycall-e.com";
 
 const decisionSchema = {
   type: "object",
@@ -70,7 +71,7 @@ export class CalleCallProvider implements CallProvider {
     if (!Number.isInteger(requestTimeoutMs) || requestTimeoutMs < 1) {
       throw new Error("CALL-E request timeout must be a positive integer");
     }
-    this.baseUrl = (options.baseUrl ?? "https://api.heycall-e.com").replace(/\/$/, "");
+    this.baseUrl = normalizeCalleBaseUrl(options.baseUrl ?? DEFAULT_CALLE_BASE_URL);
     this.fetchImpl = options.fetchImpl ?? fetch;
     this.requestTimeoutMs = requestTimeoutMs;
   }
@@ -161,6 +162,37 @@ export class CalleCallProvider implements CallProvider {
     const observation = await this.observe(providerCallId);
     return isActiveCallObservation(observation) ? null : observation;
   }
+}
+
+export function normalizeCalleBaseUrl(value: string): string {
+  if (value !== value.trim()) {
+    throw new Error("CALL-E base URL must be a valid absolute HTTPS origin");
+  }
+
+  let url: URL;
+  try {
+    url = new URL(value);
+  } catch {
+    throw new Error("CALL-E base URL must be a valid absolute HTTPS origin");
+  }
+
+  if (url.protocol !== "https:") {
+    throw new Error("CALL-E base URL must use https");
+  }
+  if (url.username || url.password) {
+    throw new Error("CALL-E base URL must not contain credentials");
+  }
+  if (url.search) {
+    throw new Error("CALL-E base URL must not contain a query string");
+  }
+  if (url.hash) {
+    throw new Error("CALL-E base URL must not contain a fragment");
+  }
+  if (url.pathname !== "/") {
+    throw new Error("CALL-E base URL must be an origin without a path");
+  }
+
+  return url.origin;
 }
 
 async function parseCall(response: Response): Promise<CalleCallTask> {
