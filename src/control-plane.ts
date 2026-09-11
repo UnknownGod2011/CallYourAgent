@@ -143,20 +143,20 @@ export class ControlPlane {
     }
     this.requireRunningRun(input.runId);
     const escalation = this.store.transaction(() => {
-      const existingId = this.store.escalationByIdempotencyKey.get(input.idempotencyKey);
-      if (existingId) {
-        const existing = this.requireEscalation(existingId);
+      const candidateId = randomUUID();
+      const winnerId = this.store.bindEscalationIdempotencyKey(input.idempotencyKey, candidateId);
+      if (winnerId !== candidateId) {
+        const existing = this.requireEscalation(winnerId);
         assertEscalationReplayMatches(existing, input);
         return existing;
       }
       const now = this.isoNow();
       const created: Escalation = {
-        id: randomUUID(), runId: input.runId, scopeId: input.scopeId, question: input.question,
+        id: candidateId, runId: input.runId, scopeId: input.scopeId, question: input.question,
         context: input.context, blocking: input.blocking, priority: input.priority ?? "normal", status: "pending",
         idempotencyKey: input.idempotencyKey, createdAt: now, updatedAt: now, expiresAt: input.expiresAt,
       };
       this.store.escalations.set(created.id, created);
-      this.store.escalationByIdempotencyKey.set(input.idempotencyKey, created.id);
       this.audit("escalation_created", "agent", "Owner decision requested", { runId: created.runId, escalationId: created.id }, {
         scopeId: created.scopeId, blocking: created.blocking, priority: created.priority, expiresAt: created.expiresAt,
       });
@@ -209,9 +209,10 @@ export class ControlPlane {
       "Capture any new owner instructions as concise action items.",
     ].filter(Boolean).join("\n");
     const attempt = this.store.transaction(() => {
-      const existingId = this.store.callbackByIdempotencyKey.get(input.idempotencyKey);
-      if (existingId) {
-        const existing = this.requireCallAttempt(existingId);
+      const candidateId = randomUUID();
+      const winnerId = this.store.bindCallbackIdempotencyKey(input.idempotencyKey, candidateId);
+      if (winnerId !== candidateId) {
+        const existing = this.requireCallAttempt(winnerId);
         assertCallbackReplayMatches(existing, input);
         return existing;
       }
@@ -222,8 +223,8 @@ export class ControlPlane {
         `callback:${input.idempotencyKey}`,
         { runId: input.runId },
         callbackRequestFingerprint(input),
+        candidateId,
       );
-      this.store.callbackByIdempotencyKey.set(input.idempotencyKey, reserved.id);
       this.audit("owner_callback_requested", "owner", "Owner requested a callback to the running agent", { runId: input.runId, agentId: run.agentId, callAttemptId: reserved.id }, { currentScope: run.currentScope });
       return reserved;
     });
@@ -251,9 +252,8 @@ export class ControlPlane {
     return this.store.transaction(() => {
       const attempt = [...this.store.callAttempts.values()].find((item) => item.providerCallId === input.providerCallId);
       if (!attempt) throw new Error(`Unknown provider call: ${input.providerCallId}`);
-      if (this.store.processedWebhookEventIds.has(input.eventId)) return { duplicate: true, callAttempt: this.requireCallAttempt(attempt.id) };
+      if (!this.store.claimWebhookEventId(input.eventId)) return { duplicate: true, callAttempt: this.requireCallAttempt(attempt.id) };
       const callAttempt = this.applyTerminalOutcome(attempt, input.outcome);
-      this.store.processedWebhookEventIds.add(input.eventId);
       this.audit("provider_webhook_reconciled", "provider", "Provider webhook reconciled", { runId: this.runIdForAttempt(attempt), callAttemptId: attempt.id }, { eventId: input.eventId, providerCallId: input.providerCallId, outcome: input.outcome.status });
       return { duplicate: false, callAttempt };
     });
@@ -458,9 +458,10 @@ export class ControlPlane {
     idempotencyKey: string,
     metadata: Record<string, string>,
     requestFingerprint?: string,
+    attemptId = randomUUID(),
   ): CallAttempt {
     const now = this.isoNow();
-    const attempt: CallAttempt = { id: randomUUID(), purpose, correlationId, provider: this.calls.name, status: "queued", idempotencyKey, requestFingerprint, request: { task, metadata: { ...metadata } }, createdAt: now, updatedAt: now };
+    const attempt: CallAttempt = { id: attemptId, purpose, correlationId, provider: this.calls.name, status: "queued", idempotencyKey, requestFingerprint, request: { task, metadata: { ...metadata } }, createdAt: now, updatedAt: now };
     this.store.callAttempts.set(attempt.id, attempt);
     this.audit("call_attempt_created", "control_plane", "Phone call attempt persisted before provider side effect", { runId: this.runIdForAttempt(attempt), callAttemptId: attempt.id }, { purpose, provider: attempt.provider });
     return attempt;
