@@ -279,27 +279,33 @@ function required(value: string | undefined, name: string): string {
   return value;
 }
 
-function nonNegativeInteger(value: string, name: string): number {
+function canonicalUnsignedInteger(value: string, name: string, expectation: string): number {
+  const invalid = (): never => { throw new Error(`${name} must be ${expectation}`); };
+  if (!/^(0|[1-9][0-9]*)$/.test(value)) invalid();
   const parsed = Number(value);
-  if (!Number.isInteger(parsed) || parsed < 0) throw new Error(`${name} must be a non-negative integer`);
+  if (!Number.isSafeInteger(parsed)) invalid();
   return parsed;
 }
 
+function nonNegativeInteger(value: string, name: string): number {
+  return canonicalUnsignedInteger(value, name, "a non-negative integer");
+}
+
 function positiveInteger(value: string, name: string): number {
-  const parsed = Number(value);
-  if (!Number.isInteger(parsed) || parsed < 1) throw new Error(`${name} must be a positive integer`);
+  const parsed = canonicalUnsignedInteger(value, name, "a positive integer");
+  if (parsed < 1) throw new Error(`${name} must be a positive integer`);
   return parsed;
 }
 
 function tcpPort(value: string, name: string): number {
-  const parsed = Number(value);
-  if (!Number.isInteger(parsed) || parsed < 0 || parsed > 65535) throw new Error(`${name} must be a valid TCP port`);
+  const parsed = canonicalUnsignedInteger(value, name, "a valid TCP port");
+  if (parsed > 65535) throw new Error(`${name} must be a valid TCP port`);
   return parsed;
 }
 
 function hour(value: string, name: string): number {
-  const parsed = Number(value);
-  if (!Number.isInteger(parsed) || parsed < 0 || parsed > 23) throw new Error(`${name} must be an hour from 0 to 23`);
+  const parsed = canonicalUnsignedInteger(value, name, "an hour from 0 to 23");
+  if (parsed > 23) throw new Error(`${name} must be an hour from 0 to 23`);
   return parsed;
 }
 
