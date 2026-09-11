@@ -51,6 +51,18 @@ function verifyAtomicClaimContract(store: ControlPlaneStore): void {
   assert.equal(store.bindDecisionToEscalation("escalation-terminal", "owner-decision-second"), "owner-decision-first");
   assert.equal(store.decisionByEscalationId.get("escalation-terminal"), "owner-decision-first");
 
+  const firstTerminal = { status: "completed" as const, fingerprint: "fingerprint-completed" };
+  const conflictingTerminal = { status: "failed" as const, fingerprint: "fingerprint-failed" };
+  assert.deepEqual(store.claimCallTerminalOutcome("call-terminal", firstTerminal), {
+    winner: firstTerminal,
+    claimed: true,
+  });
+  assert.deepEqual(store.claimCallTerminalOutcome("call-terminal", conflictingTerminal), {
+    winner: firstTerminal,
+    claimed: false,
+  });
+  assert.deepEqual(store.terminalOutcomeClaims.get("call-terminal"), firstTerminal);
+
   assert.equal(store.claimCallbackInstructionSet("callback-terminal"), true);
   assert.equal(store.claimCallbackInstructionSet("callback-terminal"), false);
   assert.equal(store.callbackInstructionSetClaims.has("callback-terminal"), true);
@@ -61,6 +73,7 @@ function verifyAtomicClaimContract(store: ControlPlaneStore): void {
   assert.throws(() => store.transaction(() => {
     assert.equal(store.bindCallbackIdempotencyKey("rollback-claim", "callback-rolled-back"), "callback-rolled-back");
     assert.equal(store.bindDecisionToEscalation("rollback-escalation", "decision-rolled-back"), "decision-rolled-back");
+    assert.equal(store.claimCallTerminalOutcome("call-terminal-rolled-back", conflictingTerminal).claimed, true);
     assert.equal(store.claimCallbackInstructionSet("callback-terminal-rolled-back"), true);
     assert.equal(store.claimWebhookEventId("webhook-rolled-back"), true);
     throw new Error("rollback atomic claims");
@@ -68,6 +81,10 @@ function verifyAtomicClaimContract(store: ControlPlaneStore): void {
 
   assert.equal(store.bindCallbackIdempotencyKey("rollback-claim", "callback-after-rollback"), "callback-after-rollback");
   assert.equal(store.bindDecisionToEscalation("rollback-escalation", "decision-after-rollback"), "decision-after-rollback");
+  assert.deepEqual(store.claimCallTerminalOutcome("call-terminal-rolled-back", firstTerminal), {
+    winner: firstTerminal,
+    claimed: true,
+  });
   assert.equal(store.claimCallbackInstructionSet("callback-terminal-rolled-back"), true);
   assert.equal(store.claimWebhookEventId("webhook-rolled-back"), true);
 }
@@ -104,10 +121,18 @@ test("SQLite store matches the transaction rollback and atomic-claim contracts a
       assert.equal(reopened.escalationByIdempotencyKey.get("decision-claim"), "escalation-first");
       assert.equal(reopened.callbackByIdempotencyKey.get("callback-claim"), "callback-first");
       assert.equal(reopened.decisionByEscalationId.get("escalation-terminal"), "owner-decision-first");
+      assert.deepEqual(reopened.terminalOutcomeClaims.get("call-terminal"), {
+        status: "completed",
+        fingerprint: "fingerprint-completed",
+      });
       assert.equal(reopened.callbackInstructionSetClaims.has("callback-terminal"), true);
       assert.equal(reopened.processedWebhookEventIds.has("webhook-claim"), true);
       assert.equal(reopened.callbackByIdempotencyKey.get("rollback-claim"), "callback-after-rollback");
       assert.equal(reopened.decisionByEscalationId.get("rollback-escalation"), "decision-after-rollback");
+      assert.deepEqual(reopened.terminalOutcomeClaims.get("call-terminal-rolled-back"), {
+        status: "completed",
+        fingerprint: "fingerprint-completed",
+      });
       assert.equal(reopened.callbackInstructionSetClaims.has("callback-terminal-rolled-back"), true);
       assert.equal(reopened.processedWebhookEventIds.has("webhook-rolled-back"), true);
     } finally {
@@ -135,6 +160,20 @@ test("SQLite atomic claims return the committed winner across independent store 
     assert.equal(first.bindDecisionToEscalation("shared-escalation", "decision-a"), "decision-a");
     assert.equal(second.bindDecisionToEscalation("shared-escalation", "decision-b"), "decision-a");
     assert.equal(second.decisionByEscalationId.get("shared-escalation"), "decision-a");
+
+    const terminalWinner = { status: "completed" as const, fingerprint: "shared-completed" };
+    assert.deepEqual(first.claimCallTerminalOutcome("shared-call-terminal", terminalWinner), {
+      winner: terminalWinner,
+      claimed: true,
+    });
+    assert.deepEqual(second.claimCallTerminalOutcome("shared-call-terminal", {
+      status: "failed",
+      fingerprint: "shared-failed",
+    }), {
+      winner: terminalWinner,
+      claimed: false,
+    });
+    assert.deepEqual(second.terminalOutcomeClaims.get("shared-call-terminal"), terminalWinner);
 
     assert.equal(first.claimCallbackInstructionSet("shared-callback-terminal"), true);
     assert.equal(second.claimCallbackInstructionSet("shared-callback-terminal"), false);
