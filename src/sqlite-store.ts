@@ -143,10 +143,33 @@ export class SqliteControlPlaneStore implements ControlPlaneStore {
     }
   }
 
+  bindEscalationIdempotencyKey(key: string, escalationId: string): string {
+    return this.bindUniqueMapValue(this.escalationByIdempotencyKey, "escalation_idempotency", key, escalationId);
+  }
+
+  bindCallbackIdempotencyKey(key: string, callAttemptId: string): string {
+    return this.bindUniqueMapValue(this.callbackByIdempotencyKey, "callback_idempotency", key, callAttemptId);
+  }
+
+  claimWebhookEventId(eventId: string): boolean {
+    const result = this.db.prepare("INSERT OR IGNORE INTO webhook_events (key) VALUES (?)").run(eventId);
+    this.processedWebhookEventIds.reload();
+    return Number(result.changes) === 1;
+  }
+
   close(): void {
     if (this.closed) return;
     this.db.close();
     this.closed = true;
+  }
+
+  private bindUniqueMapValue(map: SqliteBackedMap<string>, table: string, key: string, value: string): string {
+    this.db.prepare(`INSERT OR IGNORE INTO ${table} (key, data) VALUES (?, ?)`).run(key, JSON.stringify(value));
+    const row = this.db.prepare(`SELECT data FROM ${table} WHERE key = ?`).get(key) as { data: string } | undefined;
+    if (!row) throw new Error(`Failed to bind unique key in ${table}`);
+    const winner = JSON.parse(row.data) as string;
+    map.reload();
+    return winner;
   }
 
   private migrate(): void {
