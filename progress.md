@@ -6,34 +6,28 @@ CallYourAgent is a durable Node 24 TypeScript control plane for asynchronous two
 
 ## Exact repo state inspected this run
 
-Started from `main` at commit `8c9f32863a4d4e051f793726f2f72d6092bf7dd3`. Before changes, inspected the full repository tree and current source/test inventory, recent commits, open issues/PRs, `AGENTS.md`, this file, `README.md`, and every architecture/integration/deployment/security/policy/acceptance document under `docs/` plus `deploy/README.md`. No open issue or pull request required a different priority. The audit confirmed that `ControlPlaneStore.updateRunIfCurrent(...)` is implemented and covered by focused store regressions, while `ControlPlane.heartbeat(...)` still performs a direct run replacement.
+Started from `main` at commit `6e4f13855e5def51c2c943feaed27a3b02b23cad`. Before changes, inspected the full repository tree and current source/test inventory, recent commits, open issues/PRs, `AGENTS.md`, this file, `README.md`, and every architecture/integration/deployment/security/policy/acceptance document under `docs/` plus `deploy/README.md`. No open issue or pull request required a different priority. The audit confirmed that `ControlPlaneStore.updateRunIfCurrent(...)` is implemented and covered by focused store regressions, while `ControlPlane.heartbeat(...)` still performs a direct run replacement.
 
 ## Changes made this run
 
-Added `tests/heartbeat-contract.test.ts` with a focused domain regression for the existing heartbeat contract:
-
-- progress updates preserve the run id, running status, start time, and current scope;
-- summary updates advance `updatedAt`;
-- exactly one `run_status_reported` audit event is emitted with the expected privacy-safe details.
-
-This is an executable baseline for the next CAS integration increment; it intentionally does not claim stale-writer protection yet because `ControlPlane.heartbeat(...)` is still direct-write based.
+Added `docs/HEARTBEAT_CAS_ACCEPTANCE.md` as the executable acceptance target for the next runtime change. It defines the required public behavior for routing `ControlPlane.heartbeat(...)` through the store CAS primitive, including stale-writer rejection, preservation of newer paused/terminal state and unrelated fields, audit suppression for rejected writes, snapshot isolation, rollback safety, and convergence across independent SQLite connections. It also records the minimum regression cases and preserves the safe-checkpoint/no-mid-generation-interruption boundary.
 
 ## Verification performed
 
 - Full repository tree and all architecture/integration docs inspected before the change.
 - Recent commits and open issues/PRs inspected; no relevant open issue or PR.
-- Added heartbeat contract regression committed as `b2a3e447c75acc82a63026cfaf0fe89242595652`.
-- No local runtime is available in the connector, so no fresh test/typecheck/build result is claimed for this increment.
+- Added `docs/HEARTBEAT_CAS_ACCEPTANCE.md` in commit `60fb598969e7b28409a028e7721e3df36e7c8f11`.
+- No local runtime is available in the connector, so no fresh test/typecheck/build result is claimed for this documentation increment.
 - Previous authoritative baseline remains: CI passed on Node `24.20.0` with `212/212` tests, container verification succeeded, and the full Compose fake-provider/MCP/restart acceptance succeeded.
 
 No live CALL-E phone call was attempted or claimed.
 
 ## Architecture decisions made this run
 
-1. Keep the heartbeat regression focused on successful domain behavior before introducing stale-writer race assertions.
-2. Preserve the existing audit contract while the future CAS wiring is added in a separate coherent change.
-3. Continue treating `updateRunIfCurrent(...)` as the single store-level freshness primitive for future heartbeat integration.
-4. Existing branch-scoped blocking and safe-checkpoint instruction semantics remain unchanged.
+1. Keep the public heartbeat CAS target explicit before touching the large control-plane source file.
+2. Treat the existing store primitive as the only freshness authority; do not reimplement compare-and-set in the domain layer.
+3. Require audit publication to follow the winning mutation only; stale losers must be silent.
+4. Preserve branch-scoped blocking and safe-checkpoint instruction semantics unchanged.
 
 ## CALL-E integration status
 
