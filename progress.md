@@ -6,40 +6,44 @@ CallYourAgent is a durable Node 24 TypeScript control plane for asynchronous two
 
 ## Exact repo state inspected this run
 
-Started from `main` after the PR #51 handoff and the stale-write matrix documentation. Before changes, inspected the recursive repository tree, current source inventory, recent commits, open issues, open pull requests, `AGENTS.md`, this file, `README.md`, and the architecture/integration/deployment/security/policy/acceptance documents under `docs/` plus `deploy/README.md`. No open issues or pull requests were present before this run.
+Started from `main` after the previous conditional-run-mutation handoff. Before changes, inspected the repository root and `src/` inventory, recent commits, all available PR history, open issue/PR state, `AGENTS.md`, this file, `README.md`, and the architecture/integration/deployment/security/policy/acceptance documentation under `docs/` plus the deployment README. The recent PR history showed the prior shared-store work through PR #51; no newer open issue or pull request was available to drive a different requirement.
 
-The audit confirmed that the next correctness phase is shared-store freshness: explicit conditional/CAS behavior for stale-read mutations, starting with run status/heartbeat and exact instruction acknowledgement, followed by escalation/call reservation and active-call recovery paths.
+The audit confirmed that `ControlPlaneStore.updateRunIfCurrent(...)` exists and is implemented in the in-memory and SQLite adapters, but `ControlPlane.heartbeat(...)` still writes the run map directly. The next runtime increment remains to route heartbeat through the conditional primitive and add the race regressions described by the freshness documents.
 
 ## Changes made this run
 
-Added a conditional run mutation contract to the persistence boundary:
+Added `docs/RUN_MUTATION_CONTRACT.md`.
 
-- `ControlPlaneStore.updateRunIfCurrent(runId, expectedUpdatedAt, next)` now expresses first-writer-wins semantics for run mutations.
-- The in-memory adapter implements rollback-safe compare-and-set behavior and returns the authoritative winner when a stale writer loses.
-- The SQLite adapter reloads the authoritative run mirror inside the existing `BEGIN IMMEDIATE` transaction before applying the compare-and-set, preventing a stale independent connection from overwriting newer status/heartbeat state.
+The document makes the run heartbeat/status contract executable in prose before runtime wiring:
 
-The control-plane heartbeat call has not yet been switched to this new primitive in this handoff because the connector rejected the attempted full-file update after the source file changed during the run. The store contract and both adapters are committed and remain additive; the highest-value follow-up is to route `ControlPlane.heartbeat` through the primitive and add stale-writer race regressions before widening the pattern to instruction acknowledgement.
+- compare `updatedAt` against the authoritative row inside the store write boundary;
+- return the durable winner on stale rejection;
+- preserve unrelated fields and never replace a run from a stale snapshot;
+- roll back both run and audit-sequence side effects on failure;
+- suppress misleading progress audit events from stale losers;
+- define the independent-worker, rollback, and close/reopen regressions required for in-memory, SQLite, and future shared-store adapters.
+
+This is intentionally an additive documentation increment. Runtime behavior was not changed in this run because the connector does not provide a safe partial-edit path for the large `src/control-plane.ts` file and the local clone/runtime path is unavailable.
 
 ## Verification performed
 
-- GitHub repository metadata and recursive tree were inspected.
-- `AGENTS.md`, `progress.md`, `README.md`, and all architecture/integration/deployment/security/policy/acceptance documents were read before the change.
-- Recent commits and open issues/PRs were inspected; no open issues or PRs were present.
-- Store contract change committed as `bf283143c486ea18d3ebf67c4363099d975a8679`.
-- SQLite adapter implementation committed as `19a5cd02328b8e3299b5eccd434e744f073352da`.
-- Runtime test/typecheck/build execution was not available from the connector after these commits; do not interpret this handoff as fresh green CI.
-- Previous authoritative baseline remains: CI run `34582157458` passed on Node `24.20.0` with `212/212` tests, container verification succeeded, and the full Compose fake-provider/MCP/restart acceptance succeeded.
+- Repository root/tree inventory inspected through the GitHub connector.
+- `AGENTS.md`, `progress.md`, `README.md`, architecture/integration/deployment/security/policy/acceptance docs, and deployment README inspected before the change.
+- Recent commits and PR history inspected; no relevant open issue or PR was present.
+- Documentation commit created on `main`: `e4c5745b7f838422b223917b0cacee1e88d42cc0`.
+- No runtime code changed; no fresh CI/typecheck/build/test result is claimed for this documentation-only commit.
+- Previous authoritative baseline remains: CI `34582157458` passed on Node `24.20.0` with `212/212` tests, container verification succeeded, and the full Compose fake-provider/MCP/restart acceptance succeeded.
 
 No live CALL-E phone call was attempted or claimed.
 
 ## Architecture decisions made this run
 
-1. Run heartbeat/status writes need an explicit conditional mutation primitive instead of open-ended whole-object map replacement.
-2. The authoritative row must be re-read inside the persistence transaction before applying a stale-sensitive update.
-3. Losing writers should receive the durable winner so callers converge without guessing.
-4. The primitive is additive until the control-plane heartbeat path and race tests are wired; no shared-store capability is claimed yet.
-5. Provider I/O remains outside persistence transactions.
-6. The supported deployment remains one Node process with one SQLite volume until the full shared-store contract is satisfied.
+1. Run heartbeat/status mutation semantics are now documented as a first-class store contract, not an implicit convention.
+2. A stale heartbeat must lose without overwriting a newer summary, current scope, timestamp, or audit history.
+3. The control plane should return the authoritative run for both applied and stale-rejected writes.
+4. The supported SQLite deployment remains single-instance; the documented contract is preparation for a future shared store, not a horizontal-scale claim.
+5. Provider/network I/O remains outside persistence transactions.
+6. Existing branch-scoped blocking and safe-checkpoint instruction semantics remain unchanged.
 
 ## CALL-E integration status
 
@@ -51,7 +55,7 @@ No live CALL-E phone call was attempted or claimed.
 
 No repository-development blocker prevents further useful work.
 
-A genuine Claude Code host acceptance still requires a real Claude Code environment/CLI. Live CALL-E acceptance still requires a valid authorized credential, owner phone destination, and stable externally reachable HTTPS webhook ingress.
+A genuine Claude Code host acceptance still requires a real Claude Code environment/CLI. Live CALL-E acceptance still requires a valid authorized credential, owner phone destination, and stable externally reachable HTTPS webhook ingress. The automation connector currently lacks a safe partial-update mechanism for the large control-plane source file and does not expose a usable direct clone/runtime path, so runtime verification must continue through GitHub Actions after the next code commit.
 
 ## Highest-value next actions
 
