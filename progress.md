@@ -6,13 +6,13 @@ CallYourAgent is a durable Node 24 TypeScript control plane for asynchronous two
 
 The repository includes deterministic fake and production CALL-E providers, SQLite persistence, replayable/idempotent call attempts, polling/webhook convergence, branch-scoped blocking, owner decision persistence, durable per-run instruction queues with exact acknowledgement, quiet hours/call budgets, bounded lifecycle recovery, fail-closed ambiguous/stalled handling, privacy-aware audit history, scoped HTTP authentication, a typed TypeScript client, a real stdio MCP adapter, deterministic end-to-end/demo flows, an operator console, a Claude Code host-acceptance runbook, and a single-instance persistent-volume Compose reference deployment.
 
-This run hardened owner-callback HTTP rate-limit ordering. PR #41 now validates an authenticated callback request's JSON object shape and required/optional callback fields before consuming the credential's callback rate-limit slot. Malformed callback requests therefore cannot burn legitimate owner callback capacity, while well-formed callback attempts retain the existing accounting semantics before domain execution.
+This run closed an authenticated-provider transport trust-boundary gap. PR #42 now validates the optional CALL-E API base URL as an exact HTTPS origin before any server-side bearer credential can be sent. Unsafe non-HTTPS, credential-bearing, path-bearing, query-bearing, fragment-bearing, malformed, or whitespace-ambiguous values fail during runtime construction before durable SQLite initialization.
 
 ## Exact repo state inspected this run
 
-The run started from `main` HEAD `c5419f3448f0bda78659754b8e21fac4fcd6bb4d`, the progress handoff after PR #40 (`82e166865bc7b00860c2056c80379c1a479ff245`).
+The run started from `main` HEAD `3b241c334a887dce8ba69923fb12ed408257aa8b`, the progress handoff after PR #41 (`3c654b4e7c5452123ecd69d5177d0b00848a48c9`).
 
-Before making any change, inspected the complete recursive repository tree and current source/test architecture, recent commits, issue state, and recent pull requests. There were no open issues and no pre-existing open pull requests. The recursive Git tree was not truncated.
+Before making any change, inspected the complete recursive repository tree and current source/test architecture. The recursive Git tree and the complete tests subtree both reported `truncated: false`. Also inspected recent commits, recent pull requests, and issue state; there were no open issues and no pre-existing open pull requests.
 
 Read in full during the mandatory pre-implementation audit:
 
@@ -29,40 +29,40 @@ Read in full during the mandatory pre-implementation audit:
 - `docs/PROVIDER_RESTART_SEMANTICS.md`
 - `deploy/README.md`
 
-Also inspected the complete `src/` and `tests/` inventory, the current `src/http-server.ts` request-validation/rate-limit ordering, `tests/http-query-parameter-validation.test.ts`, `tests/http-server.test.ts`, and recent HTTP validation/idempotency/concurrency changes before modifying repository content.
+Also inspected the full `src/` and `tests/` inventories, `package.json`, `.env.example`, `src/server.ts`, `src/call-policy.ts`, `src/calle-provider.ts`, `tests/server-runtime.test.ts`, `tests/runtime-numeric-env-validation.test.ts`, and `tests/calle-provider.test.ts` before modifying repository content.
 
-The audit found that `POST /v1/callbacks` authenticated the owner credential correctly, but then consumed the owner callback rate-limit slot before validating that the already-parsed JSON body was an object and before validating `runId`, `idempotencyKey`, and optional `prompt`. Thus a syntactically valid but structurally invalid callback body could consume legitimate callback capacity even though it could never create a callback.
+The audit found that `CALLE_BASE_URL` flowed into `CalleCallProvider` and was previously normalized only by removing one trailing slash. The provider then concatenated `/v1/calls` and sent `Authorization: Bearer <CALLE_API_KEY>` to that target. A misconfigured HTTP URL, credential-bearing URL, or URL with an unexpected path/query/fragment could therefore select an unsafe authenticated transport destination.
 
-The automation container's direct GitHub DNS path remained unavailable for a local clone, so GitHub Actions was again used as the authoritative executable verification path.
+The automation container's direct GitHub DNS path remained unavailable for a local clone, so GitHub Actions was used as the authoritative executable verification path.
 
 ## Changes made this run
 
-PR #41, `Validate owner callbacks before rate-limit consumption`, changed `src/http-server.ts` and added `tests/http-callback-rate-limit-validation.test.ts`.
+PR #42, `Harden authenticated CALL-E base URL configuration`, changed `src/calle-provider.ts` and added `tests/calle-base-url-validation.test.ts`.
 
-The callback route now uses this ordering:
+`CalleCallProvider` now canonicalizes its base URL through one explicit trust boundary:
 
-1. authenticate the credential and require `owner:callback` as before;
-2. validate that the body is a JSON object;
-3. validate required non-empty `runId` and `idempotencyKey` strings and the optional `prompt` string;
-4. consume the per-credential callback rate-limit slot;
-5. invoke the existing `ControlPlane.requestOwnerCallback(...)` operation.
+1. reject surrounding whitespace or malformed absolute URLs;
+2. require the `https:` scheme;
+3. reject embedded username/password credentials;
+4. reject query strings;
+5. reject fragments;
+6. reject non-root paths so the setting is an origin rather than an arbitrary API route;
+7. return the canonical `URL.origin`, preserving a harmless optional trailing slash without allowing structural ambiguity.
 
-This preserves two important existing semantics:
+The documented/default production endpoint remains `https://api.heycall-e.com`. The change does not probe the network and does not alter agent-facing HTTP/MCP/SDK contracts, CALL-E idempotency, webhook handling, branch blocking, recovery, or checkpoint semantics.
 
-- authorization remains ahead of callback field validation, so a credential without `owner:callback` does not gain a request-validation oracle;
-- a well-formed callback request still consumes API abuse-budget capacity before domain execution, even if the referenced run later proves nonexistent or another normal domain precondition rejects it.
+New deterministic regressions prove that a canonical custom HTTPS origin is used exactly for both create and observe requests, all unsafe/ambiguous variants fail synchronously before provider I/O, and invalid live `CALLE_BASE_URL` configuration fails before the configured SQLite file is created.
 
-The deterministic regression sets callback capacity to one request per window, sends a malformed callback body and proves it returns the existing privacy-safe `400` validation error, then sends a well-formed request and proves it reaches the domain (`404 not_found` for the intentionally unknown run), and finally proves the next well-formed request receives `429 rate_limited`. This demonstrates both sides of the ordering contract.
-
-PR #41 was squash-merged into `main` as `3c654b4e7c5452123ecd69d5177d0b00848a48c9`.
+PR #42 was squash-merged into `main` as `81aff0b655711a3d09f6170f92cc9577ae07dce7`.
 
 ## Verification performed
 
-Authoritative final verification ran against PR head `57454fcf34faf705601caf419e6a23e905a19488`:
+Authoritative final verification ran against PR head `239acaef52d6e063c3fa5fff09ab790713faab71`:
 
-- CI run `34549331405` — **success** on Node 24.20.0. Locked dependency installation succeeded, TypeScript typecheck succeeded, build succeeded, and **194/194 tests passed**, 0 failures. The new `invalid callback bodies do not consume owner callback rate-limit budget` regression passed.
-- Container run `34549331446` — **success**. The production image/runtime path remained green.
-- Compose deployment run `34549332147` — **success**. Compose configuration and fake-provider boot passed; generated scoped credential capabilities were verified; the compiled stdio MCP adapter worked against the deployed control plane; a durable branch-blocking owner decision survived restart and released only its affected branch; an owner requested a context-aware callback; that active callback survived restart; reconciliation queued steering exactly once; another restart preserved the queued steering; and steering was consumed only at an explicit safe checkpoint after restart.
+- CI run `34552920271` — **success** on Node 24.20.0. Locked dependency installation succeeded, TypeScript typecheck succeeded, build succeeded, and **197/197 tests passed**, 0 failures. All three new CALL-E base-URL regressions passed.
+- Container run `34552920255` — **success**. The production image/runtime path remained green.
+- Compose deployment run `34552920250` — **success**. Compose configuration and fake-provider boot passed; generated scoped credential capabilities were verified; the compiled stdio MCP adapter worked against the deployed control plane; a durable branch-blocking owner decision survived restart and released only its affected branch; an owner requested a context-aware callback; that active callback survived restart; reconciliation queued steering exactly once; another restart preserved the queued steering; and steering was consumed only at an explicit safe checkpoint after restart.
+- CodeRabbit status — **success**.
 
 `package.json` still has no separate lint script and no standalone migration/schema-check command. `npm run check` covers typecheck, build, and tests; SQLite regressions exercise schema/transaction durability, while Container/Compose cover packaged runtime and deployment behavior.
 
@@ -70,17 +70,17 @@ No live CALL-E phone call was attempted or claimed.
 
 ## Architecture decisions made this run
 
-1. API abuse-rate capacity should be spent on requests that have crossed the route's transport contract, not on malformed callback bodies that cannot possibly represent a callback operation.
-2. Authorization remains before detailed request validation. Least-privilege callers without `owner:callback` continue receiving authorization failure rather than field-level validation feedback.
-3. Transport validation remains separate from domain validation: once a callback request is structurally well formed, it consumes the callback rate-limit slot before the control plane evaluates run existence/state or other domain semantics.
-4. No new limiter, state machine, provider behavior, or platform-specific rule was introduced. The change is only ordering at the existing HTTP boundary.
-5. MCP, TypeScript SDK, fake/live provider behavior, idempotency bindings, branch-scoped blocking, durable callback state, and safe-checkpoint instruction semantics remain unchanged.
+1. The CALL-E API base URL is a credential-transport trust boundary because the backend sends `CALLE_API_KEY` to it. It must therefore be validated more strictly than a generic user-facing URL.
+2. A provider endpoint override may select a host/port for testing or deployment, but it must remain an exact HTTPS origin. Arbitrary paths, queries, fragments, embedded credentials, and non-HTTPS schemes are not accepted.
+3. Unsafe live-provider configuration should fail before opening durable SQLite state. A bad transport target must not partially initialize a runtime that appears deployable.
+4. Canonicalization is deliberately structural rather than network-based. Startup still makes no CALL-E request and `/ready` still does not claim provider reachability.
+5. The official default endpoint and all fake-provider/control-plane semantics remain unchanged.
 
 ## CALL-E integration status
 
 - **Fake provider:** deterministic, credential-free, idempotent, restart-rehydratable, and still the primary full-flow development/acceptance provider.
-- **Production CALL-E adapter:** implemented against the asynchronous Calls API with server-only `CALLE_API_KEY`, stable provider `Idempotency-Key`, structured result schemas, bounded create/poll requests, persisted correlation, polling/webhook convergence, duplicate prevention, restart-by-provider-id semantics, privacy-safe diagnostics, and fail-closed ambiguous/stalled handling.
-- **Owner callback HTTP boundary:** malformed authenticated callback bodies now fail validation without consuming owner callback capacity; valid requests retain the existing process-local rate-limit semantics.
+- **Production CALL-E adapter:** implemented against the asynchronous Calls API with server-only `CALLE_API_KEY`, stable provider `Idempotency-Key`, structured result schemas, bounded create/poll requests, persisted correlation, polling/webhook convergence, duplicate prevention, restart-by-provider-id semantics, privacy-safe diagnostics, fail-closed ambiguous/stalled handling, and now a strict authenticated base-URL trust boundary.
+- **Provider destination safety:** optional `CALLE_BASE_URL` must be an exact HTTPS origin and is canonicalized before any authenticated request can be constructed.
 - **Control-plane idempotency:** decision and callback keys remain payload-bound; exact retries remain no-op replays; changed-payload reuse is rejected; SQLite race coverage proves the durable first binding wins before provider I/O.
 - **Public webhook configuration:** live runtime requires an exact HTTPS origin and structurally constructs the tokenized webhook target. Application request handling strips the capability token from `IncomingMessage.url`; reverse-proxy/CDN/APM query-string redaction remains mandatory.
 - **Shared integration surfaces:** HTTP, TypeScript SDK, stdio MCP, lifecycle worker, operator console, and deployment acceptance continue sharing the same persistent control-plane state machine.
@@ -100,9 +100,9 @@ The SQLite reference topology remains intentionally single-instance. Multi-insta
 
 ## Highest-value next actions
 
-1. Continue the HTTP request-body audit for remaining semantic boundaries, especially required text normalization/identity fields and instruction acknowledgement edge cases, while avoiding needless rejection of harmless forward-compatible fields.
-2. Audit runtime string enums and operational text settings for whitespace/case ambiguity (`CYA_CALL_PROVIDER`, `CYA_STORE`, priority settings, timezone inputs, provider base URL) and harden only cases where ambiguous text can select the wrong operational mode or produce confusing startup behavior.
-3. Add explicit store-adapter contract tests for uniqueness/atomic winner-selection before any Postgres or multi-instance store is introduced, so current SQLite idempotency guarantees become mandatory for future adapters.
+1. Continue runtime string-configuration hardening only where ambiguity can change operational behavior: provider/store selectors, priority settings, IANA timezone text, and secret/phone whitespace handling should either be explicitly canonical or explicitly rejected rather than silently varying by field.
+2. Continue the HTTP request-body semantic audit for required identity/text fields and exact instruction acknowledgement boundaries, while avoiding needless rejection of harmless forward-compatible fields.
+3. Add explicit store-adapter contract tests for uniqueness, atomic winner selection, transaction rollback, and exactly-once terminal application before any Postgres or multi-instance store is introduced.
 4. Continue least-privilege review of owner/operator/reconciler surfaces without widening browser or normal-agent credentials.
 5. Run the documented acceptance in a genuine Claude Code host when that external prerequisite is available and record only observed host/version behavior.
 6. When the user-controlled CALL-E prerequisites are available, perform one tightly bounded live provider acceptance and record only observed behavior.
