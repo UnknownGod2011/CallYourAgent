@@ -6,13 +6,13 @@ CallYourAgent is a durable Node 24 TypeScript control plane for asynchronous two
 
 The repository includes deterministic fake and production CALL-E providers, SQLite persistence, replayable/idempotent call attempts, polling/webhook convergence, branch-scoped blocking, owner decision persistence, durable per-run instruction queues with exact acknowledgement, quiet hours/call budgets, bounded lifecycle recovery, fail-closed ambiguous/stalled handling, privacy-aware audit history, scoped HTTP authentication, a typed TypeScript client, a real stdio MCP adapter, deterministic end-to-end/demo flows, an operator console, a Claude Code host-acceptance runbook, and a single-instance persistent-volume Compose reference deployment.
 
-This run closed an authenticated-provider transport trust-boundary gap. PR #42 now validates the optional CALL-E API base URL as an exact HTTPS origin before any server-side bearer credential can be sent. Unsafe non-HTTPS, credential-bearing, path-bearing, query-bearing, fragment-bearing, malformed, or whitespace-ambiguous values fail during runtime construction before durable SQLite initialization.
+This run strengthened the persistence abstraction itself. PR #43 makes the in-memory store honor the same outermost atomic rollback semantics as durable SQLite, and adds a shared adapter-contract regression proving rollback, nested mutation handling, successful commit, and SQLite reopen persistence. This prevents fast in-memory domain tests from silently exercising weaker failure semantics than the production reference store.
 
 ## Exact repo state inspected this run
 
-The run started from `main` HEAD `3b241c334a887dce8ba69923fb12ed408257aa8b`, the progress handoff after PR #41 (`3c654b4e7c5452123ecd69d5177d0b00848a48c9`).
+The run started from `main` HEAD `0112f9905e9e726974121721ed528e9d6a508f5e`, the progress handoff after PR #42 (`81aff0b655711a3d09f6170f92cc9577ae07dce7`).
 
-Before making any change, inspected the complete recursive repository tree and current source/test architecture. The recursive Git tree and the complete tests subtree both reported `truncated: false`. Also inspected recent commits, recent pull requests, and issue state; there were no open issues and no pre-existing open pull requests.
+Before making any change, inspected the complete recursive repository tree and current source/test architecture; the recursive Git tree reported `truncated: false`. Also inspected recent commits and current issue/PR state. There were no open issues and no pre-existing open pull requests.
 
 Read in full during the mandatory pre-implementation audit:
 
@@ -29,40 +29,37 @@ Read in full during the mandatory pre-implementation audit:
 - `docs/PROVIDER_RESTART_SEMANTICS.md`
 - `deploy/README.md`
 
-Also inspected the full `src/` and `tests/` inventories, `package.json`, `.env.example`, `src/server.ts`, `src/call-policy.ts`, `src/calle-provider.ts`, `tests/server-runtime.test.ts`, `tests/runtime-numeric-env-validation.test.ts`, and `tests/calle-provider.test.ts` before modifying repository content.
+Also inspected the full `src/` and `tests/` inventories plus the persistence/runtime areas relevant to the next increment, especially `src/store.ts`, `src/sqlite-store.ts`, `src/server.ts`, `src/call-policy.ts`, and the existing runtime/SQLite regression coverage.
 
-The audit found that `CALLE_BASE_URL` flowed into `CalleCallProvider` and was previously normalized only by removing one trailing slash. The provider then concatenated `/v1/calls` and sent `Authorization: Bearer <CALLE_API_KEY>` to that target. A misconfigured HTTP URL, credential-bearing URL, or URL with an unexpected path/query/fragment could therefore select an unsafe authenticated transport destination.
+The audit found a cross-adapter semantic mismatch: `SqliteControlPlaneStore.transaction` rolls failed top-level mutations back and reloads its in-memory mirrors, while `InMemoryControlPlaneStore.transaction` previously executed the callback inline and left any partial mutations in memory when the callback threw. Domain tests using the fast in-memory adapter could therefore observe weaker atomicity guarantees than the durable reference architecture.
 
 The automation container's direct GitHub DNS path remained unavailable for a local clone, so GitHub Actions was used as the authoritative executable verification path.
 
 ## Changes made this run
 
-PR #42, `Harden authenticated CALL-E base URL configuration`, changed `src/calle-provider.ts` and added `tests/calle-base-url-validation.test.ts`.
+PR #43, `Enforce store transaction rollback contract`, changed `src/store.ts` and added `tests/store-transaction-contract.test.ts`.
 
-`CalleCallProvider` now canonicalizes its base URL through one explicit trust boundary:
+`InMemoryControlPlaneStore` now:
 
-1. reject surrounding whitespace or malformed absolute URLs;
-2. require the `https:` scheme;
-3. reject embedded username/password credentials;
-4. reject query strings;
-5. reject fragments;
-6. reject non-root paths so the setting is an origin rather than an arbitrary API route;
-7. return the canonical `URL.origin`, preserving a harmless optional trailing slash without allowing structural ambiguity.
+1. snapshots all domain maps, idempotency maps, and processed-webhook ids at the outermost transaction boundary;
+2. deep-clones map values with `structuredClone`, so rollback also restores values if a transaction mutates an existing object in place;
+3. preserves the same nested-transaction model as SQLite by letting nested transactions participate in the outer transaction rather than creating independent savepoints;
+4. restores the complete snapshot and rethrows if the outer transaction fails;
+5. leaves successful mutations committed normally.
 
-The documented/default production endpoint remains `https://api.heycall-e.com`. The change does not probe the network and does not alter agent-facing HTTP/MCP/SDK contracts, CALL-E idempotency, webhook handling, branch blocking, recovery, or checkpoint semantics.
+The store interface comment now treats atomicity as the `ControlPlaneStore.transaction` contract rather than describing it as optional when the backing implementation happens to support transactions.
 
-New deterministic regressions prove that a canonical custom HTTPS origin is used exactly for both create and observe requests, all unsafe/ambiguous variants fail synchronously before provider I/O, and invalid live `CALLE_BASE_URL` configuration fails before the configured SQLite file is created.
+The new shared regression runs the same rollback/commit assertions against both `InMemoryControlPlaneStore` and `SqliteControlPlaneStore`. It proves baseline state survives a forced outer rollback, both outer and nested mutations disappear, a later successful transaction commits, and SQLite persists only the committed state across close/reopen.
 
-PR #42 was squash-merged into `main` as `81aff0b655711a3d09f6170f92cc9577ae07dce7`.
+PR #43 was squash-merged into `main` as `41d7a42a3bbd50e42381231ccc87d10ffdd6e8a1`.
 
 ## Verification performed
 
-Authoritative final verification ran against PR head `239acaef52d6e063c3fa5fff09ab790713faab71`:
+Authoritative final verification ran against PR head `ed32e63d3bd39161e3cc651c56d4b852b19f8a92`:
 
-- CI run `34552920271` — **success** on Node 24.20.0. Locked dependency installation succeeded, TypeScript typecheck succeeded, build succeeded, and **197/197 tests passed**, 0 failures. All three new CALL-E base-URL regressions passed.
-- Container run `34552920255` — **success**. The production image/runtime path remained green.
-- Compose deployment run `34552920250` — **success**. Compose configuration and fake-provider boot passed; generated scoped credential capabilities were verified; the compiled stdio MCP adapter worked against the deployed control plane; a durable branch-blocking owner decision survived restart and released only its affected branch; an owner requested a context-aware callback; that active callback survived restart; reconciliation queued steering exactly once; another restart preserved the queued steering; and steering was consumed only at an explicit safe checkpoint after restart.
-- CodeRabbit status — **success**.
+- CI run `34556913438` — **success** on Node 24.20.0. Locked dependency installation succeeded, TypeScript typecheck succeeded, build succeeded, and **199/199 tests passed**, 0 failures. Both new store-contract regressions passed.
+- Container run `34556913361` — **success**. The packaged production image/runtime path remained green.
+- Compose deployment run `34556913360` — **success**. It validated Compose configuration, booted the fake-provider deployment, verified generated scoped credential capabilities and the compiled stdio MCP path, created a durable branch-blocking owner decision, restarted while that call was active, reconciled it and released only the blocked branch, requested a context-aware owner callback, restarted while that callback was active, completed/reconciled it exactly once, restarted again with steering durable, and consumed steering only at an explicit safe checkpoint.
 
 `package.json` still has no separate lint script and no standalone migration/schema-check command. `npm run check` covers typecheck, build, and tests; SQLite regressions exercise schema/transaction durability, while Container/Compose cover packaged runtime and deployment behavior.
 
@@ -70,17 +67,17 @@ No live CALL-E phone call was attempted or claimed.
 
 ## Architecture decisions made this run
 
-1. The CALL-E API base URL is a credential-transport trust boundary because the backend sends `CALLE_API_KEY` to it. It must therefore be validated more strictly than a generic user-facing URL.
-2. A provider endpoint override may select a host/port for testing or deployment, but it must remain an exact HTTPS origin. Arbitrary paths, queries, fragments, embedded credentials, and non-HTTPS schemes are not accepted.
-3. Unsafe live-provider configuration should fail before opening durable SQLite state. A bad transport target must not partially initialize a runtime that appears deployable.
-4. Canonicalization is deliberately structural rather than network-based. Startup still makes no CALL-E request and `/ready` still does not claim provider reachability.
-5. The official default endpoint and all fake-provider/control-plane semantics remain unchanged.
+1. `ControlPlaneStore.transaction` is a cross-adapter semantic contract, not an optional optimization. A future Postgres or other shared-store adapter must preserve the same atomic mutation boundary.
+2. The in-memory test adapter must roll back failed transactions. Otherwise fast domain tests can mask partial-state defects that SQLite correctly rejects.
+3. Nested transactions intentionally share the outermost transaction boundary, matching the existing SQLite semantics; this increment does not introduce savepoints or partial nested commits.
+4. In-memory snapshots deep-clone stored values so rollback covers both `Map.set`/`Set.add` operations and in-place object mutation inside the transaction.
+5. This adapter-level contract complements, rather than replaces, the existing SQLite-specific uniqueness and concurrency regressions. Future multi-instance work must satisfy both the generic transaction contract and the stronger durable winner/uniqueness guarantees.
 
 ## CALL-E integration status
 
 - **Fake provider:** deterministic, credential-free, idempotent, restart-rehydratable, and still the primary full-flow development/acceptance provider.
-- **Production CALL-E adapter:** implemented against the asynchronous Calls API with server-only `CALLE_API_KEY`, stable provider `Idempotency-Key`, structured result schemas, bounded create/poll requests, persisted correlation, polling/webhook convergence, duplicate prevention, restart-by-provider-id semantics, privacy-safe diagnostics, fail-closed ambiguous/stalled handling, and now a strict authenticated base-URL trust boundary.
-- **Provider destination safety:** optional `CALLE_BASE_URL` must be an exact HTTPS origin and is canonicalized before any authenticated request can be constructed.
+- **Production CALL-E adapter:** implemented against the asynchronous Calls API with server-only `CALLE_API_KEY`, stable provider `Idempotency-Key`, structured result schemas, bounded create/poll requests, persisted correlation, polling/webhook convergence, duplicate prevention, restart-by-provider-id semantics, privacy-safe diagnostics, fail-closed ambiguous/stalled handling, and a strict authenticated base-URL trust boundary.
+- **Control-plane persistence:** in-memory and SQLite adapters now share explicit top-level rollback semantics; SQLite remains the durable single-instance reference store and retains its SQL uniqueness/concurrency guarantees.
 - **Control-plane idempotency:** decision and callback keys remain payload-bound; exact retries remain no-op replays; changed-payload reuse is rejected; SQLite race coverage proves the durable first binding wins before provider I/O.
 - **Public webhook configuration:** live runtime requires an exact HTTPS origin and structurally constructs the tokenized webhook target. Application request handling strips the capability token from `IncomingMessage.url`; reverse-proxy/CDN/APM query-string redaction remains mandatory.
 - **Shared integration surfaces:** HTTP, TypeScript SDK, stdio MCP, lifecycle worker, operator console, and deployment acceptance continue sharing the same persistent control-plane state machine.
@@ -100,9 +97,9 @@ The SQLite reference topology remains intentionally single-instance. Multi-insta
 
 ## Highest-value next actions
 
-1. Continue runtime string-configuration hardening only where ambiguity can change operational behavior: provider/store selectors, priority settings, IANA timezone text, and secret/phone whitespace handling should either be explicitly canonical or explicitly rejected rather than silently varying by field.
-2. Continue the HTTP request-body semantic audit for required identity/text fields and exact instruction acknowledgement boundaries, while avoiding needless rejection of harmless forward-compatible fields.
-3. Add explicit store-adapter contract tests for uniqueness, atomic winner selection, transaction rollback, and exactly-once terminal application before any Postgres or multi-instance store is introduced.
+1. Extend the reusable store-adapter contract beyond rollback to cover uniqueness/atomic winner selection and exactly-once terminal application so any future Postgres adapter has an executable semantic target before it is introduced.
+2. Continue runtime string-configuration hardening only where ambiguity can change operational behavior: provider/store selectors, priority settings, IANA timezone text, and secret/phone whitespace handling should either be explicitly canonical or explicitly rejected rather than silently varying by field.
+3. Continue the HTTP request-body semantic audit for required identity/text fields and exact instruction acknowledgement boundaries, while avoiding needless rejection of harmless forward-compatible fields.
 4. Continue least-privilege review of owner/operator/reconciler surfaces without widening browser or normal-agent credentials.
 5. Run the documented acceptance in a genuine Claude Code host when that external prerequisite is available and record only observed host/version behavior.
 6. When the user-controlled CALL-E prerequisites are available, perform one tightly bounded live provider acceptance and record only observed behavior.
