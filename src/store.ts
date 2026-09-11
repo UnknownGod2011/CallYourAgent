@@ -101,8 +101,9 @@ class InMemoryAuditEventMap extends Map<string, AuditEvent> {
 
   override set(key: string, value: AuditEvent): this {
     const existing = this.get(key);
-    value.sequence = existing?.sequence ?? this.allocateSequence();
-    return super.set(key, value);
+    const stored = structuredClone(value);
+    stored.sequence = existing?.sequence ?? this.allocateSequence();
+    return super.set(key, stored);
   }
 }
 
