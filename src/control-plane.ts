@@ -428,13 +428,21 @@ export class ControlPlane {
         return finished;
       }
       const decision: OwnerDecision = { id: randomUUID(), escalationId: escalation.id, answer: outcome.answer ?? "", structured: outcome.structured, createdAt: this.isoNow() };
+      const winningDecisionId = this.store.bindDecisionToEscalation(escalation.id, decision.id);
+      if (winningDecisionId !== decision.id) {
+        const resolved = { ...escalation, status: "resolved" as const, decisionId: winningDecisionId, updatedAt: this.isoNow() };
+        this.store.escalations.set(resolved.id, resolved);
+        return finished;
+      }
       this.store.decisions.set(decision.id, decision);
       const resolved = { ...escalation, status: "resolved" as const, decisionId: decision.id, updatedAt: this.isoNow() };
       this.store.escalations.set(resolved.id, resolved);
       this.audit("owner_decision_recorded", "owner", "Owner decision recorded and blocked scope released", { runId: escalation.runId, escalationId: escalation.id, callAttemptId: current.id }, { scopeId: escalation.scopeId, blocking: escalation.blocking, structured: Boolean(outcome.structured) });
       return finished;
     }
-    if (outcome.status === "completed") for (const text of outcome.instructions ?? []) this.enqueueInstruction(current.correlationId, text, "callback", current.id);
+    if (outcome.status === "completed" && this.store.claimCallbackInstructionSet(current.id)) {
+      for (const text of outcome.instructions ?? []) this.enqueueInstruction(current.correlationId, text, "callback", current.id);
+    }
     return finished;
   }
 
