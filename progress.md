@@ -6,45 +6,37 @@ CallYourAgent is a durable Node 24 TypeScript control plane for asynchronous two
 
 ## Exact repo state inspected this run
 
-Started from `main` after PR #51. Before changes, inspected the recursive repository tree, source/test inventory, recent commits, open issues, open pull requests, `AGENTS.md`, this file, `README.md`, and all architecture/integration/deployment/security/policy/acceptance documents under `docs/` plus `deploy/README.md`. The repository tree remains architecture-first with shared core services, HTTP, MCP, SDK, lifecycle, fake/production providers, SQLite persistence, and a large regression suite. No open issues or pull requests were present before this run.
+Started from `main` after the PR #51 handoff and the stale-write matrix documentation. Before changes, inspected the recursive repository tree, source/test inventory, recent commits, open issues, open pull requests, `AGENTS.md`, this file, `README.md`, and the architecture/integration/deployment/security/policy/acceptance documents under `docs/` plus `deploy/README.md`. The repository remains architecture-first with shared core services, HTTP, MCP, SDK, lifecycle, fake/production providers, SQLite persistence, operator console, and a broad regression suite. No open issues or pull requests were present before this run.
 
-The audit confirmed the next correctness phase: make stale-write risks concrete and reviewable before adding conditional/CAS methods. The highest-risk areas remain heartbeat/report-status, instruction acknowledgement, provider-call reservation, expiry/deferral, active-call progress, and ambiguous recovery.
+The audit confirmed that the next correctness phase is shared-store freshness: explicit conditional/CAS behavior for stale-read mutations, starting with run status/heartbeat and exact instruction acknowledgement, followed by escalation/call reservation and active-call recovery paths.
 
 ## Changes made this run
 
-Added `docs/STALE_WRITE_TEST_MATRIX.md`.
+Added `docs/SHARED_STORE_READINESS.md`.
 
-The document turns the freshness contract into an explicit implementation/test matrix covering:
+The document defines the exit criteria for ever claiming multi-worker/shared-store support: authoritative persistence-boundary mutation semantics, explicit applied/already-current/stale-rejected outcomes, independent-worker stale-read and rollback regressions across all mutable domains, and the current operational boundary that SQLite remains single-process and fake CALL-E remains the acceptance provider.
 
-- heartbeat/status writes;
-- instruction acknowledgement;
-- escalation/provider-call reservation;
-- deferral/expiry races;
-- active-call poll/webhook races;
-- ambiguous recovery and duplicate-call prevention.
-
-It also states the required invariant that stale workers must not overwrite authoritative entities with older whole-object snapshots, and sets the implementation order for conditional store primitives, control-plane routing, independent SQLite tests, in-memory parity, and keeping provider I/O outside persistence transactions.
-
-This is a planning/contract artifact intentionally scoped to the current single-process SQLite topology; it does not claim shared-store or live CALL-E readiness.
+This is a contract artifact that narrows future implementation work; it does not claim shared-store or live CALL-E readiness.
 
 ## Verification performed
 
-- GitHub repository tree fetched recursively and confirmed complete/non-truncated.
+- GitHub repository metadata and recursive tree were inspected.
 - `AGENTS.md`, `progress.md`, `README.md`, and all architecture/integration/deployment/security/policy/acceptance documents were read before the change.
-- Recent commits were inspected through PR #51 and its progress handoff.
+- Recent commits were inspected through the latest progress handoff.
 - No open issues or pull requests were present before the change.
-- The new artifact is documentation-only; no runtime files or tests were changed in this run.
+- Added documentation was committed successfully as `a53789baa1e4c1cbba2fe6ef60c2241285e4aa29`.
+- Runtime source and tests were not modified in this run; no fresh CI/container/Compose execution was available from the connector after the documentation commit.
 - Existing authoritative runtime baseline remains: CI run `34582157458` passed on Node `24.20.0` with `212/212` tests, container verification succeeded, and Compose fake-provider/MCP/restart acceptance succeeded.
 
 No live CALL-E phone call was attempted or claimed.
 
 ## Architecture decisions made this run
 
-1. Stale-write risks should be tracked as explicit contract/test rows before implementation changes.
-2. Conditional/CAS primitives must be added in priority order, starting with heartbeat/report-status and exact instruction acknowledgement.
-3. Provider I/O remains outside persistence transactions.
-4. Independent SQLite-worker regressions are required before any future shared-store readiness claim.
-5. In-memory and SQLite adapters must preserve the same freshness semantics.
+1. Shared-store readiness must be an evidence-based contract, not an implication from SQLite behavior.
+2. Every mutable domain path needs either conditional/CAS updates, authoritative re-read plus write, or a durable domain claim.
+3. Mutation APIs should expose whether a stale writer applied, converged, or was rejected instead of relying on caller guesses.
+4. Independent-worker interleavings and rollback paths are mandatory before multi-worker support is documented.
+5. Provider I/O remains outside persistence transactions.
 6. The supported deployment remains one Node process with one SQLite volume until a shared transactional store and shared rate limiter satisfy the full contract.
 
 ## CALL-E integration status
