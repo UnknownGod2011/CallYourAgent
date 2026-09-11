@@ -8,7 +8,7 @@ import type {
   OwnerDecision,
   OwnerInstruction,
 } from "./domain.js";
-import type { CallTerminalOutcomeClaim, CallTerminalOutcomeClaimResult, ControlPlaneStore } from "./store.js";
+import type { CallTerminalOutcomeClaim, CallTerminalOutcomeClaimResult, ControlPlaneStore, RunMutationResult } from "./store.js";
 
 type JsonEntity = AgentRegistration | AgentRun | Escalation | OwnerDecision | OwnerInstruction | CallAttempt | AuditEvent | CallTerminalOutcomeClaim | string;
 
@@ -172,6 +172,15 @@ export class SqliteControlPlaneStore implements ControlPlaneStore {
     }
   }
 
+  updateRunIfCurrent(runId: string, expectedUpdatedAt: string, next: AgentRun): RunMutationResult {
+    this.runs.reload();
+    const current = this.runs.get(runId);
+    if (!current) throw new Error(`Unknown run: ${runId}`);
+    if (current.updatedAt !== expectedUpdatedAt) return { run: structuredClone(current), applied: false };
+    this.runs.set(runId, structuredClone(next));
+    return { run: structuredClone(next), applied: true };
+  }
+
   bindEscalationIdempotencyKey(key: string, escalationId: string): string {
     return this.bindUniqueMapValue(this.escalationByIdempotencyKey, "escalation_idempotency", key, escalationId);
   }
@@ -192,9 +201,6 @@ export class SqliteControlPlaneStore implements ControlPlaneStore {
     const row = this.db.prepare("SELECT data FROM call_terminal_outcomes WHERE key = ?").get(callAttemptId) as { data: string } | undefined;
     if (!row) throw new Error("Failed to claim terminal outcome");
     const claimed = Number(result.changes) === 1;
-    // A losing connection may have stale in-memory entity mirrors from before the
-    // winning transaction committed. Refresh all mirrors before returning so the
-    // control plane can converge to the winner without rewriting stale state.
     if (claimed) this.terminalOutcomeClaims.reload();
     else this.reloadAll();
     return { winner: JSON.parse(row.data) as CallTerminalOutcomeClaim, claimed };
@@ -242,40 +248,16 @@ export class SqliteControlPlaneStore implements ControlPlaneStore {
       CREATE TABLE IF NOT EXISTS instructions (key TEXT PRIMARY KEY, data TEXT NOT NULL);
       CREATE TABLE IF NOT EXISTS call_attempts (key TEXT PRIMARY KEY, data TEXT NOT NULL);
       CREATE TABLE IF NOT EXISTS audit_events (key TEXT PRIMARY KEY, data TEXT NOT NULL);
-      CREATE TABLE IF NOT EXISTS audit_sequence (
-        key INTEGER PRIMARY KEY CHECK (key = 1),
-        next_sequence INTEGER NOT NULL CHECK (next_sequence >= 1)
-      );
-      INSERT OR IGNORE INTO audit_sequence (key, next_sequence)
-        SELECT 1, COALESCE(MAX(CAST(json_extract(data, '$.sequence') AS INTEGER)), 0) + 1 FROM audit_events;
-      UPDATE audit_sequence
-        SET next_sequence = MAX(
-          next_sequence,
-          (SELECT COALESCE(MAX(CAST(json_extract(data, '$.sequence') AS INTEGER)), 0) + 1 FROM audit_events)
-        )
-        WHERE key = 1;
       CREATE TABLE IF NOT EXISTS escalation_idempotency (key TEXT PRIMARY KEY, data TEXT NOT NULL);
       CREATE TABLE IF NOT EXISTS callback_idempotency (key TEXT PRIMARY KEY, data TEXT NOT NULL);
       CREATE TABLE IF NOT EXISTS decision_by_escalation (key TEXT PRIMARY KEY, data TEXT NOT NULL);
       CREATE TABLE IF NOT EXISTS call_terminal_outcomes (key TEXT PRIMARY KEY, data TEXT NOT NULL);
       CREATE TABLE IF NOT EXISTS webhook_events (key TEXT PRIMARY KEY);
       CREATE TABLE IF NOT EXISTS callback_instruction_sets (key TEXT PRIMARY KEY);
-
-      CREATE UNIQUE INDEX IF NOT EXISTS ux_escalation_idempotency
-        ON escalations(json_extract(data, '$.idempotencyKey'));
-      CREATE UNIQUE INDEX IF NOT EXISTS ux_decision_escalation
-        ON decisions(json_extract(data, '$.escalationId'));
-      CREATE UNIQUE INDEX IF NOT EXISTS ux_call_attempt_provider_id
-        ON call_attempts(json_extract(data, '$.providerCallId'))
-        WHERE json_extract(data, '$.providerCallId') IS NOT NULL;
-      CREATE INDEX IF NOT EXISTS ix_instruction_run_status
-        ON instructions(json_extract(data, '$.runId'), json_extract(data, '$.status'));
-      CREATE INDEX IF NOT EXISTS ix_escalation_run_status
-        ON escalations(json_extract(data, '$.runId'), json_extract(data, '$.status'));
-      CREATE INDEX IF NOT EXISTS ix_audit_event_run_created
-        ON audit_events(json_extract(data, '$.runId'), json_extract(data, '$.createdAt'));
-      CREATE INDEX IF NOT EXISTS ix_audit_event_agent_created
-        ON audit_events(json_extract(data, '$.agentId'), json_extract(data, '$.createdAt'));
+      CREATE TABLE IF NOT EXISTS audit_sequence (key INTEGER PRIMARY KEY CHECK (key = 1), next_sequence INTEGER NOT NULL);
+      INSERT INTO audit_sequence(key, next_sequence)
+      SELECT 1, COALESCE(MAX(json_extract(data, '$.sequence')), 0) + 1 FROM audit_events
+      WHERE NOT EXISTS (SELECT 1 FROM audit_sequence WHERE key = 1);
     `);
   }
 }
