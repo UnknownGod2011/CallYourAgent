@@ -6,37 +6,36 @@ CallYourAgent is a durable Node 24 TypeScript control plane for asynchronous two
 
 ## Exact repo state inspected this run
 
-Started from `main` after the conditional-run-mutation test handoff. Before changes, inspected the full repository tree and `src/`/`tests/` inventory, recent commits, open issues/PRs, `AGENTS.md`, this file, `README.md`, and all architecture/integration/deployment/security/policy/acceptance documents under `docs/` plus `deploy/README.md`. No open issue or pull request required a different priority. The audit confirmed that `ControlPlaneStore.updateRunIfCurrent(...)` is implemented by both store adapters, the focused store regressions exist in `tests/run-mutation-contract.test.ts`, and `ControlPlane.heartbeat(...)` still performs a direct run replacement rather than using the conditional primitive.
+Started from `main` at commit `3fc0a2b3e0f25f907d4548323610aa1bfc433c72`. Before changes, inspected the full repository tree and current source/test inventory, recent commits, open issues/PRs, `AGENTS.md`, this file, `README.md`, and every architecture/integration/deployment/security/policy/acceptance document under `docs/` plus `deploy/README.md`. No open issue or pull request required a different priority. The audit confirmed that `ControlPlaneStore.updateRunIfCurrent(...)` is implemented and covered by focused store regressions, while `ControlPlane.heartbeat(...)` still performs a direct run replacement.
 
 ## Changes made this run
 
-Added `docs/HEARTBEAT_CONCURRENCY.md` to make the next runtime increment explicit:
+Added `docs/HEARTBEAT_IMPLEMENTATION_PLAN.md` to make the remaining heartbeat integration boundary explicit:
 
-- heartbeat updates must use authoritative `updatedAt` compare-and-set;
-- only the successful CAS writer may append `run_status_reported`;
-- stale losers must return the durable winner and preserve unrelated fields;
-- terminal/paused state must not be reverted by stale heartbeats;
-- rollback must restore both run state and audit allocation;
-- independent SQLite connections must converge on one winner.
+- `ControlPlane.heartbeat` must use the persistence CAS primitive;
+- stale writers must return the durable winner and emit no progress audit event;
+- only the committed writer may emit `run_status_reported`;
+- unrelated fields and newer terminal/paused state must be preserved;
+- two independent SQLite workers plus rollback coverage are required before claiming end-to-end heartbeat freshness.
 
-This keeps the implementation target precise while avoiding an unsafe speculative rewrite of the large control-plane source file in the connector environment.
+This is intentionally a narrow, non-runtime change because the connector does not expose a safe partial-update or direct clone/runtime path for the large control-plane source file. It prevents the repository from overstating shared-store heartbeat safety while preserving the existing tested primitive.
 
 ## Verification performed
 
-- Full repository tree and architecture/integration docs inspected before the change.
-- Recent commits and open issues/PRs inspected; no open issue or PR was relevant.
-- Documentation commit: `51835c27317a83a887597f53d2812e9bc0b96af8`.
-- No local runtime is available in the connector, so no fresh test/typecheck/build result is claimed for this documentation-only change.
+- Full repository tree and all architecture/integration docs inspected before the change.
+- Recent commits and open issues/PRs inspected; no relevant open issue or PR.
+- Documentation commit: `e1034b0f5c18f6dfc5a4d3110bd86be238241bbf`.
+- No local runtime is available in the connector, so no fresh test/typecheck/build result is claimed for this documentation-only increment.
 - Previous authoritative baseline remains: CI passed on Node `24.20.0` with `212/212` tests, container verification succeeded, and the full Compose fake-provider/MCP/restart acceptance succeeded.
 
 No live CALL-E phone call was attempted or claimed.
 
 ## Architecture decisions made this run
 
-1. Heartbeat freshness is an explicit domain invariant and must be enforced at the persistence boundary.
-2. A stale heartbeat must converge to the authoritative durable run rather than publish a local snapshot.
-3. Audit history must describe only committed authoritative state transitions.
-4. The current SQLite deployment remains single-instance; independent-connection tests define the contract for future shared stores.
+1. Heartbeat freshness remains a persistence-boundary invariant, not a best-effort control-plane convention.
+2. The implementation target is explicitly first-writer-wins CAS with authoritative-winner return semantics.
+3. Audit events must describe only committed authoritative state transitions.
+4. The current SQLite deployment remains single-instance until independent-worker tests prove the broader contract.
 5. Existing branch-scoped blocking and safe-checkpoint instruction semantics remain unchanged.
 
 ## CALL-E integration status
