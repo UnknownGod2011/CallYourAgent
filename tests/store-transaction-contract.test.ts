@@ -99,6 +99,28 @@ test("in-memory store atomic claims are first-writer-wins and rollback-safe", ()
   verifyAtomicClaimContract(store);
 });
 
+test("in-memory audit event insertion does not mutate or alias the caller object", () => {
+  const store = new InMemoryControlPlaneStore();
+  const event = {
+    id: "audit-1",
+    sequence: 999,
+    type: "run_started" as const,
+    actor: "agent" as const,
+    runId: "run-1",
+    summary: "started",
+    createdAt: new Date().toISOString(),
+  };
+  store.auditEvents.set(event.id, event);
+
+  assert.equal(event.sequence, 999);
+  const stored = store.auditEvents.get(event.id);
+  assert.notEqual(stored, event);
+  assert.equal(stored?.sequence, 1);
+
+  event.summary = "caller mutated";
+  assert.equal(store.auditEvents.get(event.id)?.summary, "started");
+});
+
 test("SQLite store matches the transaction rollback and atomic-claim contracts across reopen", async () => {
   const directory = await mkdtemp(join(tmpdir(), "cya-store-contract-"));
   const databasePath = join(directory, "state.db");
