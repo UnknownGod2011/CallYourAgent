@@ -35,19 +35,18 @@ function failEscalationCreatedAuditOnce(store: SqliteControlPlaneStore): () => v
   };
 }
 
-function failIdempotencyMappingOnce(store: SqliteControlPlaneStore): () => void {
-  const originalSet = store.escalationByIdempotencyKey.set.bind(store.escalationByIdempotencyKey);
+function failIdempotencyBindingOnce(store: SqliteControlPlaneStore): () => void {
+  const originalBind = store.bindEscalationIdempotencyKey.bind(store);
   let failed = false;
-  store.escalationByIdempotencyKey.set = ((key: string, value: string) => {
+  store.bindEscalationIdempotencyKey = ((key: string, escalationId: string) => {
     if (!failed && key === "decision-create-mapping-failure") {
       failed = true;
-      throw new Error("injected escalation idempotency mapping failure");
+      throw new Error("injected escalation idempotency binding failure");
     }
-    originalSet(key, value);
-    return store.escalationByIdempotencyKey;
-  }) as typeof store.escalationByIdempotencyKey.set;
+    return originalBind(key, escalationId);
+  }) as typeof store.bindEscalationIdempotencyKey;
   return () => {
-    store.escalationByIdempotencyKey.set = originalSet as typeof store.escalationByIdempotencyKey.set;
+    store.bindEscalationIdempotencyKey = originalBind as typeof store.bindEscalationIdempotencyKey;
   };
 }
 
@@ -99,19 +98,19 @@ test("SQLite rolls back escalation and idempotency mapping when escalation_creat
   });
 });
 
-test("SQLite rolls back escalation when idempotency mapping persistence fails", async () => {
+test("SQLite rolls back escalation when atomic idempotency binding fails", async () => {
   await withSqliteStore(async (store) => {
     const provider = new FakeCallProvider();
     const control = new ControlPlane(store, provider);
     const agent = control.registerAgent({ name: "decision-create-mapping", platform: "test", ownerId: "owner-1" });
     const run = control.startRun(agent.id, "Working", "documentation");
 
-    const restoreMapping = failIdempotencyMappingOnce(store);
+    const restoreBinding = failIdempotencyBindingOnce(store);
     await assert.rejects(
       control.requestOwnerDecision(decisionRequest(run.id, "decision-create-mapping-failure")),
-      /injected escalation idempotency mapping failure/,
+      /injected escalation idempotency binding failure/,
     );
-    restoreMapping();
+    restoreBinding();
 
     assert.equal(store.escalations.size, 0);
     assert.equal(store.escalationByIdempotencyKey.size, 0);
