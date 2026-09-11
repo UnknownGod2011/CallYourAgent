@@ -10,18 +10,23 @@ Started from `main` at commit `a5c26d82249ff630db5687d76ae108efffa28bcd`. Before
 
 ## Changes made this run
 
-Added `tests/run-mutation-isolation.test.ts` with two focused regressions for the persistence CAS boundary:
+Added `docs/HEARTBEAT_INTEGRATION_TEST_PLAN.md` with the executable acceptance target for the pending heartbeat wiring:
 
-- a successful conditional run mutation must not retain aliases to the caller-owned `AgentRun` object or the returned winner object;
-- a rejected stale mutation must return an isolated authoritative winner that callers cannot mutate through the returned value.
+- heartbeat writes must use authoritative `updatedAt` compare-and-set;
+- successful writes may update only heartbeat-owned fields;
+- stale writers return the durable winner and emit no progress audit event;
+- newer paused/terminal state and unrelated fields are preserved;
+- returned snapshots are isolated;
+- transaction rollback restores run state and audit sequencing;
+- independent SQLite workers converge on the committed winner after close/reopen.
 
-This keeps the store contract explicit while the control-plane heartbeat integration is still pending. No runtime behavior was changed in this increment.
+This is a documentation/test-design increment only. No runtime behavior was changed because the connector still lacks a safe partial-update mechanism for the large `src/control-plane.ts` file.
 
 ## Verification performed
 
 - Full repository tree and all architecture/integration docs inspected before the change.
 - Recent commits and open issues/PRs inspected; no relevant open issue or PR.
-- Added test committed as `1e16ddbc24d8cb876d9df87b9f1b16d4ae7331d8`.
+- Added plan committed as `ebb0929639402cea451d723e676f0dd6d433ff9f`.
 - No local runtime is available in the connector, so no fresh test/typecheck/build result is claimed for this increment.
 - Previous authoritative baseline remains: CI passed on Node `24.20.0` with `212/212` tests, container verification succeeded, and the full Compose fake-provider/MCP/restart acceptance succeeded.
 
@@ -29,9 +34,9 @@ No live CALL-E phone call was attempted or claimed.
 
 ## Architecture decisions made this run
 
-1. Conditional run mutation results are treated as immutable snapshots at the persistence boundary.
-2. Successful and rejected CAS paths both return isolated values so application callers cannot mutate canonical state accidentally.
-3. The heartbeat freshness invariant remains a control-plane integration task, not a reason to weaken store semantics.
+1. The heartbeat path is explicitly treated as a store-level CAS integration, not a second ad hoc freshness mechanism.
+2. Stale heartbeat attempts must not create audit history that falsely claims progress was committed.
+3. Cross-worker correctness is required before claiming shared-store readiness; single-process SQLite remains the current deployment boundary.
 4. Existing branch-scoped blocking and safe-checkpoint instruction semantics remain unchanged.
 
 ## CALL-E integration status
@@ -49,7 +54,7 @@ A genuine Claude Code host acceptance still requires a real Claude Code environm
 ## Highest-value next actions
 
 1. Wire `ControlPlane.heartbeat` through `updateRunIfCurrent` and return the authoritative winner on stale races.
-2. Add an integration regression proving the heartbeat path preserves unrelated fields and suppresses stale progress audit events.
+2. Add the integration regression described in `docs/HEARTBEAT_INTEGRATION_TEST_PLAN.md`.
 3. Add an exact instruction acknowledgement conditional primitive and route safe-checkpoint consumption through it.
 4. Audit escalation reservation/deferral/expiry, active-call progress, and ambiguous recovery for stale whole-entity writes.
 5. Continue runtime string configuration and HTTP semantic-boundary hardening.
