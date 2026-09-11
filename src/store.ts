@@ -8,6 +8,16 @@ import type {
   OwnerInstruction,
 } from "./domain.js";
 
+export interface CallTerminalOutcomeClaim {
+  status: "completed" | "failed";
+  fingerprint: string;
+}
+
+export interface CallTerminalOutcomeClaimResult {
+  winner: CallTerminalOutcomeClaim;
+  claimed: boolean;
+}
+
 export interface ControlPlaneStore {
   agents: Map<string, AgentRegistration>;
   runs: Map<string, AgentRun>;
@@ -19,6 +29,7 @@ export interface ControlPlaneStore {
   escalationByIdempotencyKey: Map<string, string>;
   callbackByIdempotencyKey: Map<string, string>;
   decisionByEscalationId: Map<string, string>;
+  terminalOutcomeClaims: Map<string, CallTerminalOutcomeClaim>;
   processedWebhookEventIds: Set<string>;
   callbackInstructionSetClaims: Set<string>;
 
@@ -33,6 +44,13 @@ export interface ControlPlaneStore {
 
   /** Atomically bind an escalation to its one durable owner-decision id and return the winner. */
   bindDecisionToEscalation(escalationId: string, decisionId: string): string;
+
+  /**
+   * Atomically bind a call attempt to its first committed terminal provider outcome.
+   * The fingerprint is a one-way payload binding used only to identify conflicting
+   * duplicate deliveries without duplicating sensitive provider result content.
+   */
+  claimCallTerminalOutcome(callAttemptId: string, claim: CallTerminalOutcomeClaim): CallTerminalOutcomeClaimResult;
 
   /** Atomically claim creation of the callback-derived instruction set for one terminal call attempt. */
   claimCallbackInstructionSet(callAttemptId: string): boolean;
@@ -55,6 +73,7 @@ type InMemorySnapshot = {
   escalationByIdempotencyKey: Map<string, string>;
   callbackByIdempotencyKey: Map<string, string>;
   decisionByEscalationId: Map<string, string>;
+  terminalOutcomeClaims: Map<string, CallTerminalOutcomeClaim>;
   processedWebhookEventIds: Set<string>;
   callbackInstructionSetClaims: Set<string>;
 };
@@ -79,6 +98,7 @@ export class InMemoryControlPlaneStore implements ControlPlaneStore {
   escalationByIdempotencyKey = new Map<string, string>();
   callbackByIdempotencyKey = new Map<string, string>();
   decisionByEscalationId = new Map<string, string>();
+  terminalOutcomeClaims = new Map<string, CallTerminalOutcomeClaim>();
   processedWebhookEventIds = new Set<string>();
   callbackInstructionSetClaims = new Set<string>();
 
@@ -109,6 +129,14 @@ export class InMemoryControlPlaneStore implements ControlPlaneStore {
 
   bindDecisionToEscalation(escalationId: string, decisionId: string): string {
     return this.bindUnique(this.decisionByEscalationId, escalationId, decisionId);
+  }
+
+  claimCallTerminalOutcome(callAttemptId: string, claim: CallTerminalOutcomeClaim): CallTerminalOutcomeClaimResult {
+    const existing = this.terminalOutcomeClaims.get(callAttemptId);
+    if (existing) return { winner: structuredClone(existing), claimed: false };
+    const stored = structuredClone(claim);
+    this.terminalOutcomeClaims.set(callAttemptId, stored);
+    return { winner: structuredClone(stored), claimed: true };
   }
 
   claimCallbackInstructionSet(callAttemptId: string): boolean {
@@ -146,6 +174,7 @@ export class InMemoryControlPlaneStore implements ControlPlaneStore {
       escalationByIdempotencyKey: cloneMap(this.escalationByIdempotencyKey),
       callbackByIdempotencyKey: cloneMap(this.callbackByIdempotencyKey),
       decisionByEscalationId: cloneMap(this.decisionByEscalationId),
+      terminalOutcomeClaims: cloneMap(this.terminalOutcomeClaims),
       processedWebhookEventIds: new Set(this.processedWebhookEventIds),
       callbackInstructionSetClaims: new Set(this.callbackInstructionSetClaims),
     };
@@ -162,6 +191,7 @@ export class InMemoryControlPlaneStore implements ControlPlaneStore {
     replaceMap(this.escalationByIdempotencyKey, snapshot.escalationByIdempotencyKey);
     replaceMap(this.callbackByIdempotencyKey, snapshot.callbackByIdempotencyKey);
     replaceMap(this.decisionByEscalationId, snapshot.decisionByEscalationId);
+    replaceMap(this.terminalOutcomeClaims, snapshot.terminalOutcomeClaims);
     this.processedWebhookEventIds.clear();
     for (const eventId of snapshot.processedWebhookEventIds) this.processedWebhookEventIds.add(eventId);
     this.callbackInstructionSetClaims.clear();
