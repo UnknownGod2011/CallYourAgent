@@ -266,11 +266,14 @@ export function createControlPlaneHttpServer(controlPlane: ControlPlane, options
 
       if (req.method === "POST" && url.pathname === "/v1/callbacks") {
         if (!hasScope(credential, "owner:callback")) return forbidden(res, "owner:callback");
-        if (!consumeRateLimit(rateLimits, credential.id, "callback", callbackLimit, rateWindowMs, res)) return;
         const value = record(body);
-        const attempt = await controlPlane.requestOwnerCallback({
-          runId: text(value.runId, "runId"), idempotencyKey: text(value.idempotencyKey, "idempotencyKey"), prompt: optionalText(value.prompt, "prompt"),
-        });
+        const callbackRequest = {
+          runId: text(value.runId, "runId"),
+          idempotencyKey: text(value.idempotencyKey, "idempotencyKey"),
+          prompt: optionalText(value.prompt, "prompt"),
+        };
+        if (!consumeRateLimit(rateLimits, credential.id, "callback", callbackLimit, rateWindowMs, res)) return;
+        const attempt = await controlPlane.requestOwnerCallback(callbackRequest);
         return json(res, 201, toOwnerCallbackView(attempt));
       }
 
