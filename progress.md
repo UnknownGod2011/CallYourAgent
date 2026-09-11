@@ -10,16 +10,25 @@ Started from `main` at commit `24115888e4137ae5547825e0dca96326f8119506`. Before
 
 ## Changes made this run
 
-Added `src/heartbeat-mutation.ts` with `buildHeartbeatCandidate(...)`, a small immutable helper that constructs a heartbeat candidate from an authoritative running snapshot, preserves lifecycle status and unrelated fields, updates only heartbeat payload plus `updatedAt`, and rejects paused/terminal runs. Added `tests/heartbeat-mutation.test.ts` covering source immutability, lifecycle preservation, and rejection of non-running runs.
+Added `src/heartbeat-commit.ts` with a small CAS commit seam that:
 
-This is an intentionally narrow supporting increment. The helper is not yet wired into `ControlPlane.heartbeat(...)`; the persistence CAS boundary remains authoritative and the large control-plane integration is still pending.
+- reads the authoritative run snapshot;
+- builds an immutable heartbeat candidate through `buildHeartbeatCandidate(...)`;
+- commits through `ControlPlaneStore.updateRunIfCurrent(...)`;
+- returns `audit: true` only for the CAS winner, preventing stale writers from publishing progress they did not commit;
+- exposes a deterministic `heartbeatAuditPayload(...)` helper for the eventual control-plane audit call.
+
+Added `tests/heartbeat-commit.test.ts` covering first-writer-wins behavior, stale-writer rejection, durable-winner return, store-state preservation, and audit payload derivation.
+
+This is an intentionally narrow integration seam. `ControlPlane.heartbeat(...)` is not yet wired to it because the connector does not expose a safe partial update path for the large control-plane file; the existing CAS primitive remains authoritative.
 
 ## Verification performed
 
 - Full repository tree and all architecture/integration docs inspected before the change.
 - Recent commits and open issues/PRs inspected; no relevant open issue or PR.
-- Added `src/heartbeat-mutation.ts` in commit `df4612ece98ddd2c75cf80d53dff1b864347f5f3`.
-- Added `tests/heartbeat-mutation.test.ts` in commit `54d517cadf028c82f4da5fb73402c3224630d4ec`.
+- Added `src/heartbeat-commit.ts` in commit `511526163698d667dd131bcd7f8d6b120671ea70`.
+- Added `tests/heartbeat-commit.test.ts` in commit `20afa02e1dae5e3188f0e3b45203bc108c4a9ebb`.
+- Updated this progress record after the code changes.
 - The connector does not expose a local clone/runtime, so fresh test/typecheck/build execution was not available during this run and is not claimed.
 - Previous authoritative baseline remains: CI passed on Node `24.20.0` with `212/212` tests, container verification succeeded, and the full Compose fake-provider/MCP/restart acceptance succeeded.
 
@@ -27,9 +36,9 @@ No live CALL-E phone call was attempted or claimed.
 
 ## Architecture decisions made this run
 
-1. Keep heartbeat candidate construction pure and immutable so it can be reused when the control-plane CAS integration lands.
-2. Preserve lifecycle status and unrelated run fields in the candidate helper; freshness and commit authority remain inside `ControlPlaneStore.updateRunIfCurrent(...)`.
-3. Reject non-running heartbeat attempts before any candidate is produced.
+1. Keep heartbeat candidate construction pure and immutable.
+2. Centralize CAS commit semantics in a small helper so the eventual `ControlPlane.heartbeat(...)` migration has one tested integration point.
+3. Treat audit publication as contingent on `RunMutationResult.applied`; stale writers must be observationally silent.
 4. Preserve branch-scoped blocking and safe-checkpoint instruction semantics unchanged.
 
 ## CALL-E integration status
@@ -46,7 +55,7 @@ A genuine Claude Code host acceptance still requires a real Claude Code environm
 
 ## Highest-value next actions
 
-1. Wire `ControlPlane.heartbeat` through `updateRunIfCurrent` and use `buildHeartbeatCandidate(...)` so stale writers return the authoritative winner.
+1. Wire `ControlPlane.heartbeat` through `commitHeartbeat(...)` and use `heartbeatAuditPayload(...)` so stale writers return the authoritative winner and emit no progress event.
 2. Extend heartbeat integration coverage with stale-writer rejection, audit suppression, newer-terminal-state preservation, and rollback cases.
 3. Add an exact instruction acknowledgement conditional primitive and route safe-checkpoint consumption through it.
 4. Audit escalation reservation/deferral/expiry, active-call progress, and ambiguous recovery for stale whole-entity writes.
