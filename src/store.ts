@@ -18,6 +18,11 @@ export interface CallTerminalOutcomeClaimResult {
   claimed: boolean;
 }
 
+export interface RunMutationResult {
+  run: AgentRun;
+  applied: boolean;
+}
+
 export interface ControlPlaneStore {
   agents: Map<string, AgentRegistration>;
   runs: Map<string, AgentRun>;
@@ -41,6 +46,9 @@ export interface ControlPlaneStore {
 
   /** Execute a synchronous domain mutation atomically. */
   transaction<T>(operation: () => T): T;
+
+  /** Apply a run mutation only when the supplied updatedAt still matches the authoritative row. */
+  updateRunIfCurrent(runId: string, expectedUpdatedAt: string, next: AgentRun): RunMutationResult;
 
   /** Atomically bind an escalation idempotency key and return the winning escalation id. */
   bindEscalationIdempotencyKey(key: string, escalationId: string): string;
@@ -138,6 +146,14 @@ export class InMemoryControlPlaneStore implements ControlPlaneStore {
     } finally {
       this.transactionDepth -= 1;
     }
+  }
+
+  updateRunIfCurrent(runId: string, expectedUpdatedAt: string, next: AgentRun): RunMutationResult {
+    const current = this.runs.get(runId);
+    if (!current) throw new Error(`Unknown run: ${runId}`);
+    if (current.updatedAt !== expectedUpdatedAt) return { run: structuredClone(current), applied: false };
+    this.runs.set(runId, structuredClone(next));
+    return { run: structuredClone(next), applied: true };
   }
 
   bindEscalationIdempotencyKey(key: string, escalationId: string): string {
