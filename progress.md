@@ -2,17 +2,17 @@
 
 ## Current status
 
-CallYourAgent is a durable Node 24 TypeScript control plane for asynchronous two-way voice coordination between autonomous AI agents and their owners. Agents can escalate important decisions without freezing unrelated scopes; owners can independently request callbacks for progress/questions/steering; human input is persisted as structured state and consumed only at explicit safe checkpoints rather than pretending to interrupt in-flight model generation.
+CallYourAgent is a durable Node 24 TypeScript control plane for asynchronous two-way voice coordination between autonomous AI agents and their owners. Agents can request important owner decisions without freezing unrelated scopes; owners can independently request context-aware callbacks for progress/questions/steering; human input is persisted as structured state and consumed only at explicit safe checkpoints rather than pretending to interrupt in-flight model generation.
 
-The repository includes deterministic fake and production CALL-E providers, SQLite persistence, replayable/idempotent call attempts, polling/webhook convergence, branch-scoped blocking, owner decision persistence, durable per-run instruction queues with exact acknowledgement, quiet hours/call budgets, bounded lifecycle recovery, fail-closed ambiguous/stalled handling, privacy-aware audit history, scoped HTTP authentication, a typed TypeScript client, a real stdio MCP adapter, deterministic end-to-end/demo flows, an operator console, a Claude Code host-acceptance runbook, and a single-instance persistent-volume Compose reference deployment.
+The repository includes deterministic fake and production CALL-E providers, SQLite persistence, replayable/idempotent call attempts, polling/webhook convergence, branch-scoped blocking, durable owner decisions, durable per-run instruction queues with exact acknowledgement, quiet hours/call budgets, bounded lifecycle recovery, fail-closed ambiguous/stalled handling, privacy-aware audit history, scoped HTTP authentication, a typed TypeScript client, a real stdio MCP adapter, deterministic end-to-end/demo flows, an operator console, a Claude Code host-acceptance runbook, and a single-instance persistent-volume Compose reference deployment.
 
-This run completed the domain migration started by PR #44. PR #45 moves owner-decision idempotency, owner-callback idempotency, and provider-webhook deduplication onto the explicit atomic `ControlPlaneStore` claim primitives. Retry/loser paths now converge on the store-selected durable identity instead of treating caller-side `Map.get()`/`Map.set()` or `Set.has()`/`Set.add()` as the correctness boundary.
+This run completed the next concurrency/idempotency increment after PR #45. PR #46 makes terminal side-effect identity explicit in the store contract: one durable owner-decision identity per escalation and one callback-derived instruction batch per terminal callback attempt. The control plane now consumes those claims during terminal reconciliation so stale/competing terminal deliveries do not rely only on already-terminal entity status for correctness.
 
 ## Exact repo state inspected this run
 
-The run started from `main` HEAD `bd35cb5581192cdf3d17c877cb9a337d22ea43ed`, the progress handoff after PR #44 (`6c39c2d02d772da4160bf22b858eaa5a48100031`).
+The run started from `main` HEAD `28fa9463505b86bf01dd6065920e3f265061c18f`, the progress handoff after PR #45 (`73f43fdc598431636702ffd33fb677bf4d17e678`).
 
-Before making any change, inspected the complete recursive repository tree and source/test architecture, recent commits, and current issue/PR state. There were no open issues and no pre-existing open pull requests.
+Before making any change, inspected the complete recursive repository tree/current architecture, recent commits, open issue state, and open PR state. There were no open issues and no pre-existing open pull requests.
 
 Read in full during the mandatory pre-implementation audit:
 
@@ -29,89 +29,91 @@ Read in full during the mandatory pre-implementation audit:
 - `docs/PROVIDER_RESTART_SEMANTICS.md`
 - `deploy/README.md`
 
-Also inspected the relevant implementation and regression surface, especially `src/store.ts`, `src/sqlite-store.ts`, `src/control-plane.ts`, `src/call-provider.ts`, `tests/callback-idempotency-concurrency.test.ts`, `tests/sqlite-decision-creation-atomicity.test.ts`, the broader test inventory, and `package.json`.
+Also inspected the relevant implementation/test surface, especially `src/control-plane.ts`, `src/store.ts`, `src/sqlite-store.ts`, `src/domain.ts`, `tests/store-transaction-contract.test.ts`, `tests/reconciliation-overlap-concurrency.test.ts`, and the complete test inventory.
 
-The audit confirmed that PR #44 had already made rollback-safe atomic first-writer-wins claims part of the store contract, but `ControlPlane.requestOwnerDecision`, `requestOwnerCallback`, and `ingestProviderWebhook` still used direct map/set claim conventions. Provider/network I/O was already correctly outside SQLite transactions and had to remain there.
+The audit confirmed that PR #45 correctly moved request idempotency and webhook deduplication onto atomic store primitives, while terminal owner-decision creation and callback instruction creation still depended primarily on fresh call/escalation terminal status. That is safe in the current single-process topology, but it left an implicit contract for any future shared transactional store.
 
 The automation container's direct GitHub DNS path remained unavailable for a local clone, so GitHub Actions was used as the authoritative executable verification path.
 
 ## Changes made this run
 
-PR #45, `Use atomic store claims in control-plane flows`, changed `src/control-plane.ts`, added `tests/control-plane-atomic-claims.test.ts`, and updated `tests/sqlite-decision-creation-atomicity.test.ts`.
+PR #46, `Enforce exactly-once terminal effect claims`, changed `src/control-plane.ts`, `src/store.ts`, `src/sqlite-store.ts`, extended `tests/store-transaction-contract.test.ts`, and added `tests/terminal-effect-claims.test.ts`.
 
-### Owner decisions
+### Explicit decision identity
 
-`requestOwnerDecision` still keeps a fast replay read for the common case, but the transaction correctness boundary now creates a candidate escalation id and calls `bindEscalationIdempotencyKey`. The store-selected winner is authoritative:
+`ControlPlaneStore` now exposes `bindDecisionToEscalation(escalationId, decisionId)`. It is an atomic first-writer-wins binding that returns the durable winning decision id.
 
-- if this request wins, the claimed candidate id becomes the persisted escalation id;
-- if another request already won, the caller loads that durable escalation, verifies the payload-bound idempotency contract, and returns the winner;
-- the loser does not create a second escalation, audit chain, or provider call.
+Both the in-memory and SQLite stores implement the same contract. SQLite persists the binding in `decision_by_escalation`, and the decisions table now also has a unique index on `$.escalationId` so direct persistence cannot create two durable owner decisions for one escalation.
 
-The direct `escalationByIdempotencyKey.set(...)` claim was removed from the control plane.
+During a completed owner-decision terminal outcome, the control plane creates a candidate decision id and claims the escalation-to-decision identity before persisting the candidate. A losing/stale path converges on the winning decision id and releases the blocked escalation against that durable identity instead of creating a second decision or second `owner_decision_recorded` effect.
 
-### Owner callbacks
+### Exactly-once callback instruction batch
 
-`requestOwnerCallback` now follows the same first-writer-wins model with `bindCallbackIdempotencyKey`. The candidate call-attempt id is claimed inside the transaction and, only for the winner, is passed into `persistCallAttempt`. Provider dispatch remains after the durable reservation transaction.
+`ControlPlaneStore` now also exposes `claimCallbackInstructionSet(callAttemptId)`. It atomically claims the right to materialize callback-derived steering for one terminal callback attempt.
 
-This preserves the core safety ordering: durable local callback identity and audit state first, real-world phone side effect second. A loser/retry converges on the winning `CallAttempt` after validating that the idempotency key is still bound to the same run/prompt payload.
+Both stores implement the same rollback-safe contract. SQLite persists the claim in `callback_instruction_sets`.
 
-### Provider webhook delivery
+On a completed owner callback, the control plane now claims the instruction batch before queuing any callback instructions. A repeated/stale terminal application may still converge the call-attempt status, but it cannot create a second steering batch or duplicate `owner_instruction_queued` effects.
 
-`ingestProviderWebhook` now uses `claimWebhookEventId` rather than a caller-side `has()`/`add()` pair. The provider call lookup, event claim, terminal domain transition, resulting owner decision/instruction mutation, and reconciliation audit remain inside one synchronous store transaction. If terminal application throws, the existing rollback contract releases the event claim together with the other local mutations.
+The claim is taken even for an empty provider instruction list. This deliberately makes the first committed terminal callback result authoritative; a later conflicting terminal delivery cannot manufacture steering that was absent from the committed result.
 
-### Domain regressions
+### Rollback and cross-connection contract
 
-`tests/control-plane-atomic-claims.test.ts` adds three focused regressions:
+The in-memory transaction snapshot now includes both new terminal-effect claim collections. SQLite transaction reload/rollback coverage includes them as well.
 
-1. decision retries that lose the atomic claim converge on the winning durable escalation without a second provider start or duplicate creation/start audits;
-2. callback retries that lose the atomic claim converge on the winning durable call attempt without a second provider start or duplicate callback/start audits;
-3. duplicate provider webhooks exercise the atomic event claim and queue callback steering exactly once.
+`tests/store-transaction-contract.test.ts` now proves for both adapters that:
 
-The tests deliberately simulate a stale caller-side read while the atomic store primitive still returns the durable winner. This proves the domain no longer depends on the preliminary map lookup for correctness.
+- decision bindings are first-writer-wins;
+- callback instruction-batch claims succeed only once;
+- failed outer transactions release both kinds of claims;
+- committed claims survive SQLite close/reopen;
+- two independent SQLite store connections observe the same committed winner/claim.
 
-### Verification-driven test repair
+These independent-connection assertions are contract probes only; they do not change the documented single-instance SQLite deployment topology.
 
-The first CI run correctly exposed one stale fault-injection test: `tests/sqlite-decision-creation-atomicity.test.ts` still monkey-patched `escalationByIdempotencyKey.set`, which is intentionally no longer called. That run had **203/204 tests passing** and one expected assertion failure because the obsolete seam never fired.
+### Stale terminal-state regressions
 
-The test was updated to inject the failure through `bindEscalationIdempotencyKey` itself. Its original invariant is preserved: a failure at the idempotency-binding boundary leaves no escalation, no idempotency binding, no call attempt, no creation audit, and no blocked scope; a subsequent retry can create the request normally.
+`tests/terminal-effect-claims.test.ts` adds two domain regressions that deliberately reset already-completed entity status to simulate a stale worker after the first terminal effects have committed.
 
-PR #45 was squash-merged into `main` as `73f43fdc598431636702ffd33fb677bf4d17e678`.
+For owner decisions, a second terminal delivery converges the escalation back to the already-claimed decision id without creating another decision or another owner-decision effect.
+
+For callbacks, a second terminal delivery with the same steering cannot create another instruction batch even when the call-attempt status is artificially stale. The original instructions remain queued for explicit safe-checkpoint handling.
+
+PR #46 was squash-merged into `main` as `9f0a3a39924b981b96dbe279700adda4fbcb036c`.
 
 ## Verification performed
 
-Authoritative final verification ran against PR head `d938f1ad3622ac1d394c11bcce59b970204dd896`:
+Authoritative verification ran against PR head `0163727f59009c194c273661409b7aed4de86330`:
 
-- CI run `34564452065` — **success** on Node 24.20.0. Locked dependency installation succeeded, TypeScript typecheck succeeded, build succeeded, and **204/204 tests passed**, 0 failures.
-- Container run `34564452138` — **success**. The packaged production image/runtime path remained green.
-- Compose deployment run `34564452110` — **success**. The full durable fake-provider deployment/restart path remained green, including scoped credential generation/capabilities, compiled stdio MCP, branch-scoped owner-decision persistence across restart, branch-specific release after reconciliation, context-aware owner callback persistence across another restart, exactly-once steering, another restart after steering durability, and explicit safe-checkpoint consumption.
+- CI run `34568457958` — **success**. Node 24 setup and locked dependency installation succeeded; the repository `Typecheck and test` step completed successfully, covering TypeScript typechecking, build, and the complete test suite including the new terminal-effect regressions.
+- Container run `34568457989` — **success**. The production image built successfully and the fake-provider runtime smoke test passed.
+- Compose deployment run `34568457966` — **success**. The full durable acceptance path remained green: scoped deployment credentials, Compose validation, fake-provider deployment, health check, compiled stdio MCP against the deployed control plane, branch-blocking owner decision, restart while the decision call was active, branch-specific release after reconciliation, context-aware owner callback, restart while the callback was active, exactly-once steering, another persistence restart, and explicit safe-checkpoint consumption.
 
-The earlier superseded CI run `34564364879` failed only because the old rollback test injected through the raw map implementation instead of the new store primitive; Container `34564364877` and Compose `34564364881` were already green on that earlier head. The test seam was corrected before merge, and the complete final verification was green.
-
-`package.json` still has no separate lint script and no standalone migration/schema-check command. `npm run check` covers typecheck, build, and tests; SQLite regressions exercise schema/transaction durability, while Container/Compose cover packaged runtime and deployment behavior.
+`package.json` still has no separate lint script and no standalone migration/schema-check command. The CI check covers the available typecheck/build/test path, SQLite regressions exercise schema and transaction behavior, and Container/Compose cover packaged runtime/deployment behavior.
 
 No live CALL-E phone call was attempted or claimed.
 
 ## Architecture decisions made this run
 
-1. The preliminary idempotency-map lookup is now only a fast replay path; atomic store binding is the correctness boundary for selecting the durable decision/callback winner.
-2. The candidate durable entity id is selected before the atomic bind and, for the winning transaction, reused as the actual persisted entity id. This avoids a bind-to-one-id/persist-another-id split.
-3. Atomic claims and creation/audit mutations stay in the same transaction so rollback releases a failed claim. Provider/network I/O remains outside that transaction.
-4. Losing requests validate the original payload against the persisted winner before returning it. First-writer-wins never weakens the existing payload-bound idempotency conflict semantics.
-5. Provider webhook deduplication is now a true store claim inside the same terminal-application transaction; duplicate delivery cannot independently apply callback instructions or owner decisions.
-6. The current SQLite topology remains intentionally single-instance. Independent-store claim tests are contract probes, not a claim of horizontally scalable application execution. A future shared store must also provide authoritative/fresh access to the returned winning entity and preserve all current transaction/uniqueness/rate-limit semantics.
-7. Public HTTP, TypeScript SDK, MCP, checkpoint, and privacy contracts are unchanged by this increment.
+1. Terminal mutation identity is now a persistence contract, not merely a consequence of reading an already-terminal entity status.
+2. One escalation can bind to only one durable owner-decision id. The SQLite schema independently enforces one decision row per escalation as defense in depth.
+3. One owner-callback call attempt can materialize at most one callback-derived instruction batch. The batch claim and queued instructions execute within the same outer store transaction, so rollback releases the claim together with any partial local effects.
+4. Provider/network I/O remains outside database transactions. These new claims only protect durable local terminal application after a provider observation/webhook has already been obtained.
+5. The first committed terminal effect remains authoritative. Later duplicate/conflicting terminal deliveries converge rather than replacing the committed owner decision or steering batch.
+6. The current SQLite deployment remains intentionally single-instance. A future Postgres/shared-store adapter must preserve atomic claim/transaction semantics and also provide authoritative/fresh reads across workers; this PR does not claim horizontal-scale readiness by itself.
+7. HTTP, TypeScript SDK, MCP, privacy, branch-blocking, and explicit safe-checkpoint contracts are unchanged.
 
 ## CALL-E integration status
 
-- **Fake provider:** deterministic, credential-free, idempotent, restart-rehydratable, and still the primary full-flow development/acceptance provider.
-- **Production CALL-E adapter:** implemented against the asynchronous Calls API with server-only `CALLE_API_KEY`, stable provider `Idempotency-Key`, structured result schemas, bounded create/poll requests, persisted correlation, polling/webhook convergence, duplicate prevention, restart-by-provider-id semantics, privacy-safe diagnostics, fail-closed ambiguous/stalled handling, and a strict authenticated base-URL trust boundary.
-- **Control-plane persistence:** in-memory and SQLite adapters share rollback plus atomic idempotency/webhook-claim semantics, and the control plane now consumes those primitives directly. SQLite remains the durable single-instance reference store.
-- **Control-plane idempotency:** decision and callback keys remain payload-bound; exact retries remain no-op replays; changed-payload reuse is rejected; atomic store winner selection now controls concurrent/stale-read creation paths.
-- **Webhook deduplication:** the control plane now consumes the atomic first-claim primitive directly and applies the webhook claim plus terminal local effects in one rollback-safe transaction.
-- **Shared integration surfaces:** HTTP, TypeScript SDK, stdio MCP, lifecycle worker, operator console, and deployment acceptance continue sharing the same persistent control-plane state machine.
-- **Checkpoint semantics:** human steering remains durable queued state consumed only at explicit safe work boundaries; non-consuming pull plus exact acknowledgement remains the recommended integration model.
+- **Fake provider:** deterministic, credential-free, idempotent, restart-rehydratable, and still the primary complete acceptance provider.
+- **Production CALL-E adapter:** implemented against the asynchronous Calls API with server-only `CALLE_API_KEY`, stable provider `Idempotency-Key`, structured result schemas, bounded create/poll requests, persisted correlation, polling/webhook convergence, duplicate-call prevention, restart-by-provider-id semantics, privacy-safe diagnostics, fail-closed ambiguous/stalled handling, and the strict authenticated CALL-E base-URL trust boundary.
+- **Control-plane persistence:** in-memory and SQLite adapters share rollback-safe request claims, webhook-event claims, owner-decision identity claims, and callback instruction-batch claims. SQLite remains the durable single-instance reference store.
+- **Owner decisions:** branch-scoped blocking remains intact; non-blocked work continues while an escalation is pending; one durable decision identity now survives duplicate/stale terminal application.
+- **Owner callbacks:** callbacks still receive current run context; owner steering is durable queued state; one terminal callback can materialize only one steering batch.
+- **Shared surfaces:** HTTP, TypeScript SDK, stdio MCP, lifecycle worker, operator console, and Compose acceptance still share the same persistent control-plane state machine.
+- **Checkpoint semantics:** steering is consumed only at explicit safe work boundaries; the system never claims to interrupt in-flight token generation.
 - **Claude Code:** compiled stdio MCP behavior remains covered automatically and through Compose acceptance. A genuine Claude Code host session has still not been observed and is not claimed.
-- **Live status:** no authorized real CALL-E phone call has been performed, so live provider connectivity, owner-phone authorization, and externally reachable webhook delivery remain unverified.
+- **Live status:** no authorized real CALL-E phone call has been performed, so real provider connectivity, owner-phone authorization, and externally reachable webhook delivery remain unverified.
 
 ## Current blockers / external prerequisites
 
@@ -121,12 +123,12 @@ A true Claude Code host acceptance still requires an actual Claude Code environm
 
 Live CALL-E verification still requires user-controlled prerequisites: a valid/authorized CALL-E credential, an authorized owner phone destination, and a stable externally reachable HTTPS origin whose ingress does not log the webhook capability query string.
 
-The SQLite reference topology remains intentionally single-instance. Multi-instance deployment still requires a future shared transactional store plus shared rate limiter preserving the current state-machine, transaction, uniqueness, idempotency, and rate-limit semantics.
+The SQLite reference topology remains intentionally single-instance. Multi-instance deployment still requires a future shared transactional store plus shared rate limiter preserving the current state-machine, transaction, uniqueness, idempotency, freshness, and rate-limit semantics.
 
 ## Highest-value next actions
 
-1. Extend the reusable store/domain contract to exactly-once terminal application, especially owner-decision creation and callback instruction creation under competing poll/webhook/reconciliation paths, while keeping provider/network I/O outside database transactions.
-2. Audit terminal mutation identity so future shared-store adapters have an executable uniqueness contract for one decision per escalation and one callback-derived instruction set per terminal call attempt, rather than relying only on already-terminal status checks.
+1. Add executable terminal-effect conflict semantics for genuinely conflicting completed outcomes (for example two completed owner-decision payloads racing) so the first durable winner is explicit and later conflicting data is safely ignored/audited rather than merely relying on normal single-process freshness.
+2. Continue the shared-store contract audit around authoritative refresh/CAS semantics for call-attempt and escalation terminal state so a future Postgres adapter cannot reintroduce stale-read lost updates even though terminal side effects are now unique.
 3. Continue runtime string-configuration hardening where ambiguity can change operational behavior: provider/store selectors, priority settings, IANA timezone text, and secret/phone whitespace handling should be explicitly canonical or explicitly rejected.
 4. Continue the HTTP request-body semantic audit for required identity/text fields and exact instruction acknowledgement boundaries while preserving harmless forward compatibility.
 5. Continue least-privilege review of owner/operator/reconciler surfaces without widening browser or normal-agent credentials.
