@@ -259,3 +259,18 @@ The repository does not define an `npm run lint` script or a configured lint com
 ### Remaining proof
 
 A fresh confirmation email must be opened by the account holder to provide the final human-email proof of the new redirect. The existing localhost email cannot be repaired; it was already generated with the old URL. Create the account again (or request a new confirmation email) after the production deployment containing this callback hardening. No user email was sent by the audit process.
+
+### Publication and documentation evidence
+
+Committed callback and recovery-route fix as `de64beb` (`Fix production auth confirmation redirects`). Deployed it only to the existing `callyouragent` Vercel production project: deployment `dpl_ABzH5p2emKS3xmbbVfRks46V5pBG`, Ready, with alias `https://callyouragent.vercel.app`.
+
+Production smoke checks after deployment:
+
+- `GET /auth/callback` — `307` to `/login?confirmation=failed`.
+- `GET /auth/callback?code=invalid-confirmation-code` — `307` to `/login?confirmation=failed`.
+- `GET /login?confirmation=failed` — `200` and renders the recovery message.
+- `GET /signup` — `200`.
+- unauthenticated `GET /dashboard` — `307` to the login route with `next=/dashboard`.
+- authenticated-shape `POST /mcp` `initialize` — `200` with protocol version `2025-06-18`.
+
+`README.md` and new `docs/HOSTED_SAAS.md` now distinguish the actual Vercel/Supabase SaaS onboarding path from the older self-hosted Node control-plane reference. The hosted limitations are explicit: dashboard updates are delivered only at an agent safe checkpoint; a production human-answered CALL-E interaction and the legacy callback/session model are not claimed as available through the hosted MCP service.

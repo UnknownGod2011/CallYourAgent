@@ -55,9 +55,11 @@ This is deterministic fake-provider orchestration over the real control-plane se
 
 ## Connect an external agent
 
-After deploying the control plane, open `/connect`. The Connection Kit creates browser-local instructions for Codex, the ChatGPT desktop app, Claude Code, Gemini CLI, Kiro, and other local stdio MCP clients. It generates the deployment variables, least-privilege agent configuration, and the operating instruction that makes safe checkpoints explicit. It does not submit or store the entered phone number or tokens.
+The hosted SaaS is available at [callyouragent.vercel.app](https://callyouragent.vercel.app). A user signs up, confirms their email, creates an agent, and creates a private connection for that agent. The connection page generates an opaque, revocable token and a host-specific remote-MCP configuration. The token is shown only at creation time and never contains a CALL-E key.
 
-Hosted ChatGPT / ChatGPT Work is intentionally shown as pending: it needs a remote Streamable HTTP MCP endpoint, per-user OAuth, and a published plugin. The self-hosted release currently supplies local stdio MCP, HTTP, and TypeScript SDK paths. See [docs/INTEGRATIONS.md](docs/INTEGRATIONS.md) for the exact host matrix.
+The current hosted remote-MCP endpoint supports `request_phone_call`, `get_call_status`, and `pull_human_updates`. Codex CLI, Claude Code, Gemini CLI, Kiro, Antigravity, and another HTTP MCP-capable IDE have generated setup instructions. Hosted ChatGPT/ChatGPT Work is deliberately marked unavailable until OAuth and a published remote MCP integration exist. The exact production flow and host matrix are in [docs/HOSTED_SAAS.md](docs/HOSTED_SAAS.md).
+
+The legacy Node control plane, its stdio MCP server, HTTP SDK, fake provider, and Docker deployment remain in this repository as a separate reference implementation. Its setup documents describe that self-hosted reference, not the Vercel SaaS onboarding flow.
 
 ## Initial integration targets
 
