@@ -227,3 +227,8 @@ Vercel production environment now contains the Supabase public URL and publishab
 1. Deploy the final proxy/static-source cleanup commit.
 2. Complete a signed-in Kiro connection creation and verify its remote MCP handshake with a generated scoped token.
 3. Complete one answered real CALL-E test and verify its actual provider result is persisted. Prior provider attempts did not establish a handset conversation, so delivery/voice quality must remain unclaimed until that evidence exists.
+
+### Final production verification
+
+- Final deployment `callyouragent-6e3uw265g-tanush-shahs-projects-5e868e6e.vercel.app` is Ready and the stable `https://callyouragent.vercel.app` alias resolves to it.
+- Production smoke checks: `/connect` returned 200 and contains the technical setup content; `/dashboard` returned the expected 307 redirect to login for an unauthenticated browser; `/icon.svg` returned 200; `POST /mcp` `initialize` returned 200 with a valid MCP protocol response.
