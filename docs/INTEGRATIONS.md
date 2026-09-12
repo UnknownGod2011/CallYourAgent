@@ -126,6 +126,26 @@ This proves the product semantics without requiring Claude Code to support undoc
 
 Use the same checkpoint/acknowledgement model and the same MCP or typed HTTP client boundary. Codex integration should let a running workflow publish status, raise an escalation, incorporate queued instructions between work units, acknowledge the exact ids incorporated, and optionally read callback lifecycle/audit state. Do not implement a Codex-only state machine.
 
+## Self-service setup matrix
+
+`GET /connect` is the browser-local Connection Kit for a deployed self-hosted instance. It does not submit a phone number or any credential; it generates host-specific text locally in the browser. The owner should generate a least-privilege credential bundle on the trusted control-plane host, then give each agent only its own `agent` token.
+
+| Host | Current setup | Status |
+| --- | --- | --- |
+| Codex CLI / IDE | `codex mcp add` launches the built stdio adapter with `CYA_BASE_URL` and `CYA_API_TOKEN`. | Supported locally. |
+| ChatGPT desktop app | Add the same stdio server in **Settings → MCP servers**. It shares local MCP configuration with Codex. | Supported locally. |
+| Claude Code | `claude mcp add` launches the same stdio adapter. | Supported locally. |
+| Gemini CLI | Add the `mcpServers.callyouragent` entry to `~/.gemini/settings.json` or `.gemini/settings.json`. | Supported locally. |
+| Kiro | Add the equivalent stdio entry to `~/.kiro/settings/mcp.json` or `.kiro/settings/mcp.json`. | Supported locally. |
+| Another MCP client | Configure `node dist/src/mcp-server.js` and supply the two agent environment variables. | Supported when the client supports stdio MCP. |
+| Hosted ChatGPT / ChatGPT Work | Requires a published plugin, a remote Streamable HTTP MCP endpoint, OAuth, and tenant-scoped credentials. | Not supported by the self-hosted stdio release yet. |
+
+The repository also includes `plugins/callyouragent`, a credential-free agent-plugin package containing the safe-checkpoint workflow guidance. It does not bundle an MCP transport or secrets; the deployed Connection Kit remains the source of each user's scoped connection values.
+
+### Provider delivery and voice
+
+CALL-E remains the supported provider implementation. The recent live delivery attempts show that task acceptance is not equivalent to handset delivery. Do not depend on an unverified/shared caller identity for a production owner-control path, particularly across carrier regions. A production-quality provider adapter should use a verified, branded outbound number and return the same `CallProvider` lifecycle/structured-outcome contract. This preserves the agent integrations above while letting an operator use a provider with stronger deliverability or explicit voice selection. An ElevenLabs adapter is not present today because CALL-E does not expose a supported ElevenLabs voice-selection field.
+
 ## ChatGPT / ChatGPT Work / scheduled workflows
 
 Expose the same server API/MCP surface where the current ChatGPT product and workspace entitlements allow it. Because tool/write availability can vary by product/workspace, the core remains independently usable through HTTP and does not assume a first-party ChatGPT automation can accept arbitrary external callbacks mid-run.

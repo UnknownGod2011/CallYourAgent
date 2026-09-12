@@ -1,0 +1,18 @@
+{
+  "name": "callyouragent",
+  "version": "0.1.0",
+  "description": "Human escalation guidance for autonomous agent work",
+  "author": {
+    "name": "Local developer"
+  },
+  "skills": "./skills/",
+  "interface": {
+    "displayName": "CallYourAgent",
+    "shortDescription": "Escalate important decisions by phone at safe checkpoints.",
+    "longDescription": "Guidance for using CallYourAgent's branch-safe owner decision and callback workflow.",
+    "developerName": "Local developer",
+    "category": "Productivity",
+    "capabilities": [],
+    "defaultPrompt": "Use CallYourAgent when this task needs owner judgment or a progress callback."
+  }
+}

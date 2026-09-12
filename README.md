@@ -53,6 +53,12 @@ The read token can observe the overview and audit timeline but cannot checkpoint
 
 This is deterministic fake-provider orchestration over the real control-plane semantics, not evidence of a live CALL-E call.
 
+## Connect an external agent
+
+After deploying the control plane, open `/connect`. The Connection Kit creates browser-local instructions for Codex, the ChatGPT desktop app, Claude Code, Gemini CLI, Kiro, and other local stdio MCP clients. It generates the deployment variables, least-privilege agent configuration, and the operating instruction that makes safe checkpoints explicit. It does not submit or store the entered phone number or tokens.
+
+Hosted ChatGPT / ChatGPT Work is intentionally shown as pending: it needs a remote Streamable HTTP MCP endpoint, per-user OAuth, and a published plugin. The self-hosted release currently supplies local stdio MCP, HTTP, and TypeScript SDK paths. See [docs/INTEGRATIONS.md](docs/INTEGRATIONS.md) for the exact host matrix.
+
 ## Initial integration targets
 
 - Claude / Claude Code via MCP + adapter/hooks where supported.
