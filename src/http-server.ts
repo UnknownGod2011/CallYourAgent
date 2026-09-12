@@ -7,6 +7,7 @@ import { IDEMPOTENCY_CONFLICT_MESSAGE, type ControlPlane } from "./control-plane
 import type { EscalationPriority } from "./domain.js";
 import { getEscalationLifecycleView } from "./escalation-view.js";
 import { operatorConsoleHtml } from "./operator-ui.js";
+import { connectionKitHtml } from "./connect-ui.js";
 import { getRunOverview } from "./run-overview.js";
 
 export type ApiScope = "agent:read" | "agent:write" | "decision:read" | "audit:read" | "owner:callback" | "calls:reconcile" | "*";
@@ -116,6 +117,7 @@ export function createControlPlaneHttpServer(controlPlane: ControlPlane, options
     try {
       const url = new URL(req.url ?? "/", "http://localhost");
       if (req.method === "GET" && url.pathname === "/health") return json(res, 200, { ok: true });
+      if (req.method === "GET" && url.pathname === "/connect") return html(res, 200, connectionKitHtml());
       if (req.method === "GET" && url.pathname === "/ready") {
         const readiness = options.readiness ?? {
           ready: true,

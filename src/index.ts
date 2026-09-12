@@ -11,6 +11,7 @@ export * from "./heartbeat-commit.js";
 export * from "./heartbeat-runtime.js";
 export * from "./checkpoint-runtime.js";
 export * from "./checkpoint-audit.js";
+export * from "./connect-ui.js";
 export * from "./callback-view.js";
 export * from "./escalation-view.js";
 export * from "./run-overview.js";

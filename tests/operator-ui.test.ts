@@ -84,3 +84,16 @@ test("operator console is a static privacy-safe shell with explicit causal timel
   const protectedOverview = await fetch(`${base}/v1/runs/not-a-run/overview`);
   assert.equal(protectedOverview.status, 401);
 });
+
+test("connection kit is a static browser-local onboarding surface", async () => {
+  const base = await start();
+  const page = await fetch(`${base}/connect`);
+  assert.equal(page.status, 200);
+  assert.match(page.headers.get("content-type") ?? "", /^text\/html/);
+  assert.equal(page.headers.get("cache-control"), "no-store");
+  const body = await page.text();
+  assert.match(body, /Connect your phone to your agent/);
+  assert.match(body, /CYA_OWNER_PHONE/);
+  assert.match(body, /CYA_API_TOKEN/);
+  assert.match(body, /request_owner_decision/);
+});

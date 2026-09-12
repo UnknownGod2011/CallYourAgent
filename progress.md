@@ -98,3 +98,30 @@ Live acceptance requires a valid authorized credential, an owner phone number ex
 2. Add a persistence-level conditional instruction-acknowledgement primitive if multi-worker checkpoint testing exposes a gap.
 3. Perform the documented Claude Code host acceptance when that host is available.
 4. Perform one tightly bounded live CALL-E acceptance only after the user-controlled prerequisites are available.
+
+## Live CALL-E and connection-kit update — 2026-09-12
+
+### Real CALL-E result
+
+CALL-E browser/CLI OAuth authorization was completed and verified with `calle auth status --json`; MCP tool discovery returned `plan_call`, `run_call`, and `get_call_run`. A real authorized CALL-E plan was created for the owner's provided test number and then started once. CALL-E run `xlKqea9vM_oDvUb00viB8Q` accepted the request, created provider call `7123d4167f644dc5a4a5dea30f2773a4`, rang, connected, and reached voicemail for 33 seconds. Its terminal result was `COMPLETED` with `task_completed=false`: no human response and no valid blue/green owner decision were captured.
+
+This verifies live authentication, plan creation, one real dial attempt, provider execution, lifecycle tracking, and a durable structured terminal result. It does not verify the human-answer-to-persisted-decision-to-branch-resume path. CALL-E suggested an explicit retry choice; no retry was started automatically.
+
+### Product direction and changes
+
+Confirmed the product boundary: CallYourAgent is a reusable human-control connector for agent hosts, not a generic calling bot. The agent MCP/SDK persists an owner decision against a scoped run branch and keeps unrelated work active; the owner callback path turns progress questions and steering into a durable instruction queue consumed at safe checkpoints.
+
+Added `GET /connect`, a privacy-preserving Connection Kit. It is a browser-local setup surface that does not submit or store phone numbers or tokens. It generates the exact live deployment environment, least-privilege MCP configuration for Codex, Claude Code, or generic stdio MCP hosts, an owner-console URL, and the checkpoint operating instruction for the connected agent. It reinforces the correct split: only the server receives CALL-E credentials; the agent receives only its scoped token; the browser owner surface receives only the owner token.
+
+### Verification
+
+- Bundled Node `24.19.0`: typecheck and build — PASS.
+- Bundled Node `24.19.0`: Connection Kit and operator-console tests — PASS, `3/3`.
+- `git diff --check` — PASS.
+
+### Next actions
+
+1. Run the full Node 24 test suite after committing the Connection Kit.
+2. Deploy a public HTTPS instance, then use `/connect` to generate the real agent-host configuration.
+3. Complete a live answered-call test during an available window and verify its structured decision is persisted and releases only its blocked scope.
+4. Extend the Connection Kit into authenticated hosted multi-tenant onboarding; the current production reference deployment remains one owner phone per self-hosted instance.
