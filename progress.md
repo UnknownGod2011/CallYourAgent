@@ -299,3 +299,16 @@ Verification:
 ### Follow-up container audit
 
 The first corrected Container/Compose run narrowed the remaining build failure to a missing Docker build input: `tsconfig.legacy.json` was not copied into the legacy image build stage. The Dockerfile now copies both TypeScript configurations before `npm run legacy:build`. This is a source-only Docker context correction; the local Docker engine remains unavailable, so the new GitHub Container and Compose runs are the authoritative verification.
+
+### Second follow-up container audit
+
+The next Container run found one more Docker build-context omission: the legacy compiler includes `tests/**/*.ts`, including the hosted onboarding contract test that imports `lib/connection-setup.ts`. The Docker build stage now copies `lib/` alongside `src/` and `tests/`, so the declared combined test inventory compiles consistently inside the image.
+
+Verification after the correction:
+
+- `npm run typecheck` — PASS.
+- Node 24.19 `tsc -p tsconfig.legacy.json` — PASS.
+- Node 24.19 hosted connection-contract test — PASS, `2/2`.
+- `git diff --check` — PASS.
+
+Docker Desktop remains stopped locally; GitHub Container and Compose checks remain the authoritative image/runtime verification.
