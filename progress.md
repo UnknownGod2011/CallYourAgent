@@ -312,3 +312,13 @@ Verification after the correction:
 - `git diff --check` — PASS.
 
 Docker Desktop remains stopped locally; GitHub Container and Compose checks remain the authoritative image/runtime verification.
+
+## Final CI evidence — 2026-09-12
+
+The corrected self-hosted reference pipeline was independently verified on GitHub at commit `7e00fb3a3e8e2acbb660955f5fa62fceaec6234b`:
+
+- CI: success — TypeScript, full Node 24 test suite, and Next build.
+- Container: success — production legacy image builds and starts its fake-provider runtime health check.
+- Compose deployment: success — scoped credential generation, image build, fake-provider orchestration, restart recovery, MCP deployment acceptance, owner-decision branch release, owner callback, durable instruction queue, exact acknowledgement, and cleanup.
+
+The previous Container/Compose failures are resolved. Docker Desktop was unavailable locally, but the GitHub runner supplied the authoritative Linux Docker/Compose evidence. The hosted Vercel auth redirect correction remains deployed at `https://callyouragent.vercel.app`; the only missing end-user evidence is a human opening a fresh confirmation email, because the previous email link was irreversibly generated with the old localhost setting.
