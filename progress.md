@@ -160,3 +160,9 @@ The current documented CALL-E CLI/API integration surface accepts a task, recipi
 2. Implement and test a provider adapter backed by a verified/branded caller-ID route before further live delivery experiments.
 3. Build remote Streamable HTTP MCP plus OAuth and tenant-scoped onboarding, then package/publish the hosted ChatGPT/ChatGPT Work plugin.
 4. Run real-host acceptance for Codex, Claude Code, Gemini CLI, and Kiro using the generated configurations.
+
+## Hosted onboarding site increment — 2026-09-12
+
+Added a standalone responsive Vercel marketing/onboarding surface in `site/index.html` and `vercel.json`. It explains the real branch-safe phone-control flow, shows the local agent-host configurations for Codex, ChatGPT desktop, Claude Code, Gemini CLI, and Kiro, and explicitly keeps hosted ChatGPT/ChatGPT Work marked as pending remote MCP/OAuth work. The site deliberately does not collect phone numbers, credentials, or falsely claim that a static Vercel page alone provides a durable phone-control backend.
+
+Vercel CLI authentication was verified for the account owner. The first Vercel build attempt revealed that the directory-derived project name contains uppercase letters, which Vercel rejects. The deployment must use a lowercase project slug such as `callyouragent`; this is a deployment naming correction, not an application failure.
