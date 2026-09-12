@@ -232,3 +232,30 @@ Vercel production environment now contains the Supabase public URL and publishab
 
 - Final deployment `callyouragent-6e3uw265g-tanush-shahs-projects-5e868e6e.vercel.app` is Ready and the stable `https://callyouragent.vercel.app` alias resolves to it.
 - Production smoke checks: `/connect` returned 200 and contains the technical setup content; `/dashboard` returned the expected 307 redirect to login for an unauthenticated browser; `/icon.svg` returned 200; `POST /mcp` `initialize` returned 200 with a valid MCP protocol response.
+
+## Production authentication redirect correction — 2026-09-12
+
+### Defect found and fixed
+
+A real external signup exposed a production release defect: Supabase Auth still had its default Site URL, `http://localhost:3000`, and no allowed production callback. Confirmation emails therefore sent users to localhost rather than the deployed application.
+
+The CallYourAgent Supabase project's Auth URL configuration has now been changed and visibly saved as:
+
+- Site URL: `https://callyouragent.vercel.app`
+- Allowed Redirect URL: `https://callyouragent.vercel.app/auth/callback`
+
+The web application already supplies that exact callback with `emailRedirectTo`; the redirect is now accepted by Supabase. The `/auth/callback` route has also been hardened: it sends a user to `/dashboard` only after `exchangeCodeForSession` succeeds. Missing, invalid, expired, or failed codes instead return to `/login?confirmation=failed` with a clear recovery message. It no longer gives an apparent authenticated success after a failed confirmation exchange.
+
+### Verification
+
+- `npm run typecheck` — PASS.
+- Node 24.19: legacy TypeScript compilation and full deterministic control-plane suite — PASS, `235/235`.
+- Node 24.19: `next build` — PASS after correcting a build-time `useSearchParams` suspense violation discovered during the first build attempt.
+- `git diff --check` — PASS.
+- Supabase dashboard visibly confirmed the saved production Site URL and callback allow-list.
+
+The repository does not define an `npm run lint` script or a configured lint command; this is recorded rather than misreported as a passed lint check.
+
+### Remaining proof
+
+A fresh confirmation email must be opened by the account holder to provide the final human-email proof of the new redirect. The existing localhost email cannot be repaired; it was already generated with the old URL. Create the account again (or request a new confirmation email) after the production deployment containing this callback hardening. No user email was sent by the audit process.

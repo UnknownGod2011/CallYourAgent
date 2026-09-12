@@ -3,8 +3,16 @@ import { useState } from "react";
 import { useRouter } from "next/navigation";
 import { createClient } from "@/lib/supabase/client";
 
-export function AuthForm({ mode }: { mode: "login" | "signup" }) {
-  const router = useRouter(); const [message, setMessage] = useState<string>(); const [loading, setLoading] = useState(false);
+export function AuthForm({
+  mode,
+  initialMessage,
+}: {
+  mode: "login" | "signup";
+  initialMessage?: string;
+}) {
+  const router = useRouter();
+  const [message, setMessage] = useState<string | undefined>(initialMessage);
+  const [loading, setLoading] = useState(false);
   const [email, setEmail] = useState(""); const [password, setPassword] = useState(""); const [name, setName] = useState("");
   async function submit(event: React.FormEvent) {
     event.preventDefault(); setLoading(true); setMessage(undefined); const supabase = createClient();
