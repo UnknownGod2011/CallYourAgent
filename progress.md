@@ -6,28 +6,28 @@ CallYourAgent is a durable Node 24 TypeScript control plane for asynchronous two
 
 ## Exact repo state inspected this run
 
-Started from `main` at commit `4e1028822187427ed6e32038eb9eeb512bb24d5a`. Before changes, inspected the full repository tree and current source/test inventory, recent commits, `AGENTS.md`, this file, `README.md`, all architecture/integration/deployment/security/policy/acceptance documents under `docs/` plus `deploy/README.md`, and relevant issue/PR search results. No open issue or pull request required a different priority. The audit confirmed that `ControlPlaneStore.updateRunIfCurrent(...)` and the heartbeat CAS seam are covered, while `ControlPlane.heartbeat(...)` still performs a direct run replacement.
+Started from `main` at commit `4e1028822187427ed6e32038eb9eeb512bb24d5a`. Before changes, inspected the full repository tree and current source/test inventory, recent commits, `AGENTS.md`, this file, `README.md`, all architecture/integration/deployment/security/policy/acceptance documents under `docs/` plus `deploy/README.md`, and relevant issue/PR search results. No open issue or pull request required a different priority. The audit confirmed that `ControlPlaneStore.updateRunIfCurrent(...)` and the heartbeat CAS seam are covered, while the main `ControlPlane.heartbeat(...)` method still performs a direct run replacement.
 
 ## Changes made this run
 
-Added `src/instruction-consume.ts` with a safe-checkpoint consumption seam that:
+Added `src/heartbeat-runtime.ts` with a runtime-facing adapter seam that:
 
-- consumes an instruction only while its durable status is still `queued`;
-- returns `consumed: false` plus the durable winner for stale/replayed consumers;
-- writes an explicit `consumedAt` timestamp;
-- returns an isolated snapshot so callers cannot mutate canonical store state through the result;
-- is intentionally composable inside the store transaction boundary for future audit publication.
+- commits heartbeat updates through the existing CAS primitive using the caller's `updatedAt` token;
+- returns the durable winner on stale writes;
+- exposes an audit payload only when the caller won the mutation;
+- keeps the caller-provided run snapshot immutable.
 
-Added `tests/instruction-consume.test.ts` covering one-time consumption, snapshot isolation, and replay behavior.
+Exported the new runtime seam from `src/index.ts` and added `tests/heartbeat-runtime.test.ts` covering committed-writer audit visibility, stale-writer convergence, and caller snapshot immutability.
 
-This increment does not yet route `ControlPlane.checkpoint(..., consume=true)` through the helper; that remains the next integration step so instruction status changes and audit publication can be made conditional on a committed consumer.
+This increment intentionally leaves the existing `ControlPlane.heartbeat(...)` body unchanged until the direct replacement is migrated in one coherent control-plane patch; the new runtime seam is the compatibility boundary for that next change.
 
 ## Verification performed
 
 - Full repository tree and architecture/integration docs inspected before changes.
 - Recent commits and issue/PR search inspected; no relevant open issue or PR.
-- Added `src/instruction-consume.ts` in commit `1caa431a26cb143322dd4f029d080fa5cb036028`.
-- Added `tests/instruction-consume.test.ts` in commit `352f9421d80ad98c2c68aa7a7e4e59e08798383c`.
+- Added `src/heartbeat-runtime.ts` in commit `0a8c4b879604798f646a7f319845017603e66a1c`.
+- Exported it from `src/index.ts` in commit `b2eb8f6b0f9d5ef280d71691bef5567e2e9342d9`.
+- Added `tests/heartbeat-runtime.test.ts` in commit `c437716161e0e6daf7c70676f249ef69b8f75c16`.
 - Updated this progress record after the code changes.
 - The connector does not expose a local clone/runtime, so fresh test/typecheck/build execution was not available during this run and is not claimed.
 - Previous authoritative baseline remains: CI passed on Node `24.20.0` with `212/212` tests, container verification succeeded, and the full Compose fake-provider/MCP/restart acceptance succeeded.
@@ -36,10 +36,10 @@ No live CALL-E phone call was attempted or claimed.
 
 ## Architecture decisions made this run
 
-1. Treat instruction consumption as a conditional durable mutation, not an in-memory acknowledgement.
-2. Make safe-checkpoint consumers receive the durable winner when a replay races a prior consumer.
-3. Preserve audit publication as a caller concern until the helper is integrated into `ControlPlane.checkpoint`.
-4. Preserve branch-scoped blocking, callback semantics, and no-mid-generation-interruption behavior unchanged.
+1. Keep the CAS mutation and audit eligibility together at the runtime seam, so stale writers cannot accidentally publish progress.
+2. Treat the adapter's input run as an immutable optimistic-concurrency snapshot.
+3. Preserve branch-scoped blocking, callback semantics, and no-mid-generation-interruption behavior unchanged.
+4. Delay the main `ControlPlane.heartbeat(...)` migration until it can be updated atomically with focused integration coverage.
 
 ## CALL-E integration status
 
@@ -55,7 +55,7 @@ A genuine Claude Code host acceptance still requires a real Claude Code environm
 
 ## Highest-value next actions
 
-1. Wire `ControlPlane.heartbeat` through `commitHeartbeat(...)` and use `heartbeatAuditPayload(...)` so stale writers return the authoritative winner and emit no progress event.
+1. Wire `ControlPlane.heartbeat` through `applyHeartbeatAtRuntime(...)` (or an equivalent single transaction path) and publish `run_status_reported` only when the CAS write wins.
 2. Route `ControlPlane.checkpoint(..., consume=true)` through `consumeInstructionIfQueued(...)` and make `owner_instruction_consumed` audit conditional on the winning consumer.
 3. Extend heartbeat integration coverage with stale-writer rejection, audit suppression, newer-terminal-state preservation, and rollback cases.
 4. Add an exact instruction acknowledgement conditional primitive at the persistence boundary for multi-worker SQLite parity.
