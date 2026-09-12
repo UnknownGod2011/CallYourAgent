@@ -1,0 +1,10 @@
+# Deployment configuration must come from Vercel Environment Variables. Never
+# upload local credentials as source files, even for build-time loading.
+.env
+.env.*
+!.env.example
+.next
+dist
+node_modules
+test-output.txt
+tsconfig.tsbuildinfo
