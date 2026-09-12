@@ -189,3 +189,7 @@ The production Vercel project was created as `callyouragent`, built successfully
 ### Remaining external prerequisite
 
 The Supabase connector was unavailable after the local implementation session, and the Supabase CLI has no authenticated access token on this host. The remote-agent migration is therefore committed but not yet applied to the CallYourAgent database. Core web authentication, agent management, and manual real calls use existing tables; remote MCP connection creation and dashboard-to-agent update delivery activate immediately after this migration is applied. Do not describe remote MCP as externally ready until that database migration is confirmed.
+
+### Production deployment
+
+Vercel production environment now contains the Supabase public URL and publishable key, the existing server-only `CALLE_API_KEY`, `CALLE_BASE_URL`, and the production site URL. The hosted Next.js build deployed successfully as Vercel deployment `callyouragent-qcgtiu4ks-tanush-shahs-projects-5e868e6e.vercel.app` and is Ready. The production domain alias remains managed by the existing `callyouragent` Vercel project.

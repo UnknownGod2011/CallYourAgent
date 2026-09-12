@@ -5,3 +5,6 @@ dist/
 !.env.example
 coverage/
 .vercel
+.next/
+test-output.txt
+tsconfig.tsbuildinfo
