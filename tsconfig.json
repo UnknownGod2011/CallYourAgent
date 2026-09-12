@@ -36,7 +36,7 @@
     "components/**/*.ts",
     "components/**/*.tsx",
     "lib/**/*.ts",
-    "middleware.ts",
+    "proxy.ts",
     ".next/dev/types/**/*.ts"
   ],
   "exclude": [

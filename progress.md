@@ -199,3 +199,31 @@ Vercel production environment now contains the Supabase public URL and publishab
 - Added the public `/connect` route. It has host-specific setup prompts for Codex, ChatGPT desktop, Claude Code, Gemini CLI, and Kiro, each with a one-click clipboard control.
 - Added a connection-screen copy control for the agent operating instruction, alongside the private agent-specific MCP configuration.
 - Verified typecheck and production build. Vercel production deployment `callyouragent-47rgfgon6-tanush-shahs-projects-5e868e6e.vercel.app` is Ready and the stable project alias points to the latest production deployment.
+
+## Release audit and remote-connection activation — 2026-09-12
+
+### Audit fixes
+
+- Corrected the Vercel project framework/output configuration earlier in this run so the production alias serves the Next.js application rather than the retired static `site/` content. Removed `site/index.html` from the repository to prevent that stale surface from reappearing in a future misconfiguration.
+- Added `.vercelignore` in the prior release increment so local `.env` files are excluded from Vercel uploads. Verified the subsequent deployment did not report uploading an env file.
+- Added `app/icon.svg` in the prior release increment, resolving the public favicon 404 observed during browser smoke testing.
+- Migrated the Next.js request gate from deprecated `middleware.ts`/`middleware()` to the Next 16 `proxy.ts`/`proxy()` convention.
+- Reworked public `/connect`: the page now presents technical connection steps and a ready-to-paste remote MCP JSON shape. The detailed operating prompt is intentionally copied to the clipboard only; it is not displayed as the primary setup UI.
+
+### Supabase activation
+
+- Applied `supabase/migrations/202609120001_remote_agent_connections.sql` through the SQL Editor for the dedicated CallYourAgent project. Supabase returned `Success. No rows returned`.
+- The production database now has the RLS-protected agent connection and human instruction queue required for scoped remote MCP connections. No other Supabase project was accessed or changed.
+
+### Verification
+
+- `npm run typecheck` — PASS.
+- `npm run build` — PASS (all application routes compile; no deprecated middleware warning).
+- `npm audit --omit=dev` — PASS, 0 vulnerabilities.
+- Vercel production deployment `callyouragent-n2feonb3a-tanush-shahs-projects-5e868e6e.vercel.app` — Ready and assigned to `https://callyouragent.vercel.app` before the final proxy/static-source cleanup deployment.
+
+### Remaining acceptance evidence
+
+1. Deploy the final proxy/static-source cleanup commit.
+2. Complete a signed-in Kiro connection creation and verify its remote MCP handshake with a generated scoped token.
+3. Complete one answered real CALL-E test and verify its actual provider result is persisted. Prior provider attempts did not establish a handset conversation, so delivery/voice quality must remain unclaimed until that evidence exists.
