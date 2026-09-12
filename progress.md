@@ -193,3 +193,9 @@ The Supabase connector was unavailable after the local implementation session, a
 ### Production deployment
 
 Vercel production environment now contains the Supabase public URL and publishable key, the existing server-only `CALLE_API_KEY`, `CALLE_BASE_URL`, and the production site URL. The hosted Next.js build deployed successfully as Vercel deployment `callyouragent-qcgtiu4ks-tanush-shahs-projects-5e868e6e.vercel.app` and is Ready. The production domain alias remains managed by the existing `callyouragent` Vercel project.
+
+## Public setup prompt kit — 2026-09-12
+
+- Added the public `/connect` route. It has host-specific setup prompts for Codex, ChatGPT desktop, Claude Code, Gemini CLI, and Kiro, each with a one-click clipboard control.
+- Added a connection-screen copy control for the agent operating instruction, alongside the private agent-specific MCP configuration.
+- Verified typecheck and production build. Vercel production deployment `callyouragent-47rgfgon6-tanush-shahs-projects-5e868e6e.vercel.app` is Ready and the stable project alias points to the latest production deployment.
