@@ -1,0 +1,14 @@
+"use client";
+import { useState } from "react";
+import { Check, Copy } from "lucide-react";
+
+const hosts = ["Codex CLI / IDE", "ChatGPT desktop", "Claude Code", "Gemini CLI", "Kiro"] as const;
+type Host = typeof hosts[number];
+const steps: Record<Host, string> = {
+  "Codex CLI / IDE": "Open CallYourAgent, sign in, create an agent, and open that agent’s Connect external agent section. Create a Codex connection, copy the generated remote MCP configuration, add it through Codex MCP settings, then restart Codex.",
+  "ChatGPT desktop": "Open CallYourAgent, sign in, create an agent, and create a ChatGPT desktop connection. Copy the generated remote MCP configuration into ChatGPT desktop’s MCP server settings, then restart the desktop app.",
+  "Claude Code": "Open CallYourAgent, sign in, create an agent, and create a Claude Code connection. Copy the generated remote MCP configuration into Claude Code’s MCP settings, then reopen Claude Code.",
+  "Gemini CLI": "Open CallYourAgent, sign in, create an agent, and create a Gemini CLI connection. Copy the generated remote MCP configuration into your Gemini MCP settings, then restart Gemini CLI.",
+  Kiro: "Open CallYourAgent, sign in, create an agent, and create a Kiro connection. Copy the generated remote MCP configuration into Kiro’s MCP settings, then restart Kiro.",
+};
+export function ConnectionKit(){const[host,setHost]=useState<Host>("Kiro");const[copied,setCopied]=useState(false);const prompt=`Help me connect you to CallYourAgent for real phone calls. ${steps[host]} Once I paste the configuration, use request_phone_call only when a human decision, confirmation, or my explicit alert condition genuinely requires a call. After a call, use get_call_status. At safe checkpoints use pull_human_updates. Never ask me for a CALL-E API key and never claim that an update interrupted an in-progress response.`;async function copy(){await navigator.clipboard.writeText(prompt);setCopied(true);setTimeout(()=>setCopied(false),1800)}return <div className="kit"><aside>{hosts.map(item=><button key={item} className={host===item?"kit-host active":"kit-host"} onClick={()=>setHost(item)}>{item}</button>)}</aside><article><p className="eyebrow">{host}</p><h2>Let your AI guide the setup.</h2><p>Copy this prompt and paste it into the AI you want to connect. It guides you through the account, agent, and MCP connection steps without exposing CALL-E credentials.</p><textarea value={prompt} readOnly aria-label="AI setup prompt"/><button className="button button-primary" onClick={copy}>{copied?<><Check size={16}/>Copied</>:<><Copy size={16}/>Copy setup prompt for AI</>}</button><p className="form-hint">You still create the private agent connection inside your CallYourAgent account. The generated token is shown once and can be revoked at any time.</p></article></div>}
