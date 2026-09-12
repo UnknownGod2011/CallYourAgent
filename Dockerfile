@@ -6,7 +6,7 @@ WORKDIR /app
 COPY package.json package-lock.json ./
 RUN npm ci --no-audit --no-fund
 
-COPY tsconfig.json ./
+COPY tsconfig.json tsconfig.legacy.json ./
 COPY src ./src
 COPY tests ./tests
 RUN npm run legacy:build && npm prune --omit=dev

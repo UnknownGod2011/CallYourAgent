@@ -295,3 +295,7 @@ Verification:
 - Node 24.19 full deterministic control-plane suite — PASS, `235/235`.
 - `git diff --check` — PASS.
 - Local Docker/Compose execution could not be performed because Docker Desktop's Linux engine is stopped on this host (`//./pipe/dockerDesktopLinuxEngine` is unavailable). The corrected GitHub Container and Compose workflows are the pending independent container proof.
+
+### Follow-up container audit
+
+The first corrected Container/Compose run narrowed the remaining build failure to a missing Docker build input: `tsconfig.legacy.json` was not copied into the legacy image build stage. The Dockerfile now copies both TypeScript configurations before `npm run legacy:build`. This is a source-only Docker context correction; the local Docker engine remains unavailable, so the new GitHub Container and Compose runs are the authoritative verification.
