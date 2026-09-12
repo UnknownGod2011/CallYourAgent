@@ -88,7 +88,7 @@ Build and run the stdio adapter:
 
 ```bash
 npm install
-npm run build
+npm run legacy:build
 export CYA_BASE_URL=http://127.0.0.1:8787
 export CYA_API_TOKEN='replace-with-agent-token'
 npm run start:mcp

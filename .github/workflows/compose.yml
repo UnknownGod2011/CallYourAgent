@@ -31,7 +31,8 @@ jobs:
 
       - name: Generate scoped deployment credentials
         run: |
-          credential_json="$(npm run --silent credentials:generate)"
+          npm run legacy:build --silent
+          credential_json="$(node dist/src/generate-credentials.js)"
           agent_token="$(jq -er '.[] | select(.id == "agent") | .token' <<<"$credential_json")"
           owner_token="$(jq -er '.[] | select(.id == "owner") | .token' <<<"$credential_json")"
           operator_token="$(jq -er '.[] | select(.id == "operator-read") | .token' <<<"$credential_json")"
@@ -83,7 +84,7 @@ jobs:
           CYA_BASE_URL: http://127.0.0.1:8787
           CYA_RESTART_CONTROL_PLANE: "true"
         run: |
-          npm run build --silent
+          npm run legacy:build --silent
           node dist/tests/mcp-stdio-deployment-acceptance.js
 
       - name: Create durable run and branch-blocking owner decision

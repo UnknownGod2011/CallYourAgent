@@ -26,7 +26,7 @@ Do **not** expose `CALLE_API_KEY`, the owner phone number, the webhook capabilit
 
 ## Register the MCP server
 
-From the repository root after `npm run build`:
+From the repository root after `npm run legacy:build`:
 
 ```bash
 claude mcp add callyouragent -- node dist/src/mcp-server.js

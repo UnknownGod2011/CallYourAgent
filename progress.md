@@ -274,3 +274,24 @@ Production smoke checks after deployment:
 - authenticated-shape `POST /mcp` `initialize` — `200` with protocol version `2025-06-18`.
 
 `README.md` and new `docs/HOSTED_SAAS.md` now distinguish the actual Vercel/Supabase SaaS onboarding path from the older self-hosted Node control-plane reference. The hosted limitations are explicit: dashboard updates are delivered only at an agent safe checkpoint; a production human-answered CALL-E interaction and the legacy callback/session model are not claimed as available through the hosted MCP service.
+
+## Legacy container and Compose CI correction — 2026-09-12
+
+The fresh GitHub Actions audit found two release-blocking failures in the self-hosted reference path. The Next.js SaaS changed `npm run build` to mean `next build`, but the Dockerfile, demos, credential generator, and Compose workflow still treated it as the legacy TypeScript build. That left container images without `dist/` and made credential generation fail before Compose could start.
+
+Fixed the boundary explicitly:
+
+- Dockerfile now runs `npm run legacy:build` before assembling the legacy runtime image.
+- Legacy demos and credential generation use `legacy:build` rather than the SaaS `build` command.
+- Compose first compiles the legacy control plane and then invokes the generated credential program directly, preserving its JSON stdout for `jq` without exposing it in logs.
+- The credential generator's CLI entry-point test now resolves paths with `fileURLToPath` and `path.resolve`, so it works on Windows as well as Linux.
+- Legacy Claude/stdio documentation now tells users to run `npm run legacy:build`.
+
+Verification:
+
+- `npm run typecheck` — PASS.
+- Node 24.19 legacy compile — PASS.
+- Direct Windows credential CLI generation parses exactly four expected least-privilege roles — PASS; token values were not emitted.
+- Node 24.19 full deterministic control-plane suite — PASS, `235/235`.
+- `git diff --check` — PASS.
+- Local Docker/Compose execution could not be performed because Docker Desktop's Linux engine is stopped on this host (`//./pipe/dockerDesktopLinuxEngine` is unavailable). The corrected GitHub Container and Compose workflows are the pending independent container proof.
