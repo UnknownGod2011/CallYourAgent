@@ -125,3 +125,9 @@ Added `GET /connect`, a privacy-preserving Connection Kit. It is a browser-local
 2. Deploy a public HTTPS instance, then use `/connect` to generate the real agent-host configuration.
 3. Complete a live answered-call test during an available window and verify its structured decision is persisted and releases only its blocked scope.
 4. Extend the Connection Kit into authenticated hosted multi-tenant onboarding; the current production reference deployment remains one owner phone per self-hosted instance.
+
+## Live CALL-E retry outcome — 2026-09-12
+
+With explicit owner authorization, a second tightly scoped live CALL-E attempt was made to collect a blue-or-green UI decision and one short non-sensitive agent instruction. CALL-E created provider call `c34790c15ce9463296c383d6e17b57c3`, but the call ended immediately with no conversation, transcript, or captured response. Its terminal result was `FAILED`, `task_completed=false`, with provider evidence indicating a normal dial that was hung up by the callee at zero seconds. No decision or instruction was persisted, and no further retry was scheduled or started.
+
+The current documented CALL-E CLI/API integration surface accepts a task, recipients, result schema, metadata, and lifecycle configuration; it does not expose a supported voice, TTS-provider, or ElevenLabs voice-selection setting. Do not claim an ElevenLabs voice switch until CALL-E documents and exposes one. The test prompt was nonetheless shortened and made conversational to reduce avoidable robotic phrasing.
