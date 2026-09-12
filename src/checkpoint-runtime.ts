@@ -30,7 +30,10 @@ export function applyCheckpointAtRuntime(
     .map((escalation) => escalation.scopeId);
 
   const consumedInstructions = consume
-    ? queuedInstructions.map((instruction) => consumeInstructionIfQueued(store, instruction.id, consumedAt).instruction)
+    ? queuedInstructions.flatMap((instruction) => {
+      const result = consumeInstructionIfQueued(store, instruction.id, consumedAt);
+      return result.consumed ? [result.instruction] : [];
+    })
     : [];
 
   return {

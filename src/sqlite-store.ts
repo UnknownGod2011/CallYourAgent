@@ -216,8 +216,17 @@ export class SqliteControlPlaneStore implements ControlPlaneStore {
 
   close(): void {
     if (this.closed) return;
-    this.db.close();
-    this.closed = true;
+    try {
+      // Truncate the WAL before closing so Windows can release the database
+      // directory immediately after short-lived worker/test processes exit.
+      this.db.exec("PRAGMA wal_checkpoint(TRUNCATE)");
+    } catch {
+      // Another connection may own a read transaction. Closing still releases
+      // this store's handles and preserves the durable WAL for that connection.
+    } finally {
+      this.db.close();
+      this.closed = true;
+    }
   }
 
   private reloadAll(): void {
@@ -255,9 +264,11 @@ export class SqliteControlPlaneStore implements ControlPlaneStore {
       CREATE TABLE IF NOT EXISTS webhook_events (key TEXT PRIMARY KEY);
       CREATE TABLE IF NOT EXISTS callback_instruction_sets (key TEXT PRIMARY KEY);
       CREATE TABLE IF NOT EXISTS audit_sequence (key INTEGER PRIMARY KEY CHECK (key = 1), next_sequence INTEGER NOT NULL);
-      INSERT INTO audit_sequence(key, next_sequence)
-      SELECT 1, COALESCE(MAX(json_extract(data, '$.sequence')), 0) + 1 FROM audit_events
-      WHERE NOT EXISTS (SELECT 1 FROM audit_sequence WHERE key = 1);
+      INSERT OR IGNORE INTO audit_sequence(key, next_sequence)
+      VALUES (1, COALESCE((SELECT MAX(json_extract(data, '$.sequence')) FROM audit_events), 0) + 1);
+      CREATE UNIQUE INDEX IF NOT EXISTS call_attempt_provider_call_id_unique
+      ON call_attempts (json_extract(data, '$.providerCallId'))
+      WHERE json_extract(data, '$.providerCallId') IS NOT NULL;
     `);
   }
 }

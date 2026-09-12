@@ -1,4 +1,5 @@
-import { describe, expect, it } from "vitest";
+import assert from "node:assert/strict";
+import test from "node:test";
 import { InMemoryControlPlaneStore } from "../src/store.js";
 import { applyCheckpointAtRuntime } from "../src/checkpoint-runtime.js";
 
@@ -11,8 +12,7 @@ const run = {
   updatedAt: "2026-09-12T00:00:00.000Z",
 };
 
-describe("applyCheckpointAtRuntime", () => {
-  it("returns queued instructions and consumes them only when requested", () => {
+test("applyCheckpointAtRuntime returns queued instructions and consumes them only when requested", () => {
     const store = new InMemoryControlPlaneStore();
     store.runs.set(run.id, structuredClone(run));
     store.instructions.set("instruction-1", {
@@ -25,16 +25,19 @@ describe("applyCheckpointAtRuntime", () => {
     });
 
     const preview = applyCheckpointAtRuntime(store, run, false, "2026-09-12T00:02:00.000Z");
-    expect(preview.queuedInstructions).toHaveLength(1);
-    expect(preview.consumedInstructions).toHaveLength(0);
-    expect(store.instructions.get("instruction-1")?.status).toBe("queued");
+    assert.equal(preview.queuedInstructions.length, 1);
+    assert.equal(preview.consumedInstructions.length, 0);
+    assert.equal(store.instructions.get("instruction-1")?.status, "queued");
 
     const consumed = applyCheckpointAtRuntime(store, run, true, "2026-09-12T00:03:00.000Z");
-    expect(consumed.consumedInstructions[0]).toMatchObject({ status: "consumed", consumedAt: "2026-09-12T00:03:00.000Z" });
-    expect(store.instructions.get("instruction-1")?.status).toBe("consumed");
-  });
+    assert.deepEqual(consumed.consumedInstructions[0], {
+      id: "instruction-1", runId: run.id, text: "Use the safer rollout", source: "callback", status: "consumed",
+      createdAt: "2026-09-12T00:01:00.000Z", consumedAt: "2026-09-12T00:03:00.000Z",
+    });
+    assert.equal(store.instructions.get("instruction-1")?.status, "consumed");
+});
 
-  it("returns isolated snapshots and converges on a concurrent consumer", () => {
+test("applyCheckpointAtRuntime returns isolated snapshots and converges on a concurrent consumer", () => {
     const store = new InMemoryControlPlaneStore();
     store.runs.set(run.id, structuredClone(run));
     store.instructions.set("instruction-1", {
@@ -49,9 +52,8 @@ describe("applyCheckpointAtRuntime", () => {
     const first = applyCheckpointAtRuntime(store, run, true, "2026-09-12T00:02:00.000Z");
     const second = applyCheckpointAtRuntime(store, run, true, "2026-09-12T00:04:00.000Z");
 
-    expect(first.consumedInstructions[0].consumedAt).toBe("2026-09-12T00:02:00.000Z");
-    expect(second.consumedInstructions[0].consumedAt).toBe("2026-09-12T00:02:00.000Z");
+    assert.equal(first.consumedInstructions[0]?.consumedAt, "2026-09-12T00:02:00.000Z");
+    assert.equal(second.consumedInstructions.length, 0);
     first.consumedInstructions[0].text = "mutated outside";
-    expect(store.instructions.get("instruction-1")?.text).toBe("Keep unrelated work running");
-  });
+    assert.equal(store.instructions.get("instruction-1")?.text, "Keep unrelated work running");
 });

@@ -15,6 +15,9 @@ import type {
 } from "./domain.js";
 import { providerSafeDiagnostic, type CallProvider, type CallProviderObservation, type StartCallResult } from "./call-provider.js";
 import { CallPolicy } from "./call-policy.js";
+import { checkpointInstructionAuditPayload } from "./checkpoint-audit.js";
+import { applyCheckpointAtRuntime } from "./checkpoint-runtime.js";
+import { applyHeartbeatAtRuntime } from "./heartbeat-runtime.js";
 import type { CallTerminalOutcomeClaim, ControlPlaneStore } from "./store.js";
 
 export interface Clock {
@@ -157,15 +160,20 @@ export class ControlPlane {
     const run = this.requireRun(runId);
     if (run.status !== "running") throw new Error(`Run ${runId} is not running`);
     return this.store.transaction(() => {
-      const current = this.requireRun(runId);
-      if (current.status !== "running") throw new Error(`Run ${runId} is not running`);
-      const next = { ...current, ...update, updatedAt: this.isoNow() };
-      this.store.runs.set(runId, next);
-      this.audit("run_status_reported", "agent", "Agent reported progress", { runId, agentId: current.agentId }, {
-        currentScope: next.currentScope,
-        summaryChanged: update.summary !== undefined,
+      const now = this.isoNow();
+      const updatedAt = now > run.updatedAt
+        ? now
+        : new Date(new Date(run.updatedAt).getTime() + 1).toISOString();
+      const result = applyHeartbeatAtRuntime(this.store, run, update, updatedAt);
+      if (!result.auditPayload) return result.run;
+      this.audit("run_status_reported", "agent", "Agent reported progress", {
+        runId,
+        agentId: result.auditPayload.agentId,
+      }, {
+        currentScope: result.auditPayload.currentScope,
+        summaryChanged: result.auditPayload.summaryChanged,
       });
-      return next;
+      return result.run;
     });
   }
 
@@ -335,13 +343,26 @@ export class ControlPlane {
   }
 
   checkpoint(runId: string, consume = false): CheckpointResult {
-    const run = this.requireRun(runId);
-    const queuedInstructions = [...this.store.instructions.values()].filter((instruction) => instruction.runId === runId && instruction.status === "queued");
-    const unresolvedBlockingScopes = [...this.store.escalations.values()]
-      .filter((e) => e.runId === runId && e.blocking && (e.status === "pending" || e.status === "calling"))
-      .map((e) => e.scopeId);
-    if (consume) this.acknowledgeInstructions(runId, queuedInstructions.map((instruction) => instruction.id));
-    return { run, queuedInstructions, unresolvedBlockingScopes };
+    this.requireRun(runId);
+    return this.store.transaction(() => {
+      const run = this.requireRun(runId);
+      const result = applyCheckpointAtRuntime(this.store, run, consume, this.isoNow());
+      const auditPayload = checkpointInstructionAuditPayload(run, result.consumedInstructions);
+      if (auditPayload) {
+        for (const instruction of result.consumedInstructions) {
+          this.audit("owner_instruction_consumed", "agent", "Owner instruction acknowledged after safe-checkpoint incorporation", {
+            runId: auditPayload.runId,
+            agentId: run.agentId,
+            instructionId: instruction.id,
+          }, { source: instruction.source, explicitAcknowledgement: true });
+        }
+      }
+      return {
+        run: result.run,
+        queuedInstructions: result.queuedInstructions,
+        unresolvedBlockingScopes: result.unresolvedBlockingScopes,
+      };
+    });
   }
 
   acknowledgeInstructions(runId: string, instructionIds: string[]): OwnerInstruction[] {

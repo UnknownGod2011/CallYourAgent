@@ -62,3 +62,39 @@ A genuine Claude Code host acceptance still requires a real Claude Code environm
 7. Preserve the fake-provider acceptance path while keeping UI work secondary.
 8. Run the documented acceptance in a genuine Claude Code host when available.
 9. Perform one tightly bounded live CALL-E acceptance only after user-controlled prerequisites are available.
+
+## Latest Codex takeover record — 2026-09-12
+
+### Repository state inspected
+
+Started from clean `main` at commit `64e5615f48b3fa75bcdf0997d9dd9df7fdd89c04`. Inspected the complete repository tree; source, tests, manifests, runtime/deployment configuration, environment example, recent commits, branches, GitHub issues and pull requests; `AGENTS.md`, this file, `README.md`, and all architecture, integration, deployment, security, policy, persistence, and acceptance documents under `docs/` plus `deploy/README.md`. There are no open repository issues or PRs. Current CALL-E documentation was checked against the production adapter: authenticated `POST /v1/calls`, idempotency, status polling, webhooks, and server-side credentials align with the adapter's existing integration.
+
+### Changes made
+
+- Wired `ControlPlane.heartbeat(...)` to the CAS runtime seam. A heartbeat returns the durable winner and writes `run_status_reported` only when its conditional update succeeds. Timestamps advance monotonically even when two operations fall in the same millisecond.
+- Wired consuming `ControlPlane.checkpoint(...)` calls to the safe-checkpoint runtime seam and its transaction. Only instructions that win the queued-to-consumed transition receive an `owner_instruction_consumed` audit event; a losing or replayed consumer emits none.
+- Declared the existing `paused` run-state contract in the domain type, and converted two accidentally Vitest-based tests to the repository's Node built-in test runner so the advertised test command compiles without an undeclared dependency.
+- Fixed SQLite audit-sequence initialization across reopen, enforced provider-call uniqueness at the SQL layer, and checkpointed WAL before shutdown so short-lived Windows workers can clean up their state directories.
+- Added a control-plane heartbeat regression that simulates a competing CAS winner and proves the stale reporter receives the authoritative paused snapshot without a false progress audit.
+
+### Tests and checks
+
+- `npm ci` completed without vulnerabilities. The default shell Node 22 is below the project minimum and was not used for final verification.
+- Bundled Node `24.19.0`: `tsc -p tsconfig.json --noEmit` — PASS.
+- Bundled Node `24.19.0`: build — PASS.
+- Bundled Node `24.19.0`: full test suite — PASS, `230/230` tests.
+- Bundled Node `24.19.0`: deterministic fake-provider demo — PASS.
+- `git diff --check` — PASS.
+
+### CALL-E status and blockers
+
+The fake provider is deterministic, credential-free, idempotent, restart-rehydratable, and the full local acceptance path. The production adapter is implemented with server-side `CALLE_API_KEY`, idempotency, bounded create/polling, persisted correlation, webhook/poll convergence, duplicate prevention, restart recovery, and fail-closed ambiguity. No live CALL-E connectivity or phone call has been attempted or verified.
+
+Live acceptance requires a valid authorized credential, an owner phone number explicitly authorized for the test, and stable externally reachable HTTPS webhook ingress. A genuine Claude Code host acceptance also requires a Claude Code environment/CLI.
+
+### Next actions
+
+1. Add independent SQLite-worker tests for public heartbeat and consuming-checkpoint behavior, including a newer terminal/paused winner.
+2. Add a persistence-level conditional instruction-acknowledgement primitive if multi-worker checkpoint testing exposes a gap.
+3. Perform the documented Claude Code host acceptance when that host is available.
+4. Perform one tightly bounded live CALL-E acceptance only after the user-controlled prerequisites are available.

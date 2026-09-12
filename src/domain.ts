@@ -3,7 +3,7 @@ export type IsoDate = string;
 
 export type EscalationPriority = "low" | "normal" | "high" | "critical";
 export type EscalationStatus = "pending" | "calling" | "resolved" | "expired" | "failed";
-export type RunStatus = "running" | "completed" | "failed" | "canceled";
+export type RunStatus = "running" | "paused" | "completed" | "failed" | "canceled";
 export type InstructionStatus = "queued" | "consumed";
 export type PolicyDeferralReason = "below_priority_gate" | "quiet_hours" | "run_budget_exhausted" | "owner_budget_exhausted";
 export type AuditActor = "agent" | "owner" | "control_plane" | "provider";
