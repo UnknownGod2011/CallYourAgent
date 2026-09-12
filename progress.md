@@ -168,3 +168,24 @@ Added a standalone responsive Vercel marketing/onboarding surface in `site/index
 Vercel CLI authentication was verified for the account owner. The first Vercel build attempt revealed that the directory-derived project name contains uppercase letters, which Vercel rejects. The deployment must use a lowercase project slug such as `callyouragent`; this is a deployment naming correction, not an application failure.
 
 The production Vercel project was created as `callyouragent`, built successfully, and assigned the stable alias `https://callyouragent.vercel.app`. This is the public onboarding/marketing site. It is intentionally static at this stage: it does not claim to host the durable SQLite-backed control plane or receive phone webhooks. A real hosted phone-control plane still requires a persistent store plus remote MCP/OAuth backend, then the site can point each tenant’s setup directly at that service.
+
+## Hosted SaaS and remote MCP build — 2026-09-12
+
+### What changed
+
+- Replaced the static Vercel landing surface with a Next.js App Router SaaS application: Supabase email authentication, protected dashboard, agent CRUD, real CALL-E call initiation, real status/result sync, and private per-user history.
+- CALL-E remains server-side only. Browser code receives neither the CALL-E credential nor a Supabase secret/service-role key.
+- Added a remote MCP endpoint at `/mcp` with `request_phone_call`, `get_call_status`, and `pull_human_updates`. The endpoint uses an opaque, revocable per-agent connection token; it does not require an external user to supply a CALL-E key.
+- Added an unapplied Supabase migration at `supabase/migrations/202609120001_remote_agent_connections.sql`. It adds tenant-scoped connection records and durable human updates, plus narrowly scoped database functions needed by token-authenticated remote MCP callers.
+- Hardened the existing Supabase RLS policy execution and revoked unintended public access to the profile trigger function through the project connector earlier in this run.
+
+### Verification
+
+- `npm run typecheck` — PASS.
+- `npm run build` — PASS.
+- Local Next smoke test: `/` and `/login` return 200; `/dashboard` redirects unauthenticated users; `POST /mcp` completes MCP `initialize` with a valid JSON-RPC response.
+- Existing control-plane suite: 230 passed; three existing timeout tests were cancelled under the default local Node 22 runtime. The repository requires Node 24 for authoritative legacy-suite verification.
+
+### Remaining external prerequisite
+
+The Supabase connector was unavailable after the local implementation session, and the Supabase CLI has no authenticated access token on this host. The remote-agent migration is therefore committed but not yet applied to the CallYourAgent database. Core web authentication, agent management, and manual real calls use existing tables; remote MCP connection creation and dashboard-to-agent update delivery activate immediately after this migration is applied. Do not describe remote MCP as externally ready until that database migration is confirmed.

@@ -1,0 +1,2 @@
+import { redirect } from "next/navigation"; import { AppShell } from "@/components/app-shell"; import { AgentForm } from "@/components/agent-form"; import { requireUser } from "@/lib/supabase/server";
+export default async function NewAgent(){const{user}=await requireUser();if(!user)redirect("/login");return <AppShell><section className="page-heading compact"><div><p className="eyebrow">NEW AGENT</p><h1>Create a phone agent.</h1><p>Keep its role focused. You can refine instructions later.</p></div></section><AgentForm/></AppShell>}

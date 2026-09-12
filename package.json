@@ -5,23 +5,34 @@
   "type": "module",
   "description": "Human escalation control plane for autonomous AI agents",
   "scripts": {
-    "build": "tsc -p tsconfig.json",
-    "typecheck": "tsc -p tsconfig.json --noEmit",
-    "test": "npm run build && node --test dist/tests/*.test.js",
-    "check": "npm run typecheck && npm test",
+    "build": "next build",
+    "typecheck": "tsc --noEmit",
+    "test": "npm run test:control-plane",
+    "check": "npm run typecheck && npm run test && npm run build",
     "demo": "npm run build && node dist/src/demo.js",
     "demo:operator": "npm run build && node dist/src/operator-demo.js",
     "credentials:generate": "npm run build --silent && node dist/src/generate-credentials.js",
-    "start": "node dist/src/server.js",
-    "start:mcp": "node dist/src/mcp-server.js"
+    "start": "next start",
+    "start:mcp": "node dist/src/mcp-server.js",
+    "dev": "next dev",
+    "test:control-plane": "tsc -p tsconfig.legacy.json && node --test dist/tests/*.test.js",
+    "legacy:build": "tsc -p tsconfig.legacy.json"
   },
   "dependencies": {
     "@modelcontextprotocol/server": "^2.0.0",
+    "@supabase/ssr": "^0.12.7",
+    "@supabase/supabase-js": "^2.116.0",
+    "lucide-react": "^1.45.0",
+    "next": "^16.3.5",
+    "react": "^19.3.0",
+    "react-dom": "^19.3.0",
     "zod": "^4.5.4"
   },
   "devDependencies": {
     "@modelcontextprotocol/client": "^2.0.0",
     "@types/node": "^24.3.0",
+    "@types/react": "^19.3.0",
+    "@types/react-dom": "^19.3.0",
     "typescript": "^5.9.2"
   },
   "engines": {
