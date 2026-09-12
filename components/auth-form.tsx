@@ -14,6 +14,24 @@ export function AuthForm({
   const [message, setMessage] = useState<string | undefined>(initialMessage);
   const [loading, setLoading] = useState(false);
   const [email, setEmail] = useState(""); const [password, setPassword] = useState(""); const [name, setName] = useState("");
+
+  async function resendConfirmation() {
+    if (!email) {
+      setMessage("Enter the email address you used to sign up, then resend the confirmation email.");
+      return;
+    }
+
+    setLoading(true);
+    setMessage(undefined);
+    const { error } = await createClient().auth.resend({
+      type: "signup",
+      email,
+      options: { emailRedirectTo: `${window.location.origin}/auth/callback` },
+    });
+    setMessage(error ? error.message : "If this account needs confirmation, a fresh email has been sent.");
+    setLoading(false);
+  }
+
   async function submit(event: React.FormEvent) {
     event.preventDefault(); setLoading(true); setMessage(undefined); const supabase = createClient();
     if (mode === "login") {
@@ -31,5 +49,6 @@ export function AuthForm({
     <label>Password<input required minLength={6} type="password" value={password} onChange={(e) => setPassword(e.target.value)} placeholder="At least 6 characters" /></label>
     {message && <p className="form-message">{message}</p>}
     <button className="button button-primary button-wide" disabled={loading}>{loading ? "Please wait…" : mode === "login" ? "Sign in" : "Create account"}</button>
+    <button className="button button-quiet button-wide" type="button" disabled={loading} onClick={resendConfirmation}>Resend confirmation email</button>
   </form>;
 }

@@ -322,3 +322,15 @@ The corrected self-hosted reference pipeline was independently verified on GitHu
 - Compose deployment: success — scoped credential generation, image build, fake-provider orchestration, restart recovery, MCP deployment acceptance, owner-decision branch release, owner callback, durable instruction queue, exact acknowledgement, and cleanup.
 
 The previous Container/Compose failures are resolved. Docker Desktop was unavailable locally, but the GitHub runner supplied the authoritative Linux Docker/Compose evidence. The hosted Vercel auth redirect correction remains deployed at `https://callyouragent.vercel.app`; the only missing end-user evidence is a human opening a fresh confirmation email, because the previous email link was irreversibly generated with the old localhost setting.
+
+## Confirmation-email recovery — 2026-09-12
+
+Added a first-class recovery action to the hosted sign-in/sign-up form. A user can enter the email used for sign-up and choose **Resend confirmation email**; Supabase's signup resend endpoint receives the same production `emailRedirectTo` callback as new signups. This makes the prior localhost confirmation-email incident recoverable without requiring a database or admin intervention.
+
+Verification:
+
+- `npm run typecheck` — PASS.
+- Node 24.19 `next build` — PASS.
+- `git diff --check` — PASS.
+
+No confirmation email was sent during this code audit because it would deliver to the account holder's email address. The live action must be pressed by the intended account holder after deployment.
