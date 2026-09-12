@@ -6,24 +6,21 @@ CallYourAgent is a durable Node 24 TypeScript control plane for asynchronous two
 
 ## Exact repo state inspected this run
 
-Started from `main` at commit `4e1028822187427ed6e32038eb9eeb512bb24ae2f` before this run's changes. Inspected the complete repository tree and current source/test inventory, recent commits, `AGENTS.md`, this file, `README.md`, all architecture/integration/deployment/security/policy/acceptance documents under `docs/` plus `deploy/README.md`, and relevant issue/PR search results. No open issue or pull request required a different priority. The audit confirmed the main `ControlPlane.heartbeat(...)` and `ControlPlane.checkpoint(..., consume=true)` methods still use direct in-method mutations, while dedicated runtime seams exist for safe migration.
+Started from `main` at commit `4492199f1743a96f34de0bd54fc5ea529628e7c8` before this run's changes. Inspected the complete repository tree and current source/test inventory, recent commits, `AGENTS.md`, this file, `README.md`, all architecture/integration/deployment/security/policy/acceptance documents under `docs/` plus `deploy/README.md`, and relevant issue/PR search results. No open issue or pull request required a different priority. The audit confirmed the main `ControlPlane.heartbeat(...)` and `ControlPlane.checkpoint(..., consume=true)` methods still use direct in-method mutations, while dedicated runtime seams exist for safe migration.
 
 ## Changes made this run
 
-Added `src/checkpoint-runtime.ts` with a runtime-facing safe-checkpoint adapter seam that:
+Added `src/checkpoint-audit.ts` with a pure helper that builds the `owner_instruction_consumed` audit payload only from instructions that actually won the conditional transition to `consumed`.
 
-- snapshots queued instructions and unresolved blocking scopes;
-- optionally consumes queued instructions through `consumeInstructionIfQueued(...)`;
-- returns isolated snapshots;
-- preserves the explicit safe-checkpoint boundary and does not imply mid-generation interruption.
+Added `tests/checkpoint-audit.test.ts` covering empty consumption and deterministic instruction-id/count payload generation.
 
-Added `tests/checkpoint-runtime.test.ts` covering preview-vs-consume behavior, replay/concurrent-consumer convergence, and snapshot isolation. Exported the new seam from `src/index.ts`.
+Exported the helper from `src/index.ts`.
 
 Commits created this run:
 
-- `2ebfd0ca49f3ae9f6f1bb999b9fcf945faac36e6` — Add safe-checkpoint runtime integration seam
-- `378f3d416eeb1e2d4ad556b0ce1429d18fdf9572` — Test safe-checkpoint runtime integration seam
-- `26e5ed86bf974608367947e1a0549a8efc4d2221` — Export checkpoint runtime seam
+- `49c8f9ef24b27e6b34b38cbaf6a1501c22209115` — Add checkpoint instruction audit payload helper
+- `3978d49b4803e1e2a3fc48755a39c0a4676d047e` — Test checkpoint instruction audit payload helper
+- `c3cf6d343d79d62ca1189bd78576658a602c4929` — Export checkpoint audit helper
 
 ## Verification performed
 
@@ -37,9 +34,9 @@ No live CALL-E phone call was attempted or claimed.
 
 ## Architecture decisions made this run
 
-1. Keep safe-checkpoint reads and conditional instruction consumption behind a runtime seam before migrating the main control-plane method.
-2. Preserve immutable snapshots and return durable state on replay/race.
-3. Keep audit publication outside the helper so the eventual control-plane transaction can emit `owner_instruction_consumed` only for the winning consumer.
+1. Keep checkpoint state transition and audit-payload derivation separate so only the winning conditional consumer can produce `owner_instruction_consumed` details.
+2. Preserve immutable snapshots and durable replay/race semantics.
+3. Keep audit publication outside the pure helper so the eventual control-plane transaction can decide the exact event envelope.
 4. Preserve branch-scoped blocking, callback semantics, and no-mid-generation-interruption behavior unchanged.
 
 ## CALL-E integration status
@@ -57,7 +54,7 @@ A genuine Claude Code host acceptance still requires a real Claude Code environm
 ## Highest-value next actions
 
 1. Wire `ControlPlane.heartbeat` through `applyHeartbeatAtRuntime(...)` and publish `run_status_reported` only when the CAS write wins.
-2. Wire `ControlPlane.checkpoint(..., consume=true)` through `applyCheckpointAtRuntime(...)`, with conditional `owner_instruction_consumed` auditing.
+2. Wire `ControlPlane.checkpoint(..., consume=true)` through `applyCheckpointAtRuntime(...)`, with conditional `owner_instruction_consumed` auditing using `checkpointInstructionAuditPayload(...)`.
 3. Extend integration coverage with stale heartbeat rejection, newer terminal-state preservation, rollback, and multi-worker SQLite parity.
 4. Add an exact persistence-level conditional acknowledgement primitive if the SQLite implementation needs stronger parity than the in-memory seam.
 5. Audit escalation reservation/deferral/expiry, active-call progress, and ambiguous recovery for stale whole-entity writes.
