@@ -14,10 +14,14 @@ test("each supported host generates the documented remote MCP transport shape", 
   assert.equal(JSON.parse(connectionSetups.generic.config(endpoint, token)).mcpServers.callyouragent.headers.Authorization, `Bearer ${token}`);
 });
 
-test("ChatGPT web is explicitly unavailable and complete setup prompts keep checkpoint behavior", () => {
+test("ChatGPT web is explicitly unavailable and setup prompts are credential-free", () => {
   assert.equal(connectionSetups["chatgpt-web"].support, "pending");
-  const prompt = connectionPrompt("generic", endpoint, token);
-  assert.match(prompt, /pull_human_updates/);
-  assert.match(prompt, /Never ask for a CALL-E API key/);
-  assert.match(prompt, new RegExp(token));
+  for (const host of Object.keys(connectionSetups) as Array<keyof typeof connectionSetups>) {
+    const prompt = connectionPrompt(host, endpoint);
+    assert.match(prompt, /Never ask for a CALL-E API key/);
+    assert.doesNotMatch(prompt, new RegExp(token));
+    assert.doesNotMatch(prompt, /Authorization:\s*Bearer/i);
+    assert.doesNotMatch(prompt, /Private connection configuration/i);
+  }
+  assert.match(connectionPrompt("generic", endpoint), /pull_human_updates/);
 });
